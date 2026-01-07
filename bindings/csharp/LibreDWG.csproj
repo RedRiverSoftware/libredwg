@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     
     <AssemblyName>LibreDWG.Net</AssemblyName>
-    <RootNamespace>LibreDWG</RootNamespace>
+    <RootNamespace>LibreDWGInterop</RootNamespace>
     <Version>0.13.0</Version>
     <Description>C# bindings for LibreDWG - free implementation of the DWG file format</Description>
     <Authors>LibreDWG Contributors</Authors>

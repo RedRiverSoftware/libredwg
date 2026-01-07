@@ -89,7 +89,7 @@ Write-Host "  Output:    $outputDir"
 # -o: The C wrapper file
 $swigArgs = @(
     "-csharp",
-    "-namespace", "LibreDWG",
+    "-namespace", "LibreDWGInterop",
     "-dllimport", "libredwg_csharp",
     "-I`"$includeDir`"",
     "-outdir", $outputDir,

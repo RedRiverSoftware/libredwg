@@ -235,7 +235,8 @@ endif()
 
 set(libredwg_HEADERS
     include/dwg.h
-    include/dwg_api.h)
+    include/dwg_api.h
+    include/dwg_svg_api.h)
 
 if(NOT LIBREDWG_DISABLE_JSON)
   set(outjson_SOURCES
@@ -265,6 +266,7 @@ set(libredwg_SOURCES
     src/dwg.c
     src/hash.c
     src/dwg_api.c
+    src/dwg_svg_api.c
     src/dynapi.c
     src/dxfclasses.c
     src/free.c

@@ -68,6 +68,7 @@ double page_width, page_height, scale;
 
 static void output_SVG (Dwg_Data *dwg);
 
+#ifndef DWG2SVG_NO_MAIN
 static int
 usage (void)
 {
@@ -104,6 +105,7 @@ help (void)
           "<https://www.gnu.org/software/libredwg/>\n");
   return 0;
 }
+#endif /* !DWG2SVG_NO_MAIN */
 
 static double
 transform_ANGLE (double angle)
@@ -887,6 +889,7 @@ output_SVG (Dwg_Data *dwg)
   fflush (stdout);
 }
 
+#ifndef DWG2SVG_NO_MAIN
 int
 main (int argc, char *argv[])
 {
@@ -1019,3 +1022,4 @@ main (int argc, char *argv[])
     }
   return error >= DWG_ERR_CRITICAL ? 1 : 0;
 }
+#endif /* !DWG2SVG_NO_MAIN */
