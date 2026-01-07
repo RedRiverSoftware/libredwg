@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    
+    <AssemblyName>LibreDWG.Net</AssemblyName>
+    <RootNamespace>LibreDWG</RootNamespace>
+    <Version>0.13.0</Version>
+    <Description>C# bindings for LibreDWG - free implementation of the DWG file format</Description>
+    <Authors>LibreDWG Contributors</Authors>
+    <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <!-- Copy native DLLs to output (Windows) -->
+  <ItemGroup>
+    <Content Include="bin\$(Configuration)\libredwg_csharp.dll" Condition="Exists('bin\$(Configuration)\libredwg_csharp.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libredwg_csharp.dll</Link>
+    </Content>
+    <Content Include="bin\$(Configuration)\libredwg.dll" Condition="Exists('bin\$(Configuration)\libredwg.dll')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libredwg.dll</Link>
+    </Content>
+  </ItemGroup>
+
+  <!-- Copy native shared libraries to output (Linux) -->
+  <ItemGroup>
+    <Content Include="bin\linux\libredwg_csharp.so" Condition="Exists('bin\linux\libredwg_csharp.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libredwg_csharp.so</Link>
+    </Content>
+    <Content Include="bin\linux\libredwg.so" Condition="Exists('bin\linux\libredwg.so')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>libredwg.so</Link>
+    </Content>
+  </ItemGroup>
+
+</Project>

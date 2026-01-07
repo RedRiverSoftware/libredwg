@@ -1,0 +1,13 @@
+# Generated SWIG output
+generated/
+
+# Build output (Windows and Linux)
+bin/
+obj/
+
+# Copied config.h for build
+src/
+
+# Temporary build files
+*.obj
+*.o
