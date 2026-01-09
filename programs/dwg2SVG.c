@@ -791,6 +791,7 @@ output_object (Dwg_Object *obj)
       break;
     case DWG_TYPE_SEQEND:
     case DWG_TYPE_VIEWPORT:
+      num = 0; // These don't produce geometry
       break;
     default:
       num = 0;
