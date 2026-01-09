@@ -32,6 +32,12 @@
 #include <dwg_api.h>
 #include <dwg_svg_api.h>
 
+#if defined(__GNUC__)
+#  define SVG_PRINTF_ATTR __attribute__ ((format (gnu_printf, 1, 2)))
+#else
+#  define SVG_PRINTF_ATTR
+#endif
+
 /* ---------------------------------------------------------------------
  * 1) Output callback plumbing
  * --------------------------------------------------------------------- */
@@ -41,6 +47,7 @@ typedef void (*dwg_svg_write_cb)(const char *data, size_t len, void *user);
 static dwg_svg_write_cb g_svg_writer = NULL;
 static void *g_svg_writer_user = NULL;
 
+SVG_PRINTF_ATTR
 static int
 dwg_svg_printf(const char *fmt, ...)
 {

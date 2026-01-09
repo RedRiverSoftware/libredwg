@@ -66,7 +66,52 @@ Dwg_Data g_dwg;
 double model_xmin, model_ymin, model_xmax, model_ymax;
 double page_width, page_height, scale;
 
+// Extents calculation structure
+typedef struct _Extents
+{
+  double xmin, ymin, xmax, ymax;
+  int initialized;
+} Extents;
+
+static void
+extents_init (Extents *ext)
+{
+  ext->xmin = INFINITY;
+  ext->ymin = INFINITY;
+  ext->xmax = -INFINITY;
+  ext->ymax = -INFINITY;
+  ext->initialized = 0;
+}
+
+static void
+extents_add_point (Extents *ext, double x, double y)
+{
+  if (isnan (x) || isnan (y))
+    return;
+  if (x < ext->xmin)
+    ext->xmin = x;
+  if (x > ext->xmax)
+    ext->xmax = x;
+  if (y < ext->ymin)
+    ext->ymin = y;
+  if (y > ext->ymax)
+    ext->ymax = y;
+  ext->initialized = 1;
+}
+
+static void
+extents_add_circle (Extents *ext, double cx, double cy, double radius)
+{
+  if (isnan (cx) || isnan (cy) || isnan (radius))
+    return;
+  extents_add_point (ext, cx - radius, cy - radius);
+  extents_add_point (ext, cx + radius, cy + radius);
+}
+
+// Forward declarations
 static void output_SVG (Dwg_Data *dwg);
+static void compute_entity_extents (Extents *ext, Dwg_Object *obj);
+static void compute_block_extents (Extents *ext, Dwg_Object_Ref *ref);
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -830,6 +875,266 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
   return num;
 }
 
+// Compute bounding box for a single entity (no output, just extents)
+static void
+compute_entity_extents (Extents *ext, Dwg_Object *obj)
+{
+  if (!ext || !obj || obj->supertype != DWG_SUPERTYPE_ENTITY)
+    return;
+  if (entity_invisible (obj))
+    return;
+
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      {
+        Dwg_Entity_LINE *line = obj->tio.entity->tio.LINE;
+        BITCODE_3DPOINT start, end;
+        if (isnan_3BD (line->start) || isnan_3BD (line->end)
+            || isnan_3BD (line->extrusion))
+          break;
+        transform_OCS (&start, line->start, line->extrusion);
+        transform_OCS (&end, line->end, line->extrusion);
+        extents_add_point (ext, start.x, start.y);
+        extents_add_point (ext, end.x, end.y);
+      }
+      break;
+
+    case DWG_TYPE_CIRCLE:
+      {
+        Dwg_Entity_CIRCLE *circle = obj->tio.entity->tio.CIRCLE;
+        BITCODE_3DPOINT center;
+        if (isnan_3BD (circle->center) || isnan_3BD (circle->extrusion)
+            || isnan (circle->radius))
+          break;
+        transform_OCS (&center, circle->center, circle->extrusion);
+        extents_add_circle (ext, center.x, center.y, circle->radius);
+      }
+      break;
+
+    case DWG_TYPE_ARC:
+      {
+        Dwg_Entity_ARC *arc = obj->tio.entity->tio.ARC;
+        BITCODE_3DPOINT center;
+        if (isnan_3BD (arc->center) || isnan_3BD (arc->extrusion)
+            || isnan (arc->radius))
+          break;
+        transform_OCS (&center, arc->center, arc->extrusion);
+        // Conservative: use full circle bounds for arc
+        extents_add_circle (ext, center.x, center.y, arc->radius);
+      }
+      break;
+
+    case DWG_TYPE_POINT:
+      {
+        Dwg_Entity_POINT *point = obj->tio.entity->tio.POINT;
+        BITCODE_3DPOINT pt, pt1;
+        pt.x = point->x;
+        pt.y = point->y;
+        pt.z = point->z;
+        if (isnan_3BD (pt) || isnan_3BD (point->extrusion))
+          break;
+        transform_OCS (&pt1, pt, point->extrusion);
+        extents_add_point (ext, pt1.x, pt1.y);
+      }
+      break;
+
+    case DWG_TYPE_ELLIPSE:
+      {
+        Dwg_Entity_ELLIPSE *ell = obj->tio.entity->tio.ELLIPSE;
+        BITCODE_2DPOINT radius;
+        double max_r;
+        if (isnan_3BD (ell->center) || isnan_3BD (ell->sm_axis)
+            || isnan (ell->axis_ratio))
+          break;
+        radius.x = sqrt (ell->sm_axis.x * ell->sm_axis.x
+                         + ell->sm_axis.y * ell->sm_axis.y);
+        radius.y = radius.x * ell->axis_ratio;
+        // Conservative: axis-aligned bounding box of ellipse
+        max_r = radius.x > radius.y ? radius.x : radius.y;
+        extents_add_circle (ext, ell->center.x, ell->center.y, max_r);
+      }
+      break;
+
+    case DWG_TYPE_TEXT:
+      {
+        Dwg_Entity_TEXT *text = obj->tio.entity->tio.TEXT;
+        BITCODE_2DPOINT pt;
+        if (!text->text_value || isnan_2BD (text->ins_pt)
+            || isnan_3BD (text->extrusion))
+          break;
+        transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
+        extents_add_point (ext, pt.x, pt.y);
+        // Approximate text extent (height-based)
+        extents_add_point (ext, pt.x + text->height * 5, pt.y + text->height);
+      }
+      break;
+
+    case DWG_TYPE_SOLID:
+      {
+        Dwg_Entity_SOLID *sol = obj->tio.entity->tio.SOLID;
+        BITCODE_2DPOINT c1, c2, c3, c4;
+        BITCODE_2DPOINT s1, s2, s3, s4;
+        memcpy (&s1, &sol->corner1, sizeof s1);
+        memcpy (&s2, &sol->corner2, sizeof s1);
+        memcpy (&s3, &sol->corner3, sizeof s1);
+        memcpy (&s4, &sol->corner4, sizeof s1);
+        if (isnan_2BD (s1) || isnan_2BD (s2) || isnan_2BD (s3)
+            || isnan_2BD (s4))
+          break;
+        transform_OCS_2d (&c1, s1, sol->extrusion);
+        transform_OCS_2d (&c2, s2, sol->extrusion);
+        transform_OCS_2d (&c3, s3, sol->extrusion);
+        transform_OCS_2d (&c4, s4, sol->extrusion);
+        extents_add_point (ext, c1.x, c1.y);
+        extents_add_point (ext, c2.x, c2.y);
+        extents_add_point (ext, c3.x, c3.y);
+        extents_add_point (ext, c4.x, c4.y);
+      }
+      break;
+
+    case DWG_TYPE__3DFACE:
+      {
+        Dwg_Entity__3DFACE *ent = obj->tio.entity->tio._3DFACE;
+        if (isnan_3BD (ent->corner1) || isnan_3BD (ent->corner2)
+            || isnan_3BD (ent->corner3) || isnan_3BD (ent->corner4))
+          break;
+        extents_add_point (ext, ent->corner1.x, ent->corner1.y);
+        extents_add_point (ext, ent->corner2.x, ent->corner2.y);
+        extents_add_point (ext, ent->corner3.x, ent->corner3.y);
+        extents_add_point (ext, ent->corner4.x, ent->corner4.y);
+      }
+      break;
+
+    case DWG_TYPE_POLYLINE_2D:
+      {
+        int error;
+        Dwg_Entity_POLYLINE_2D *pline = obj->tio.entity->tio.POLYLINE_2D;
+        BITCODE_RL numpts = dwg_object_polyline_2d_get_numpoints (obj, &error);
+        if (numpts && !error)
+          {
+            dwg_point_2d *pts
+                = dwg_object_polyline_2d_get_points (obj, &error);
+            if (!error && pts)
+              {
+                BITCODE_RL j;
+                for (j = 0; j < numpts; j++)
+                  {
+                    BITCODE_2DPOINT ptin, pt;
+                    ptin.x = pts[j].x;
+                    ptin.y = pts[j].y;
+                    if (isnan_2BD (ptin))
+                      continue;
+                    transform_OCS_2d (&pt, ptin, pline->extrusion);
+                    extents_add_point (ext, pt.x, pt.y);
+                  }
+                free (pts);
+              }
+          }
+      }
+      break;
+
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        int error;
+        Dwg_Entity_LWPOLYLINE *pline = obj->tio.entity->tio.LWPOLYLINE;
+        BITCODE_RL numpts = dwg_ent_lwpline_get_numpoints (pline, &error);
+        if (numpts && !error)
+          {
+            dwg_point_2d *pts = dwg_ent_lwpline_get_points (pline, &error);
+            if (!error && pts)
+              {
+                BITCODE_RL j;
+                for (j = 0; j < numpts; j++)
+                  {
+                    BITCODE_2DPOINT ptin, pt;
+                    ptin.x = pts[j].x;
+                    ptin.y = pts[j].y;
+                    if (isnan_2BD (ptin))
+                      continue;
+                    transform_OCS_2d (&pt, ptin, pline->extrusion);
+                    extents_add_point (ext, pt.x, pt.y);
+                  }
+                free (pts);
+              }
+          }
+      }
+      break;
+
+    case DWG_TYPE_INSERT:
+      {
+        Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+        BITCODE_3DPOINT ins_pt;
+        if (!insert->block_header || !insert->block_header->handleref.value)
+          break;
+        if (isnan_3BD (insert->ins_pt) || isnan_3BD (insert->extrusion)
+            || isnan_3BD (insert->scale))
+          break;
+        transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
+        // Add insertion point; block contents will be handled separately
+        extents_add_point (ext, ins_pt.x, ins_pt.y);
+      }
+      break;
+
+    default:
+      break;
+    }
+}
+
+// Compute extents for all entities in a block
+static void
+compute_block_extents (Extents *ext, Dwg_Object_Ref *ref)
+{
+  Dwg_Object *obj;
+
+  if (!ext || !ref || !ref->obj)
+    return;
+  if (ref->obj->type != DWG_TYPE_BLOCK_HEADER)
+    return;
+
+  obj = get_first_owned_entity (ref->obj);
+  while (obj)
+    {
+      compute_entity_extents (ext, obj);
+      obj = get_next_owned_entity (ref->obj, obj);
+    }
+}
+
+// Compute actual geometry extents for the drawing
+static void
+compute_modelspace_extents (Dwg_Data *dwg)
+{
+  Extents ext;
+  Dwg_Object_Ref *ref;
+
+  extents_init (&ext);
+
+  // Compute extents from paper space if available
+  if (!mspace && (ref = dwg_paper_space_ref (dwg)))
+    compute_block_extents (&ext, ref);
+
+  // Always compute model space
+  if ((ref = dwg_model_space_ref (dwg)))
+    compute_block_extents (&ext, ref);
+
+  // If we found geometry, use computed extents
+  if (ext.initialized)
+    {
+      model_xmin = ext.xmin;
+      model_ymin = ext.ymin;
+      model_xmax = ext.xmax;
+      model_ymax = ext.ymax;
+    }
+  else
+    {
+      // Fallback to header values
+      model_xmin = dwg_model_x_min (dwg);
+      model_ymin = dwg_model_y_min (dwg);
+      model_xmax = dwg_model_x_max (dwg);
+      model_ymax = dwg_model_y_max (dwg);
+    }
+}
+
 static void
 output_SVG (Dwg_Data *dwg)
 {
@@ -840,19 +1145,17 @@ output_SVG (Dwg_Data *dwg)
   Dwg_Object_BLOCK_CONTROL *block_control;
   double dx, dy;
 
-  model_xmin = dwg_model_x_min (dwg);
-  model_ymin = dwg_model_y_min (dwg);
-  model_xmax = dwg_model_x_max (dwg);
-  model_ymax = dwg_model_y_max (dwg);
+  // Compute actual geometry extents instead of using header values
+  compute_modelspace_extents (dwg);
 
   dx = model_xmax - model_xmin;
   dy = model_ymax - model_ymin;
   // double scale_x = dx / (dwg_page_x_max(dwg) - dwg_page_x_min(dwg));
   // double scale_y = dy / (dwg_page_y_max(dwg) - dwg_page_y_min(dwg));
   scale = 25.4 / 72; // pt:mm
-  if (isnan (dx))
+  if (isnan (dx) || dx <= 0.0)
     dx = 100.0;
-  if (isnan (dy))
+  if (isnan (dy) || dy <= 0.0)
     dy = 100.0;
   page_width = dx;
   page_height = dy;

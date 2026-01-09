@@ -32,6 +32,7 @@ set(LIBREDWG_SO_VERSION "0:13:0")
 execute_process(COMMAND perl -an "${CMAKE_CURRENT_SOURCE_DIR}/build-aux/get-so-version.pl"
                         "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac"
                 OUTPUT_VARIABLE LIBREDWG_SO_VERSION)
+string(STRIP "${LIBREDWG_SO_VERSION}" LIBREDWG_SO_VERSION)
 message(STATUS "LIBREDWG_SO_VERSION: ${LIBREDWG_SO_VERSION}")
 
 option(BUILD_SHARED_LIBS "shared libredwg library" ON)
