@@ -1175,7 +1175,7 @@ output_SVG (Dwg_Data *dwg)
           "   version=\"1.1\" baseProfile=\"basic\"\n"
           "   width=\"100%%\" height=\"100%%\"\n"
           "   viewBox=\"%f %f %f %f\">\n",
-          model_xmin, model_ymin, page_width, page_height);
+          0.0, 0.0, page_width, page_height);
 
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
     num = output_BLOCK_HEADER (
