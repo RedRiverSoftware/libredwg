@@ -712,44 +712,61 @@ output_3DFACE (Dwg_Object *obj)
 static void
 output_POLYLINE_2D (Dwg_Object *obj)
 {
-  int error;
+  Dwg_Data *dwg = obj->parent;
   Dwg_Entity_POLYLINE_2D *pline = obj->tio.entity->tio.POLYLINE_2D;
-  BITCODE_RL numpts;
+  BITCODE_BL i, num_owned;
+  bool first = true;
 
   if (entity_invisible (obj))
     return;
-  numpts = dwg_object_polyline_2d_get_numpoints (obj, &error);
-  if (numpts && !error)
-    {
-      BITCODE_2DPOINT pt, ptin;
-      dwg_point_2d *pts = dwg_object_polyline_2d_get_points (obj, &error);
-      BITCODE_RL j;
+  if (isnan_3BD (pline->extrusion))
+    return;
 
-      if (error || isnan_2pt (pts[0]) || isnan_3BD (pline->extrusion))
-        return;
-      ptin.x = pts[0].x;
-      ptin.y = pts[0].y;
+  // N.B. we can't use dwg_object_polyline_2d_get_[num]points, because it returns all
+  // points without flags, so we can't filter out spline frame control points 
+  num_owned = pline->num_owned;
+  if (!num_owned)
+    return;
+
+  printf ("\t<!-- polyline_2d-%d -->\n", obj->index);
+  printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+
+  for (i = 0; i < num_owned; i++)
+    {
+      Dwg_Object *vobj = dwg_ref_object (dwg, pline->vertex[i]);
+      Dwg_Entity_VERTEX_2D *vertex;
+      BITCODE_2DPOINT pt, ptin;
+
+      if (!vobj || vobj->fixedtype != DWG_TYPE_VERTEX_2D)
+        continue;
+      vertex = vobj->tio.entity->tio.VERTEX_2D;
+      if (!vertex)
+        continue;
+      // Skip spline frame control points (flag 16)
+      if (vertex->flag & 16)
+        continue;
+
+      ptin.x = vertex->point.x;
+      ptin.y = vertex->point.y;
+      if (isnan_2BD (ptin))
+        continue;
       transform_OCS_2d (&pt, ptin, pline->extrusion);
-      printf ("\t<!-- polyline_2d-%d -->\n", obj->index);
-      printf ("\t<path id=\"dwg-object-%d\" d=\"M %f,%f", obj->index,
-              transform_X (pt.x), transform_Y (pt.y));
-      // TODO curve_types, C for Bezier https://svgwg.org/specs/paths/#PathData
-      for (j = 1; j < numpts; j++)
+
+      if (first)
         {
-          ptin.x = pts[j].x;
-          ptin.y = pts[j].y;
-          if (isnan_2BD (ptin))
-            continue;
-          transform_OCS_2d (&pt, ptin, pline->extrusion);
-          // TODO bulge -> arc, widths
+          printf ("M %f,%f", transform_X (pt.x), transform_Y (pt.y));
+          first = false;
+        }
+      else
+        {
           printf (" L %f,%f", transform_X (pt.x), transform_Y (pt.y));
         }
-      if (pline->flag & 1) // closed
-        printf (" Z");
-      printf ("\"\n\t");
-      common_entity (obj->tio.entity);
-      free (pts);
     }
+
+  if (pline->flag & 1) // closed
+    printf (" Z");
+  printf ("\"\n\t");
+  common_entity (obj->tio.entity);
 }
 
 static void
