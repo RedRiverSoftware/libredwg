@@ -337,6 +337,86 @@ output_TEXT (Dwg_Object *obj)
 }
 
 static void
+output_ATTDEF (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Entity_ATTDEF *attdef = obj->tio.entity->tio.ATTDEF;
+  char *escaped;
+  const char *fontfamily;
+  double cap_height_ratio;
+  BITCODE_H style_ref = attdef->style;
+  Dwg_Object *o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
+  Dwg_Object_STYLE *style = o ? o->tio.object->tio.STYLE : NULL;
+  BITCODE_2DPOINT pt;
+  double rotation_deg;
+
+  if (!attdef->tag || entity_invisible (obj))
+    return;
+  if (isnan_2BD (attdef->ins_pt) || isnan_3BD (attdef->extrusion))
+    return;
+  if (dwg->header.version >= R_2007)
+    escaped = htmlwescape ((BITCODE_TU)attdef->tag);
+  else
+    escaped = htmlescape (attdef->tag, dwg->header.codepage);
+
+  if (style && o->fixedtype == DWG_TYPE_STYLE && style->font_file
+      && *style->font_file
+#ifdef HAVE_STRCASESTR
+      && strcasestr (style->font_file, ".ttf")
+#else
+      && (strstr (style->font_file, ".ttf")
+          || strstr (style->font_file, ".TTF"))
+#endif
+  )
+    {
+#ifdef HAVE_STRCASESTR
+      if (strcasestr (style->font_file, "Arial"))
+#else
+      if ((strstr (style->font_file, "arial"))
+          || strstr (style->font_file, "Arial"))
+#endif
+        {
+          fontfamily = "Arial";
+          cap_height_ratio = 0.716;
+        }
+      else
+        {
+          fontfamily = "Verdana";
+          cap_height_ratio = 0.727;
+        }
+    }
+  else
+    {
+      fontfamily = "Courier";
+      cap_height_ratio = 0.616;
+    }
+
+  transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
+  rotation_deg = attdef->rotation * 180.0 / M_PI;
+
+  if (fabs (rotation_deg) > 0.001)
+    {
+      printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
+              "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
+              "transform=\"rotate(%f %f %f)\">%s</text>\n",
+              obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
+              attdef->height / cap_height_ratio, entity_color (obj->tio.entity),
+              -rotation_deg, transform_X (pt.x), transform_Y (pt.y),
+              escaped ? escaped : "");
+    }
+  else
+    {
+      printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
+              "font-family=\"%s\" font-size=\"%f\" fill=\"%s\">%s</text>\n",
+              obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
+              attdef->height / cap_height_ratio, entity_color (obj->tio.entity),
+              escaped ? escaped : "");
+    }
+  if (escaped)
+    free (escaped);
+}
+
+static void
 output_LINE (Dwg_Object *obj)
 {
   Dwg_Entity_LINE *line = obj->tio.entity->tio.LINE;
@@ -954,6 +1034,9 @@ output_object (Dwg_Object *obj)
     case DWG_TYPE_TEXT:
       output_TEXT (obj);
       break;
+    case DWG_TYPE_ATTDEF:
+      output_ATTDEF (obj);
+      break;
     case DWG_TYPE_ARC:
       output_ARC (obj);
       break;
@@ -1163,6 +1246,20 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
         extents_add_point (ext, pt.x, pt.y);
         // Approximate text extent (height-based)
         extents_add_point (ext, pt.x + text->height * 5, pt.y + text->height);
+      }
+      break;
+
+    case DWG_TYPE_ATTDEF:
+      {
+        Dwg_Entity_ATTDEF *attdef = obj->tio.entity->tio.ATTDEF;
+        BITCODE_2DPOINT pt;
+        if (!attdef->tag || isnan_2BD (attdef->ins_pt)
+            || isnan_3BD (attdef->extrusion))
+          break;
+        transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
+        extents_add_point (ext, pt.x, pt.y);
+        // Approximate text extent (height-based)
+        extents_add_point (ext, pt.x + attdef->height * 5, pt.y + attdef->height);
       }
       break;
 
