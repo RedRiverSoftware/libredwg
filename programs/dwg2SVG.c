@@ -19,7 +19,7 @@
  * modified by Reini Urban
  *
  * TODO: all entities: 3DSOLID, SHAPE, ARC_DIMENSION, ATTRIB, DIMENSION*,
- *         *SURFACE, GEOPOSITIONMARKER/CAMERA/LIGHT, HATCH, HELIX,
+ *         *SURFACE, GEOPOSITIONMARKER/CAMERA/LIGHT, HELIX,
  *         IMAGE/WIPEOUT/UNDERLAY, LEADER, MESH, MINSERT, MLINE, MTEXT,
  * MULTILEADER, OLE2FRAME, OLEFRAME, POLYLINE_3D, POLYLINE_MESH,
  * POLYLINE_PFACE, RAY, XLINE, SPLINE, TABLE, TOLERANCE, VIEWPORT?
@@ -279,6 +279,7 @@ output_TEXT (Dwg_Object *obj)
   Dwg_Entity_TEXT *text = obj->tio.entity->tio.TEXT;
   char *escaped;
   const char *fontfamily;
+  double cap_height_ratio;
   BITCODE_H style_ref = text->style;
   Dwg_Object *o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
   Dwg_Object_STYLE *style = o ? o->tio.object->tio.STYLE : NULL;
@@ -311,18 +312,25 @@ output_TEXT (Dwg_Object *obj)
 #endif
         {
           fontfamily = "Arial";
+          cap_height_ratio = 0.716;
         }
       else
-        fontfamily = "Verdana";
+        {
+          fontfamily = "Verdana";
+          cap_height_ratio = 0.727;
+        }
     }
   else
-    fontfamily = "Courier";
+    {
+      fontfamily = "Courier";
+      cap_height_ratio = 0.616;
+    }
 
   transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
   printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
           "font-family=\"%s\" font-size=\"%f\" fill=\"%s\">%s</text>\n",
           obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
-          text->height /* fontsize */, entity_color (obj->tio.entity),
+          text->height / cap_height_ratio, entity_color (obj->tio.entity),
           escaped ? escaped : "");
   if (escaped)
     free (escaped);
@@ -707,6 +715,190 @@ output_LWPOLYLINE (Dwg_Object *obj)
     }
 }
 
+static void
+output_HATCH (Dwg_Object *obj)
+{
+  Dwg_Entity_HATCH *hatch = obj->tio.entity->tio.HATCH;
+  BITCODE_BL i, j;
+  char *fill_color;
+  double lweight;
+
+  if (entity_invisible (obj))
+    return;
+  if (!hatch->num_paths)
+    return;
+
+  fill_color = entity_color (obj->tio.entity);
+  lweight = entity_lweight (obj->tio.entity);
+
+  printf ("\t<!-- hatch-%d -->\n", obj->index);
+
+  for (i = 0; i < hatch->num_paths; i++)
+    {
+      Dwg_HATCH_Path *path = &hatch->paths[i];
+      int is_polyline = path->flag & 2;
+
+      printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
+
+      if (is_polyline && path->polyline_paths)
+        {
+          for (j = 0; j < path->num_segs_or_paths; j++)
+            {
+              Dwg_HATCH_PolylinePath *pp = &path->polyline_paths[j];
+              double x = pp->point.x;
+              double y = pp->point.y;
+              if (isnan (x) || isnan (y))
+                continue;
+              if (j == 0)
+                printf ("M %f,%f", transform_X (x), transform_Y (y));
+              else
+                printf (" L %f,%f", transform_X (x), transform_Y (y));
+            }
+          if (path->closed)
+            printf (" Z");
+        }
+      else if (path->segs)
+        {
+          int first_point = 1;
+          for (j = 0; j < path->num_segs_or_paths; j++)
+            {
+              Dwg_HATCH_PathSeg *seg = &path->segs[j];
+              switch (seg->curve_type)
+                {
+                case 1: // LINE
+                  {
+                    double x1 = seg->first_endpoint.x;
+                    double y1 = seg->first_endpoint.y;
+                    double x2 = seg->second_endpoint.x;
+                    double y2 = seg->second_endpoint.y;
+                    if (isnan (x1) || isnan (y1) || isnan (x2) || isnan (y2))
+                      continue;
+                    if (first_point)
+                      {
+                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                        first_point = 0;
+                      }
+                    printf (" L %f,%f", transform_X (x2), transform_Y (y2));
+                  }
+                  break;
+                case 2: // CIRCULAR ARC
+                  {
+                    double cx = seg->center.x;
+                    double cy = seg->center.y;
+                    double r = seg->radius;
+                    double sa = seg->start_angle;
+                    double ea = seg->end_angle;
+                    double x1, y1, x2, y2;
+                    int large_arc, sweep;
+                    if (isnan (cx) || isnan (cy) || isnan (r) || isnan (sa)
+                        || isnan (ea))
+                      continue;
+                    x1 = cx + r * cos (sa);
+                    y1 = cy + r * sin (sa);
+                    x2 = cx + r * cos (ea);
+                    y2 = cy + r * sin (ea);
+                    large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
+                    sweep = seg->is_ccw ? 1 : 0;
+                    if (first_point)
+                      {
+                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                        first_point = 0;
+                      }
+                    printf (" A %f,%f 0 %d,%d %f,%f", r, r, large_arc, sweep,
+                            transform_X (x2), transform_Y (y2));
+                  }
+                  break;
+                case 3: // ELLIPTICAL ARC
+                  {
+                    double cx = seg->center.x;
+                    double cy = seg->center.y;
+                    double rx = sqrt (seg->endpoint.x * seg->endpoint.x
+                                      + seg->endpoint.y * seg->endpoint.y);
+                    double ry = rx * seg->minor_major_ratio;
+                    double rot = atan2 (seg->endpoint.y, seg->endpoint.x)
+                                 * 180.0 / M_PI;
+                    double sa = seg->start_angle;
+                    double ea = seg->end_angle;
+                    double x1, y1, x2, y2;
+                    int large_arc, sweep;
+                    if (isnan (cx) || isnan (cy) || isnan (rx) || isnan (ry)
+                        || isnan (sa) || isnan (ea))
+                      continue;
+                    x1 = cx + rx * cos (sa);
+                    y1 = cy + ry * sin (sa);
+                    x2 = cx + rx * cos (ea);
+                    y2 = cy + ry * sin (ea);
+                    large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
+                    sweep = seg->is_ccw ? 1 : 0;
+                    if (first_point)
+                      {
+                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                        first_point = 0;
+                      }
+                    printf (" A %f,%f %f %d,%d %f,%f", rx, ry, rot, large_arc,
+                            sweep, transform_X (x2), transform_Y (y2));
+                  }
+                  break;
+                case 4: // SPLINE - approximate with polyline through control points
+                  {
+                    BITCODE_BL k;
+                    if (seg->num_control_points && seg->control_points)
+                      {
+                        for (k = 0; k < seg->num_control_points; k++)
+                          {
+                            double x = seg->control_points[k].point.x;
+                            double y = seg->control_points[k].point.y;
+                            if (isnan (x) || isnan (y))
+                              continue;
+                            if (first_point)
+                              {
+                                printf ("M %f,%f", transform_X (x),
+                                        transform_Y (y));
+                                first_point = 0;
+                              }
+                            else
+                              printf (" L %f,%f", transform_X (x),
+                                      transform_Y (y));
+                          }
+                      }
+                    else if (seg->num_fitpts && seg->fitpts)
+                      {
+                        for (k = 0; k < seg->num_fitpts; k++)
+                          {
+                            double x = seg->fitpts[k].x;
+                            double y = seg->fitpts[k].y;
+                            if (isnan (x) || isnan (y))
+                              continue;
+                            if (first_point)
+                              {
+                                printf ("M %f,%f", transform_X (x),
+                                        transform_Y (y));
+                                first_point = 0;
+                              }
+                            else
+                              printf (" L %f,%f", transform_X (x),
+                                      transform_Y (y));
+                          }
+                      }
+                  }
+                  break;
+                default:
+                  break;
+                }
+            }
+        }
+      if (hatch->is_solid_fill)
+        printf ("\"\n\t      style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
+                fill_color);
+      else
+        printf ("\"\n\t      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
+                fill_color, lweight);
+    }
+
+  if (*fill_color == '#')
+    free (fill_color);
+}
+
 // TODO: MINSERT
 static void
 output_INSERT (Dwg_Object *obj)
@@ -788,6 +980,9 @@ output_object (Dwg_Object *obj)
       break;
     case DWG_TYPE_XLINE:
       output_XLINE (obj);
+      break;
+    case DWG_TYPE_HATCH:
+      output_HATCH (obj);
       break;
     case DWG_TYPE_SEQEND:
     case DWG_TYPE_VIEWPORT:
@@ -1074,6 +1269,95 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
         transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
         // Add insertion point; block contents will be handled separately
         extents_add_point (ext, ins_pt.x, ins_pt.y);
+      }
+      break;
+
+    case DWG_TYPE_HATCH:
+      {
+        Dwg_Entity_HATCH *hatch = obj->tio.entity->tio.HATCH;
+        BITCODE_BL i, j;
+        if (!hatch->num_paths)
+          break;
+        for (i = 0; i < hatch->num_paths; i++)
+          {
+            Dwg_HATCH_Path *path = &hatch->paths[i];
+            int is_polyline = path->flag & 2;
+            if (is_polyline && path->polyline_paths)
+              {
+                for (j = 0; j < path->num_segs_or_paths; j++)
+                  {
+                    double x = path->polyline_paths[j].point.x;
+                    double y = path->polyline_paths[j].point.y;
+                    if (!isnan (x) && !isnan (y))
+                      extents_add_point (ext, x, y);
+                  }
+              }
+            else if (path->segs)
+              {
+                for (j = 0; j < path->num_segs_or_paths; j++)
+                  {
+                    Dwg_HATCH_PathSeg *seg = &path->segs[j];
+                    switch (seg->curve_type)
+                      {
+                      case 1: // LINE
+                        if (!isnan (seg->first_endpoint.x)
+                            && !isnan (seg->first_endpoint.y))
+                          extents_add_point (ext, seg->first_endpoint.x,
+                                             seg->first_endpoint.y);
+                        if (!isnan (seg->second_endpoint.x)
+                            && !isnan (seg->second_endpoint.y))
+                          extents_add_point (ext, seg->second_endpoint.x,
+                                             seg->second_endpoint.y);
+                        break;
+                      case 2: // CIRCULAR ARC
+                        if (!isnan (seg->center.x) && !isnan (seg->center.y)
+                            && !isnan (seg->radius))
+                          extents_add_circle (ext, seg->center.x, seg->center.y,
+                                              seg->radius);
+                        break;
+                      case 3: // ELLIPTICAL ARC
+                        {
+                          double rx = sqrt (seg->endpoint.x * seg->endpoint.x
+                                            + seg->endpoint.y * seg->endpoint.y);
+                          double ry = rx * seg->minor_major_ratio;
+                          double max_r = rx > ry ? rx : ry;
+                          if (!isnan (seg->center.x) && !isnan (seg->center.y)
+                              && !isnan (max_r))
+                            extents_add_circle (ext, seg->center.x,
+                                                seg->center.y, max_r);
+                        }
+                        break;
+                      case 4: // SPLINE
+                        {
+                          BITCODE_BL k;
+                          if (seg->num_control_points && seg->control_points)
+                            {
+                              for (k = 0; k < seg->num_control_points; k++)
+                                {
+                                  double x = seg->control_points[k].point.x;
+                                  double y = seg->control_points[k].point.y;
+                                  if (!isnan (x) && !isnan (y))
+                                    extents_add_point (ext, x, y);
+                                }
+                            }
+                          if (seg->num_fitpts && seg->fitpts)
+                            {
+                              for (k = 0; k < seg->num_fitpts; k++)
+                                {
+                                  double x = seg->fitpts[k].x;
+                                  double y = seg->fitpts[k].y;
+                                  if (!isnan (x) && !isnan (y))
+                                    extents_add_point (ext, x, y);
+                                }
+                            }
+                        }
+                        break;
+                      default:
+                        break;
+                      }
+                  }
+              }
+          }
       }
       break;
 
