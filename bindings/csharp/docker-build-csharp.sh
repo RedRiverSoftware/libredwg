@@ -33,9 +33,9 @@ gcc -shared -fPIC -O2 \
     -lredwg \
     -Wl,-rpath,'$ORIGIN'
 
-# Copy outputs
+# Copy outputs (including versioned .so files)
 cp libredwg_csharp.so /output/
-cp /nativelib/libredwg.so /output/
+cp /nativelib/libredwg.so* /output/
 
 echo "Build complete!"
 ls -la /output/

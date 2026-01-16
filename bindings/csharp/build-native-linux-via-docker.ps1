@@ -75,6 +75,7 @@ Write-Host "  Output:  $outputDir"
 $buildScript = Join-Path $scriptDir "docker-build-csharp.sh"
 
 # Run Docker
+# Use Debian Bullseye (glibc 2.31) for compatibility with dotnet/sdk:8.0 runtime
 docker run --rm `
     -v "${generatedDir}:/generated:ro" `
     -v "${includeDir}:/include:ro" `
@@ -83,8 +84,8 @@ docker run --rm `
     -v "${libDir}:/nativelib:ro" `
     -v "${outputDir}:/output" `
     -v "${buildScript}:/build.sh:ro" `
-    gcc:latest `
-    /bin/bash /build.sh
+    debian:bullseye `
+    /bin/bash -c "apt-get update && apt-get install -y build-essential && /bin/bash /build.sh"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Docker build failed" -ForegroundColor Red
