@@ -165,6 +165,9 @@ $(srcdir)/objects.c: $(srcdir)/objects.in
 	  rm -f src/objects.tmp.c
 endif
 
+# Extra dependencies: dwg_svg_api.c #includes these files
+$(builddir)/dwg_svg_api.lo: $(top_srcdir)/programs/dwg2SVG.c $(top_srcdir)/programs/escape.c
+
 .c.i:
 	$(AM_V_CC)depbase=`echo $@ | sed 's|[^/]*$$|$(DEPDIR)/&|;s|\.o$$||'`;\
 	$(COMPILE) -E -o $@ $<

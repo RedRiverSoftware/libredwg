@@ -20,7 +20,7 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libredwg_csharp.dll</Link>
     </Content>
-    <Content Include="bin\$(Configuration)\libredwg.dll" Condition="Exists('bin\$(Configuration)\libredwg.dll')">
+    <Content Include="bin\$(Configuration)\libredwg-0.dll" Condition="Exists('bin\$(Configuration)\libredwg-0.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libredwg.dll</Link>
     </Content>

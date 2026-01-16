@@ -1570,6 +1570,7 @@ output_SVG (Dwg_Data *dwg)
           "   xmlns:svg=\"http://www.w3.org/2000/svg\"\n"
           "   xmlns=\"http://www.w3.org/2000/svg\"\n"
           "   xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n"
+          "   data-gen-vers=\"2026-01-15d\"\n"
           "   version=\"1.1\" baseProfile=\"basic\"\n"
           "   width=\"100%%\" height=\"100%%\"\n"
           "   viewBox=\"%f %f %f %f\">\n",

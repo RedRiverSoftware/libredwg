@@ -8,7 +8,7 @@
 
 .NOTES
     Prerequisites:
-    - Visual Studio Build Tools with C++ workload
+    - MSYS2 with MINGW64 toolchain (same as build-windows.ps1)
     - LibreDWG already built (libredwg.dll in bin/windows/)
     - SWIG bindings generated (run generate-bindings.ps1 first)
 #>
@@ -25,13 +25,37 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $generatedDir = Join-Path $scriptDir "generated"
 $libredwgRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
 $includeDir = Join-Path $libredwgRoot "include"
-$buildSrcDir = Join-Path $libredwgRoot ".build\src"  # Contains config.h
+$buildSrcDir = Join-Path $libredwgRoot ".build-autotools\src"  # Contains config.h from autotools build
 $srcDir = Join-Path $libredwgRoot "src"
 $libDir = Join-Path (Split-Path -Parent $libredwgRoot) "bin\windows"
 $outputDir = Join-Path $scriptDir "bin\$Configuration"
 
-Write-Host "LibreDWG C# Native Wrapper Builder" -ForegroundColor Cyan
-Write-Host "===================================" -ForegroundColor Cyan
+Write-Host "LibreDWG C# Native Wrapper Builder (MINGW64)" -ForegroundColor Cyan
+Write-Host "=============================================" -ForegroundColor Cyan
+
+# Find MSYS2 installation
+$Msys2Paths = @(
+    "C:\msys64",
+    "C:\tools\msys2",
+    "$env:USERPROFILE\scoop\apps\msys2\current"
+)
+
+$Msys2Root = $null
+foreach ($path in $Msys2Paths) {
+    if (Test-Path "$path\mingw64\bin\gcc.exe") {
+        $Msys2Root = $path
+        break
+    }
+}
+
+if (-not $Msys2Root) {
+    Write-Host "ERROR: MSYS2 with MINGW64 toolchain not found." -ForegroundColor Red
+    Write-Host "Install MSYS2 and run: pacman -S mingw-w64-x86_64-toolchain" -ForegroundColor Yellow
+    exit 1
+}
+
+$Mingw64Bin = "$Msys2Root\mingw64\bin"
+Write-Host "Using MSYS2: $Msys2Root" -ForegroundColor Green
 
 # Verify prerequisites
 $wrapperFile = Join-Path $generatedDir "libredwg_wrap.c"
@@ -40,9 +64,16 @@ if (-not (Test-Path $wrapperFile)) {
     exit 1
 }
 
-$libredwgLib = Join-Path $libDir "libredwg.lib"
-if (-not (Test-Path $libredwgLib)) {
-    Write-Host "ERROR: libredwg.lib not found at $libredwgLib" -ForegroundColor Red
+$libredwgDll = Join-Path $libDir "libredwg-0.dll"
+if (-not (Test-Path $libredwgDll)) {
+    Write-Host "ERROR: libredwg-0.dll not found at $libredwgDll" -ForegroundColor Red
+    Write-Host "Build libredwg first using build-windows.ps1" -ForegroundColor Yellow
+    exit 1
+}
+
+$libredwgA = Join-Path $libDir "libredwg.a"
+if (-not (Test-Path $libredwgA)) {
+    Write-Host "ERROR: libredwg.a not found at $libredwgA" -ForegroundColor Red
     Write-Host "Build libredwg first using build-windows.ps1" -ForegroundColor Yellow
     exit 1
 }
@@ -53,49 +84,6 @@ if (-not (Test-Path $configH)) {
     Write-Host "Build libredwg first using build-windows.ps1" -ForegroundColor Yellow
     exit 1
 }
-
-# Find Visual Studio vcvars64.bat
-function Find-VCVars {
-    # Common locations to search
-    $searchPaths = @(
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Professional\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat",
-        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
-    )
-    
-    foreach ($path in $searchPaths) {
-        if (Test-Path $path) {
-            return $path
-        }
-    }
-    
-    # Try vswhere as fallback
-    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $vsWhere) {
-        $installations = & $vsWhere -all -property installationPath
-        foreach ($vsPath in $installations) {
-            $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
-            if (Test-Path $vcvars) {
-                return $vcvars
-            }
-        }
-    }
-    
-    return $null
-}
-
-$vcvarsPath = Find-VCVars
-if (-not $vcvarsPath) {
-    Write-Host "ERROR: vcvars64.bat not found. Install Visual Studio Build Tools with C++ workload." -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Using: $vcvarsPath" -ForegroundColor Green
 
 # Clean if requested
 if ($Clean -and (Test-Path $outputDir)) {
@@ -123,39 +111,51 @@ if (-not (Test-Path $localSrcDir)) {
 Copy-Item $configH $localSrcDir -Force
 Write-Host "  Config:  $localSrcDir\config.h (copied from build)"
 
-# Build using cl.exe
+# Convert paths to MSYS2 format
+function ConvertTo-MsysPath($winPath) {
+    $winPath -replace '\\', '/' -replace '^([A-Za-z]):', '/$1'
+}
+
+$wrapperFileUnix = ConvertTo-MsysPath $wrapperFile
+$includeDirUnix = ConvertTo-MsysPath $includeDir
+$srcDirUnix = ConvertTo-MsysPath $srcDir
+$buildSrcDirUnix = ConvertTo-MsysPath $buildSrcDir
+$libDirUnix = ConvertTo-MsysPath $libDir
+$outputDirUnix = ConvertTo-MsysPath $outputDir
+$scriptDirUnix = ConvertTo-MsysPath $scriptDir
+
+# Optimization flags
+$optFlags = if ($Configuration -eq "Debug") { "-g -O0" } else { "-O2" }
+
+# Build using gcc
 $buildScript = @"
-@echo off
-call "$vcvarsPath"
-cd /d "$generatedDir"
+set -e
+cd "$scriptDirUnix/generated"
 
-cl.exe /LD /MD /O2 ^
-    /I"$includeDir" ^
-    /I"$srcDir" ^
-    /I"$buildSrcDir" ^
-    "$wrapperFile" ^
-    /Fe:"$outputDir\libredwg_csharp.dll" ^
-    /link /LIBPATH:"$libDir" libredwg.lib
+gcc -shared $optFlags \
+    -I"$includeDirUnix" \
+    -I"$srcDirUnix" \
+    -I"$buildSrcDirUnix" \
+    -I"$scriptDirUnix" \
+    "$wrapperFileUnix" \
+    -L"$libDirUnix" \
+    -lredwg \
+    -o "$outputDirUnix/libredwg_csharp.dll"
 
-if errorlevel 1 exit /b 1
-
-:: Copy libredwg.dll to output
-copy "$libDir\libredwg.dll" "$outputDir\" >nul
+# Copy libredwg-0.dll and runtime dependencies to output
+cp "$libDirUnix/libredwg-0.dll" "$outputDirUnix/"
 "@
 
-$tempDir = [System.IO.Path]::GetTempPath()
-$buildScriptPath = Join-Path $tempDir ("libredwg_build_{0}.bat" -f [guid]::NewGuid().ToString("N"))
-$buildScript | Out-File -FilePath $buildScriptPath -Encoding ascii
+$env:PATH = "$Mingw64Bin;$env:PATH"
+$env:MSYSTEM = "MINGW64"
 
-try {
-    & cmd.exe /c $buildScriptPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "Build failed with exit code $LASTEXITCODE"
-    }
-} finally {
-    Remove-Item -Force $buildScriptPath -ErrorAction SilentlyContinue
-    # Clean up obj files from generated directory
-    Remove-Item -Force (Join-Path $generatedDir "*.obj") -ErrorAction SilentlyContinue
+$MsysBin = "$Msys2Root\usr\bin"
+
+Write-Host "`nRunning gcc..." -ForegroundColor Yellow
+$buildScript | & "$MsysBin\bash.exe" -l
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Build failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "`nBuild complete!" -ForegroundColor Green

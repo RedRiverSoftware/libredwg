@@ -23,6 +23,7 @@
 %{
 #include "../src/config.h"
 #include "dwg_api.h"
+#include "dwg_svg_api.h"
 %}
 
 %include "carrays.i"
@@ -57,3 +58,4 @@
 %ignore dwg_obj_generic_dwg;
 
 %include "dwg_api.h"
+%include "dwg_svg_api.h"
