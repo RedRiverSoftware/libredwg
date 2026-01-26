@@ -20,7 +20,7 @@
  *
  * TODO: all entities: 3DSOLID, SHAPE, ARC_DIMENSION, ATTRIB, DIMENSION*,
  *         *SURFACE, GEOPOSITIONMARKER/CAMERA/LIGHT, HELIX,
- *         IMAGE/WIPEOUT/UNDERLAY, LEADER, MESH, MINSERT, MLINE, MTEXT,
+ *         WIPEOUT/UNDERLAY, LEADER, MESH, MINSERT, MLINE, MTEXT,
  * MULTILEADER, OLE2FRAME, OLEFRAME, POLYLINE_3D, POLYLINE_MESH,
  * POLYLINE_PFACE, RAY, XLINE, SPLINE, TABLE, TOLERANCE, VIEWPORT?
  *       common_entity_data: ltype, ltype_scale.
@@ -42,6 +42,7 @@
 #  endif
 #endif
 #include <string.h>
+#include <ctype.h>
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>
 #endif
@@ -62,6 +63,57 @@
 
 static int opts = 0;
 static int mspace = 0; // only mspace, even when pspace is defined
+static int in_block_definition = 0; // 1 when outputting block symbol entities
+
+// Case-insensitive prefix match
+static int
+strncasecmp_prefix (const char *str, const char *prefix)
+{
+  while (*prefix)
+    {
+      if (tolower ((unsigned char)*str) != tolower ((unsigned char)*prefix))
+        return 1;
+      str++;
+      prefix++;
+    }
+  return 0;
+}
+
+// Case-insensitive substring search (portable strcasestr)
+static char *
+strcasestr_compat (const char *haystack, const char *needle)
+{
+#ifdef HAVE_STRCASESTR
+  return strcasestr (haystack, needle);
+#else
+  size_t needle_len;
+  const char *h;
+  const char *n;
+  
+  if (!haystack || !needle)
+    return NULL;
+  needle_len = strlen (needle);
+  if (needle_len == 0)
+    return (char *)haystack;
+  for (; *haystack; haystack++)
+    {
+      if (tolower ((unsigned char)*haystack) == tolower ((unsigned char)*needle))
+        {
+          h = haystack;
+          n = needle;
+          while (*h && *n && tolower ((unsigned char)*h) == tolower ((unsigned char)*n))
+            {
+              h++;
+              n++;
+            }
+          if (*n == '\0')
+            return (char *)haystack;
+        }
+    }
+  return NULL;
+#endif
+}
+static double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
 Dwg_Data g_dwg;
 double model_xmin, model_ymin, model_xmax, model_ymax;
 double page_width, page_height, scale;
@@ -161,12 +213,16 @@ transform_ANGLE (double angle)
 static double
 transform_X (double x)
 {
+  if (in_block_definition)
+    return x; // raw DWG coords, INSERT handles positioning
   return x - model_xmin;
 }
 
 static double
 transform_Y (double y)
 {
+  if (in_block_definition)
+    return y; // raw DWG coords, INSERT handles positioning and Y flip
   return page_height - (y - model_ymin);
 }
 
@@ -203,39 +259,50 @@ entity_invisible (Dwg_Object *obj)
   if (layer->fixedtype != DWG_TYPE_LAYER)
     return false;
   _obj = layer->tio.object->tio.LAYER;
-  // pre-r13 it is set if the layer color is negative
-  return _obj->off == 1 ? true : false;
+  // layer off or frozen
+  if (_obj->off || _obj->frozen)
+    return true;
+  return false;
 }
 
 static double
 entity_lweight (Dwg_Object_Entity *ent)
 {
-  // TODO: resolve BYLAYER 256, see above.
-  // stroke-width:%0.1fpx. 100th of a mm
+  // stroke-width in px. lweights are in 100th of a mm
   int lw = dxf_cvt_lweight (ent->linewt);
-  return lw < 0 ? 0.1 : (double)(lw * 0.001);
+
+  // BYLAYER (-1): look up layer's lineweight
+  if (lw == -1 && ent->layer && ent->layer->obj
+      && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+    {
+      Dwg_Object_LAYER *layer = ent->layer->obj->tio.object->tio.LAYER;
+      lw = dxf_cvt_lweight (layer->linewt);
+    }
+
+  // Default/ByBlock/negative: use minimum visible width
+  if (lw <= 0)
+    return 0.1;
+
+  lw = (double)(lw * 0.001);
+  if (lw <= 0.1)
+    return 0.1;
+
+  return lw;
 }
 
 static char *
-entity_color (Dwg_Object_Entity *ent)
+aci_color (unsigned int index)
 {
-  // TODO: alpha?
-  if (ent->color.index >= 8 && ent->color.index < 256)
+  if (index >= 8 && index < 256)
     {
       const Dwg_RGB_Palette *palette = dwg_rgb_palette ();
-      const Dwg_RGB_Palette *rgb = &palette[ent->color.index];
+      const Dwg_RGB_Palette *rgb = &palette[index];
       char *s = (char *)malloc (8);
       sprintf (s, "#%02x%02x%02x", rgb->r, rgb->g, rgb->b);
       return s;
     }
-  else if (ent->color.flag & 0x80 && !(ent->color.flag & 0x40))
-    {
-      char *s = (char *)malloc (8);
-      sprintf (s, "#%06x", ent->color.rgb & 0x00ffffff);
-      return s;
-    }
   else
-    switch (ent->color.index)
+    switch (index)
       {
       case 1:
         return (char *)"red";
@@ -252,23 +319,171 @@ entity_color (Dwg_Object_Entity *ent)
       case 7:
         return (char *)"white";
       case 0:   // ByBlock
-      case 256: // ByLayer
       default:
         return (char *)"black";
       }
 }
 
+static char *
+cmc_color (BITCODE_CMC *color)
+{
+  if (color->index >= 1 && color->index < 256)
+    {
+      return aci_color (color->index);
+    }
+  else if (color->flag & 0x80 && !(color->flag & 0x40))
+    {
+      char *s = (char *)malloc (8);
+      sprintf (s, "#%06x", color->rgb & 0x00ffffff);
+      return s;
+    }
+  else if (color->index == 256 && (color->rgb >> 24) == 0xc3)
+    {
+      // ACI stored in low byte of rgb (layer color encoding)
+      return aci_color (color->rgb & 0xff);
+    }
+  return (char *)"black";
+}
+
+static char *
+entity_color (Dwg_Object *obj)
+{
+  Dwg_Object_Entity *ent = obj->tio.entity;
+
+  if (ent->color.index == 256) // ByLayer
+    {
+      if (ent->layer && ent->layer->obj
+          && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer = ent->layer->obj->tio.object->tio.LAYER;
+          return cmc_color (&layer->color);
+        }
+    }
+  return cmc_color (&ent->color);
+}
+
 static void
-common_entity (Dwg_Object_Entity *ent)
+common_entity (Dwg_Object *obj)
 {
   double lweight;
   char *color;
-  lweight = entity_lweight (ent);
-  color = entity_color (ent);
-  printf ("      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
+  lweight = entity_lweight (obj->tio.entity);
+  color = entity_color (obj);
+  printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
           color, lweight);
   if (*color == '#')
     free (color);
+}
+
+// Get font family and cap height ratio from a STYLE object
+static void
+get_font_info (Dwg_Object_STYLE *style, Dwg_Object *o,
+               const char **fontfamily, double *cap_height_ratio)
+{
+  if (style && o && o->fixedtype == DWG_TYPE_STYLE && style->font_file
+      && *style->font_file && strcasestr_compat (style->font_file, ".ttf"))
+    {
+      if (strcasestr_compat (style->font_file, "arial"))
+        {
+          *fontfamily = "Arial";
+          *cap_height_ratio = 0.716;
+        }
+      else if (strcasestr_compat (style->font_file, "times"))
+        {
+          *fontfamily = "Times New Roman";
+          *cap_height_ratio = 0.662;
+        }
+      // Swiss 721 Black Extended (swissek.ttf)
+      else if (strcasestr_compat (style->font_file, "swissek"))
+        {
+          *fontfamily = "Swis721 BlkEx BT, Helvetica, Arial";
+          *cap_height_ratio = 0.716;
+        }
+      // Swiss 721 (swiss.ttf)
+      else if (strcasestr_compat (style->font_file, "swiss"))
+        {
+          *fontfamily = "Swis721 BT, Helvetica, Arial";
+          *cap_height_ratio = 0.716;
+        }
+      else if (strcasestr_compat (style->font_file, "lucon"))
+        {
+          *fontfamily = "Lucida Console";
+          *cap_height_ratio = 0.692;
+        }
+      else
+        {
+          *fontfamily = "Verdana";
+          *cap_height_ratio = 0.727;
+        }
+    }
+  else
+    {
+      // SHX or missing font - use monospace
+      *fontfamily = "Courier";
+      *cap_height_ratio = 0.616;
+    }
+}
+
+// Get SVG text-anchor from horizontal alignment
+static const char *
+get_text_anchor (BITCODE_BS horiz_alignment)
+{
+  switch (horiz_alignment)
+    {
+    case 1: // Center
+    case 4: // Middle (fit)
+      return "middle";
+    case 2: // Right
+      return "end";
+    default: // Left (0), Aligned (3), Fit (5)
+      return "start";
+    }
+}
+
+// Get SVG dominant-baseline from vertical alignment
+static const char *
+get_dominant_baseline (BITCODE_BS vert_alignment)
+{
+  switch (vert_alignment)
+    {
+    case 1: // Bottom
+      return "text-after-edge";
+    case 2: // Middle
+      return "central";
+    case 3: // Top
+      return "text-before-edge";
+    default: // Baseline (0)
+      return "auto";
+    }
+}
+
+// Output a <text> SVG element with optional rotation and width scaling
+static void
+output_text_element (Dwg_Object *obj, double x, double y,
+                     const char *fontfamily, double font_size,
+                     const char *color, const char *text_anchor,
+                     const char *dominant_baseline, double rotation_deg,
+                     double width_factor, const char *escaped)
+{
+  int has_rotation = fabs (rotation_deg) > 0.001;
+  int has_scale = fabs (width_factor - 1.0) > 0.001;
+  double tx = has_scale ? x / width_factor : x;
+
+  printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
+          "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
+          "text-anchor=\"%s\" dominant-baseline=\"%s\"",
+          obj->index, tx, y, fontfamily, font_size, color,
+          text_anchor, dominant_baseline);
+
+  if (has_rotation && has_scale)
+    printf (" transform=\"rotate(%f %f %f) scale(%f 1)\"",
+            -rotation_deg, tx, y, width_factor);
+  else if (has_rotation)
+    printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, y);
+  else if (has_scale)
+    printf (" transform=\"scale(%f 1)\"", width_factor);
+
+  printf (">%s</text>\n", escaped ? escaped : "");
 }
 
 // TODO: MTEXT
@@ -284,6 +499,7 @@ output_TEXT (Dwg_Object *obj)
   Dwg_Object *o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
   Dwg_Object_STYLE *style = o ? o->tio.object->tio.STYLE : NULL;
   BITCODE_2DPOINT pt;
+  double wf;
 
   if (!text->text_value || entity_invisible (obj))
     return;
@@ -294,44 +510,26 @@ output_TEXT (Dwg_Object *obj)
   else
     escaped = htmlescape (text->text_value, dwg->header.codepage);
 
-  if (style && o->fixedtype == DWG_TYPE_STYLE && style->font_file
-      && *style->font_file
-#ifdef HAVE_STRCASESTR
-      && strcasestr (style->font_file, ".ttf")
-#else
-      && (strstr (style->font_file, ".ttf")
-          || strstr (style->font_file, ".TTF"))
-#endif
-  )
-    {
-#ifdef HAVE_STRCASESTR
-      if (strcasestr (style->font_file, "Arial"))
-#else
-      if ((strstr (style->font_file, "arial"))
-          || strstr (style->font_file, "Arial"))
-#endif
-        {
-          fontfamily = "Arial";
-          cap_height_ratio = 0.716;
-        }
-      else
-        {
-          fontfamily = "Verdana";
-          cap_height_ratio = 0.727;
-        }
-    }
-  else
-    {
-      fontfamily = "Courier";
-      cap_height_ratio = 0.616;
-    }
+  get_font_info (style, o, &fontfamily, &cap_height_ratio);
 
-  transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
-  printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
-          "font-family=\"%s\" font-size=\"%f\" fill=\"%s\">%s</text>\n",
-          obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
-          text->height / cap_height_ratio, entity_color (obj->tio.entity),
-          escaped ? escaped : "");
+  if (text->horiz_alignment != 0 || text->vert_alignment != 0)
+    transform_OCS_2d (&pt, text->alignment_pt, text->extrusion);
+  else
+    transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
+
+  wf = text->width_factor;
+  if (wf == 0.0 && style)
+    wf = style->width_factor;
+  if (wf == 0.0)
+    wf = 1.0;
+
+  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                       fontfamily, text->height / cap_height_ratio,
+                       entity_color (obj),
+                       get_text_anchor (text->horiz_alignment),
+                       get_dominant_baseline (text->vert_alignment),
+                       0.0, wf, escaped);
+
   if (escaped)
     free (escaped);
 }
@@ -348,7 +546,7 @@ output_ATTDEF (Dwg_Object *obj)
   Dwg_Object *o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
   Dwg_Object_STYLE *style = o ? o->tio.object->tio.STYLE : NULL;
   BITCODE_2DPOINT pt;
-  double rotation_deg;
+  double rotation_deg, wf;
 
   if (!attdef->tag || entity_invisible (obj))
     return;
@@ -359,59 +557,27 @@ output_ATTDEF (Dwg_Object *obj)
   else
     escaped = htmlescape (attdef->tag, dwg->header.codepage);
 
-  if (style && o->fixedtype == DWG_TYPE_STYLE && style->font_file
-      && *style->font_file
-#ifdef HAVE_STRCASESTR
-      && strcasestr (style->font_file, ".ttf")
-#else
-      && (strstr (style->font_file, ".ttf")
-          || strstr (style->font_file, ".TTF"))
-#endif
-  )
-    {
-#ifdef HAVE_STRCASESTR
-      if (strcasestr (style->font_file, "Arial"))
-#else
-      if ((strstr (style->font_file, "arial"))
-          || strstr (style->font_file, "Arial"))
-#endif
-        {
-          fontfamily = "Arial";
-          cap_height_ratio = 0.716;
-        }
-      else
-        {
-          fontfamily = "Verdana";
-          cap_height_ratio = 0.727;
-        }
-    }
-  else
-    {
-      fontfamily = "Courier";
-      cap_height_ratio = 0.616;
-    }
+  get_font_info (style, o, &fontfamily, &cap_height_ratio);
 
-  transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
+  if (attdef->horiz_alignment != 0 || attdef->vert_alignment != 0)
+    transform_OCS_2d (&pt, attdef->alignment_pt, attdef->extrusion);
+  else
+    transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
   rotation_deg = attdef->rotation * 180.0 / M_PI;
 
-  if (fabs (rotation_deg) > 0.001)
-    {
-      printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
-              "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
-              "transform=\"rotate(%f %f %f)\">%s</text>\n",
-              obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
-              attdef->height / cap_height_ratio, entity_color (obj->tio.entity),
-              -rotation_deg, transform_X (pt.x), transform_Y (pt.y),
-              escaped ? escaped : "");
-    }
-  else
-    {
-      printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
-              "font-family=\"%s\" font-size=\"%f\" fill=\"%s\">%s</text>\n",
-              obj->index, transform_X (pt.x), transform_Y (pt.y), fontfamily,
-              attdef->height / cap_height_ratio, entity_color (obj->tio.entity),
-              escaped ? escaped : "");
-    }
+  wf = attdef->width_factor;
+  if (wf == 0.0 && style)
+    wf = style->width_factor;
+  if (wf == 0.0)
+    wf = 1.0;
+
+  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                       fontfamily, attdef->height / cap_height_ratio,
+                       entity_color (obj),
+                       get_text_anchor (attdef->horiz_alignment),
+                       get_dominant_baseline (attdef->vert_alignment),
+                       rotation_deg, wf, escaped);
+
   if (escaped)
     free (escaped);
 }
@@ -431,7 +597,7 @@ output_LINE (Dwg_Object *obj)
   printf ("\t<path id=\"dwg-object-%d\" d=\"M %f,%f L %f,%f\"\n\t", obj->index,
           transform_X (start.x), transform_Y (start.y), transform_X (end.x),
           transform_Y (end.y));
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -478,7 +644,7 @@ output_XLINE (Dwg_Object *obj)
 
   printf ("\t<path id=\"dwg-object-%d\" d=\"M %f,%f L %f,%f\"\n\t", obj->index,
           txmin, tymin, txmax, tymax);
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -533,7 +699,7 @@ output_RAY (Dwg_Object *obj)
 
   printf ("\t<path id=\"dwg-object-%d\" d=\"M %f,%f L %f,%f\"\n\t", obj->index,
           point.x, point.y, txmax, tymax);
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -550,7 +716,7 @@ output_CIRCLE (Dwg_Object *obj)
   printf ("\t<circle id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" r=\"%f\"\n\t",
           obj->index, transform_X (center.x), transform_Y (center.y),
           circle->radius);
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 // CIRCLE with radius 0.1
@@ -569,7 +735,7 @@ output_POINT (Dwg_Object *obj)
   printf ("\t<!-- point-%d -->\n", obj->index);
   printf ("\t<circle id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" r=\"0.1\"\n\t",
           obj->index, transform_X (pt1.x), transform_Y (pt1.y));
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -598,7 +764,7 @@ output_ARC (Dwg_Object *obj)
       "\t<path id=\"dwg-object-%d\" d=\"M %f,%f A %f,%f 0 %d,0 %f,%f\"\n\t",
       obj->index, transform_X (x_start), transform_Y (y_start), arc->radius,
       arc->radius, large_arc, transform_X (x_end), transform_Y (y_end));
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 // FIXME
@@ -643,7 +809,7 @@ output_ELLIPSE (Dwg_Object *obj)
           obj->index, transform_X (ell->center.x), transform_Y (ell->center.y),
           radius.x, radius.y,
           transform_ANGLE (angle_dec), transform_X (ell->center.x), transform_Y (ell->center.y));
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 // untested
@@ -672,7 +838,7 @@ output_SOLID (Dwg_Object *obj)
           obj->index, transform_X (c1.x), transform_Y (c1.y),
           transform_X (c2.x), transform_Y (c2.y), transform_X (c3.x),
           transform_Y (c3.y), transform_X (c4.x), transform_Y (c4.y));
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 // untested
@@ -706,7 +872,7 @@ output_3DFACE (Dwg_Object *obj)
             obj->index, ent->corner1.x, ent->corner1.y, ent->corner2.x,
             ent->corner2.y, ent->corner3.x, ent->corner3.y, ent->corner4.x,
             ent->corner4.y);
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -766,7 +932,7 @@ output_POLYLINE_2D (Dwg_Object *obj)
   if (pline->flag & 1) // closed
     printf (" Z");
   printf ("\"\n\t");
-  common_entity (obj->tio.entity);
+  common_entity (obj);
 }
 
 static void
@@ -807,8 +973,194 @@ output_LWPOLYLINE (Dwg_Object *obj)
       if (pline->flag & 512) // closed
         printf (" Z");
       printf ("\"\n\t");
-      common_entity (obj->tio.entity);
+      common_entity (obj);
       free (pts);
+    }
+}
+
+// Output an SVG arc command for a polyline segment with bulge
+// bulge = tan(arc_angle/4), where arc_angle is the included angle
+// Positive bulge = CCW arc in DWG (Y-up), negative bulge = CW arc
+// Since SVG Y is inverted (Y-down), we flip the sweep direction
+static void
+output_bulge_arc (double x1, double y1, double x2, double y2, double bulge)
+{
+  double dx = x2 - x1;
+  double dy = y2 - y1;
+  double chord = sqrt (dx * dx + dy * dy);
+  double sagitta = fabs (bulge) * chord / 2.0;
+  double radius = (chord * chord / 4.0 + sagitta * sagitta) / (2.0 * sagitta);
+  int large_arc = fabs (bulge) > 1.0 ? 1 : 0;
+  // Positive bulge = CCW in DWG, but with Y-flip becomes CW in SVG (sweep=1)
+  int sweep = bulge > 0 ? 1 : 0;
+  printf (" A %f,%f 0 %d,%d %f,%f", radius, radius, large_arc, sweep,
+          transform_X (x2), transform_Y (y2));
+}
+
+// Output SVG path data for a single hatch path (polyline or segments)
+static void
+output_hatch_path_data (Dwg_HATCH_Path *path)
+{
+  BITCODE_BL j;
+  int is_polyline = path->flag & 2;
+
+  if (is_polyline && path->polyline_paths)
+    {
+      for (j = 0; j < path->num_segs_or_paths; j++)
+        {
+          Dwg_HATCH_PolylinePath *pp = &path->polyline_paths[j];
+          double x = pp->point.x;
+          double y = pp->point.y;
+          if (isnan (x) || isnan (y))
+            continue;
+          if (j == 0)
+            printf ("M %f,%f", transform_X (x), transform_Y (y));
+          else
+            {
+              Dwg_HATCH_PolylinePath *prev = &path->polyline_paths[j - 1];
+              if (path->bulges_present && fabs (prev->bulge) > 1e-6)
+                output_bulge_arc (prev->point.x, prev->point.y, x, y, prev->bulge);
+              else
+                printf (" L %f,%f", transform_X (x), transform_Y (y));
+            }
+        }
+      if (path->closed && path->num_segs_or_paths > 0)
+        {
+          Dwg_HATCH_PolylinePath *last = &path->polyline_paths[path->num_segs_or_paths - 1];
+          Dwg_HATCH_PolylinePath *first = &path->polyline_paths[0];
+          if (path->bulges_present && fabs (last->bulge) > 1e-6)
+            output_bulge_arc (last->point.x, last->point.y,
+                              first->point.x, first->point.y, last->bulge);
+          else
+            printf (" Z");
+        }
+    }
+  else if (path->segs)
+    {
+      int first_point = 1;
+      for (j = 0; j < path->num_segs_or_paths; j++)
+        {
+          Dwg_HATCH_PathSeg *seg = &path->segs[j];
+          switch (seg->curve_type)
+            {
+            case 1: // LINE
+              {
+                double x1 = seg->first_endpoint.x;
+                double y1 = seg->first_endpoint.y;
+                double x2 = seg->second_endpoint.x;
+                double y2 = seg->second_endpoint.y;
+                if (isnan (x1) || isnan (y1) || isnan (x2) || isnan (y2))
+                  continue;
+                if (first_point)
+                  {
+                    printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                    first_point = 0;
+                  }
+                printf (" L %f,%f", transform_X (x2), transform_Y (y2));
+              }
+              break;
+            case 2: // CIRCULAR ARC
+              {
+                double cx = seg->center.x;
+                double cy = seg->center.y;
+                double r = seg->radius;
+                double sa = seg->start_angle;
+                double ea = seg->end_angle;
+                double x1, y1, x2, y2;
+                int large_arc, sweep;
+                if (isnan (cx) || isnan (cy) || isnan (r) || isnan (sa)
+                    || isnan (ea))
+                  continue;
+                x1 = cx + r * cos (sa);
+                y1 = cy + r * sin (sa);
+                x2 = cx + r * cos (ea);
+                y2 = cy + r * sin (ea);
+                large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
+                sweep = seg->is_ccw ? 1 : 0;
+                if (first_point)
+                  {
+                    printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                    first_point = 0;
+                  }
+                printf (" A %f,%f 0 %d,%d %f,%f", r, r, large_arc, sweep,
+                        transform_X (x2), transform_Y (y2));
+              }
+              break;
+            case 3: // ELLIPTICAL ARC
+              {
+                double cx = seg->center.x;
+                double cy = seg->center.y;
+                double rx = sqrt (seg->endpoint.x * seg->endpoint.x
+                                  + seg->endpoint.y * seg->endpoint.y);
+                double ry = rx * seg->minor_major_ratio;
+                double rot = atan2 (seg->endpoint.y, seg->endpoint.x)
+                             * 180.0 / M_PI;
+                double sa = seg->start_angle;
+                double ea = seg->end_angle;
+                double x1, y1, x2, y2;
+                int large_arc, sweep;
+                if (isnan (cx) || isnan (cy) || isnan (rx) || isnan (ry)
+                    || isnan (sa) || isnan (ea))
+                  continue;
+                x1 = cx + rx * cos (sa);
+                y1 = cy + ry * sin (sa);
+                x2 = cx + rx * cos (ea);
+                y2 = cy + ry * sin (ea);
+                large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
+                sweep = seg->is_ccw ? 1 : 0;
+                if (first_point)
+                  {
+                    printf ("M %f,%f", transform_X (x1), transform_Y (y1));
+                    first_point = 0;
+                  }
+                printf (" A %f,%f %f %d,%d %f,%f", rx, ry, rot, large_arc,
+                        sweep, transform_X (x2), transform_Y (y2));
+              }
+              break;
+            case 4: // SPLINE - approximate with polyline through control points
+              {
+                BITCODE_BL k;
+                if (seg->num_control_points && seg->control_points)
+                  {
+                    for (k = 0; k < seg->num_control_points; k++)
+                      {
+                        double x = seg->control_points[k].point.x;
+                        double y = seg->control_points[k].point.y;
+                        if (isnan (x) || isnan (y))
+                          continue;
+                        if (first_point)
+                          {
+                            printf ("M %f,%f", transform_X (x), transform_Y (y));
+                            first_point = 0;
+                          }
+                        else
+                          printf (" L %f,%f", transform_X (x), transform_Y (y));
+                      }
+                  }
+                else if (seg->num_fitpts && seg->fitpts)
+                  {
+                    for (k = 0; k < seg->num_fitpts; k++)
+                      {
+                        double x = seg->fitpts[k].x;
+                        double y = seg->fitpts[k].y;
+                        if (isnan (x) || isnan (y))
+                          continue;
+                        if (first_point)
+                          {
+                            printf ("M %f,%f", transform_X (x), transform_Y (y));
+                            first_point = 0;
+                          }
+                        else
+                          printf (" L %f,%f", transform_X (x), transform_Y (y));
+                      }
+                  }
+              }
+              break;
+            default:
+              break;
+            }
+        }
+      printf (" Z");
     }
 }
 
@@ -816,7 +1168,7 @@ static void
 output_HATCH (Dwg_Object *obj)
 {
   Dwg_Entity_HATCH *hatch = obj->tio.entity->tio.HATCH;
-  BITCODE_BL i, j;
+  BITCODE_BL i;
   char *fill_color;
   double lweight;
 
@@ -825,171 +1177,32 @@ output_HATCH (Dwg_Object *obj)
   if (!hatch->num_paths)
     return;
 
-  fill_color = entity_color (obj->tio.entity);
+  fill_color = entity_color (obj);
   lweight = entity_lweight (obj->tio.entity);
 
   printf ("\t<!-- hatch-%d -->\n", obj->index);
 
-  for (i = 0; i < hatch->num_paths; i++)
+  if (hatch->is_solid_fill)
     {
-      Dwg_HATCH_Path *path = &hatch->paths[i];
-      int is_polyline = path->flag & 2;
-
-      printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
-
-      if (is_polyline && path->polyline_paths)
+      printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+      for (i = 0; i < hatch->num_paths; i++)
         {
-          for (j = 0; j < path->num_segs_or_paths; j++)
-            {
-              Dwg_HATCH_PolylinePath *pp = &path->polyline_paths[j];
-              double x = pp->point.x;
-              double y = pp->point.y;
-              if (isnan (x) || isnan (y))
-                continue;
-              if (j == 0)
-                printf ("M %f,%f", transform_X (x), transform_Y (y));
-              else
-                printf (" L %f,%f", transform_X (x), transform_Y (y));
-            }
-          if (path->closed)
-            printf (" Z");
+          output_hatch_path_data (&hatch->paths[i]);
+          if (i < hatch->num_paths - 1)
+            printf (" ");
         }
-      else if (path->segs)
+      printf ("\"\n\t      style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
+              fill_color);
+    }
+  else
+    {
+      for (i = 0; i < hatch->num_paths; i++)
         {
-          int first_point = 1;
-          for (j = 0; j < path->num_segs_or_paths; j++)
-            {
-              Dwg_HATCH_PathSeg *seg = &path->segs[j];
-              switch (seg->curve_type)
-                {
-                case 1: // LINE
-                  {
-                    double x1 = seg->first_endpoint.x;
-                    double y1 = seg->first_endpoint.y;
-                    double x2 = seg->second_endpoint.x;
-                    double y2 = seg->second_endpoint.y;
-                    if (isnan (x1) || isnan (y1) || isnan (x2) || isnan (y2))
-                      continue;
-                    if (first_point)
-                      {
-                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
-                        first_point = 0;
-                      }
-                    printf (" L %f,%f", transform_X (x2), transform_Y (y2));
-                  }
-                  break;
-                case 2: // CIRCULAR ARC
-                  {
-                    double cx = seg->center.x;
-                    double cy = seg->center.y;
-                    double r = seg->radius;
-                    double sa = seg->start_angle;
-                    double ea = seg->end_angle;
-                    double x1, y1, x2, y2;
-                    int large_arc, sweep;
-                    if (isnan (cx) || isnan (cy) || isnan (r) || isnan (sa)
-                        || isnan (ea))
-                      continue;
-                    x1 = cx + r * cos (sa);
-                    y1 = cy + r * sin (sa);
-                    x2 = cx + r * cos (ea);
-                    y2 = cy + r * sin (ea);
-                    large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
-                    sweep = seg->is_ccw ? 1 : 0;
-                    if (first_point)
-                      {
-                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
-                        first_point = 0;
-                      }
-                    printf (" A %f,%f 0 %d,%d %f,%f", r, r, large_arc, sweep,
-                            transform_X (x2), transform_Y (y2));
-                  }
-                  break;
-                case 3: // ELLIPTICAL ARC
-                  {
-                    double cx = seg->center.x;
-                    double cy = seg->center.y;
-                    double rx = sqrt (seg->endpoint.x * seg->endpoint.x
-                                      + seg->endpoint.y * seg->endpoint.y);
-                    double ry = rx * seg->minor_major_ratio;
-                    double rot = atan2 (seg->endpoint.y, seg->endpoint.x)
-                                 * 180.0 / M_PI;
-                    double sa = seg->start_angle;
-                    double ea = seg->end_angle;
-                    double x1, y1, x2, y2;
-                    int large_arc, sweep;
-                    if (isnan (cx) || isnan (cy) || isnan (rx) || isnan (ry)
-                        || isnan (sa) || isnan (ea))
-                      continue;
-                    x1 = cx + rx * cos (sa);
-                    y1 = cy + ry * sin (sa);
-                    x2 = cx + rx * cos (ea);
-                    y2 = cy + ry * sin (ea);
-                    large_arc = fabs (ea - sa) > M_PI ? 1 : 0;
-                    sweep = seg->is_ccw ? 1 : 0;
-                    if (first_point)
-                      {
-                        printf ("M %f,%f", transform_X (x1), transform_Y (y1));
-                        first_point = 0;
-                      }
-                    printf (" A %f,%f %f %d,%d %f,%f", rx, ry, rot, large_arc,
-                            sweep, transform_X (x2), transform_Y (y2));
-                  }
-                  break;
-                case 4: // SPLINE - approximate with polyline through control points
-                  {
-                    BITCODE_BL k;
-                    if (seg->num_control_points && seg->control_points)
-                      {
-                        for (k = 0; k < seg->num_control_points; k++)
-                          {
-                            double x = seg->control_points[k].point.x;
-                            double y = seg->control_points[k].point.y;
-                            if (isnan (x) || isnan (y))
-                              continue;
-                            if (first_point)
-                              {
-                                printf ("M %f,%f", transform_X (x),
-                                        transform_Y (y));
-                                first_point = 0;
-                              }
-                            else
-                              printf (" L %f,%f", transform_X (x),
-                                      transform_Y (y));
-                          }
-                      }
-                    else if (seg->num_fitpts && seg->fitpts)
-                      {
-                        for (k = 0; k < seg->num_fitpts; k++)
-                          {
-                            double x = seg->fitpts[k].x;
-                            double y = seg->fitpts[k].y;
-                            if (isnan (x) || isnan (y))
-                              continue;
-                            if (first_point)
-                              {
-                                printf ("M %f,%f", transform_X (x),
-                                        transform_Y (y));
-                                first_point = 0;
-                              }
-                            else
-                              printf (" L %f,%f", transform_X (x),
-                                      transform_Y (y));
-                          }
-                      }
-                  }
-                  break;
-                default:
-                  break;
-                }
-            }
+          printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
+          output_hatch_path_data (&hatch->paths[i]);
+          printf ("\"\n\t      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
+                  fill_color, lweight);
         }
-      if (hatch->is_solid_fill)
-        printf ("\"\n\t      style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
-                fill_color);
-      else
-        printf ("\"\n\t      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
-                fill_color, lweight);
     }
 
   if (*fill_color == '#')
@@ -1003,28 +1216,192 @@ output_INSERT (Dwg_Object *obj)
   Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
   if (entity_invisible (obj))
     return;
-  if (insert->block_header && insert->block_header->handleref.value)
+  if (insert->block_header && insert->block_header->handleref.value
+      && insert->block_header->obj)
     {
       BITCODE_3DPOINT ins_pt;
+      double rotation_deg;
+      double tx, ty;
+      Dwg_Object *blk_obj = insert->block_header->obj;
+      Dwg_Object_BLOCK_HEADER *hdr;
+
+      if (blk_obj->fixedtype != DWG_TYPE_BLOCK_HEADER)
+        return;
+      hdr = blk_obj->tio.object->tio.BLOCK_HEADER;
+
       if (isnan_3BD (insert->ins_pt) || isnan_3BD (insert->extrusion)
           || isnan (insert->rotation) || isnan_3BD (insert->scale))
         return;
       transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
+
+      // Negate rotation for SVG coordinate system (Y flipped)
+      rotation_deg = -(180.0 / M_PI) * insert->rotation;
+
+      // Symbol has geometry at raw DWG coords (x, y).
+      // We need to transform to SVG coords:
+      //   Final model X = ins_pt.x - base_pt.x + scale.x * (geom.x - base_pt.x) 
+      //   Final model Y = ins_pt.y - base_pt.y + scale.y * (geom.y - base_pt.y)
+      // But symbol stores raw geom coords, so:
+      //   Final model X = ins_pt.x - base_pt.x + scale.x * geom.x - scale.x * base_pt.x
+      //                 = ins_pt.x - base_pt.x * (1 + scale.x) + scale.x * geom.x
+      // Actually simpler: for symbols with raw coords, INSERT needs to:
+      //   1. Translate symbol so base_pt is at origin: subtract base_pt
+      //   2. Apply scale and rotation  
+      //   3. Translate to ins_pt
+      //   4. Transform to SVG coords
+      //
+      // Using matrix(a, b, c, d, e, f): (x, y) -> (ax + cy + e, bx + dy + f)
+      // We want rotation=0 case first:
+      //   X' = sx * (geom.x - base_pt.x) + ins_pt.x
+      //      = sx * geom.x + (ins_pt.x - sx * base_pt.x)
+      //   In SVG: X' - model_xmin = sx * geom.x + (ins_pt.x - sx * base_pt.x - model_xmin)
+      //
+      //   Y' = sy * (geom.y - base_pt.y) + ins_pt.y
+      //   In SVG: page_height - (Y' - model_ymin)
+      //         = page_height - sy * geom.y - ins_pt.y + sy * base_pt.y + model_ymin
+      //         = -sy * geom.y + (page_height - ins_pt.y + sy * base_pt.y + model_ymin)
+      //
+      // So matrix is: (sx, 0, 0, -sy, tx, ty) where
+      //   tx = ins_pt.x - sx * base_pt.x - model_xmin
+      //   ty = page_height - ins_pt.y + sy * base_pt.y + model_ymin
+      {
+        double sx = insert->scale.x;
+        double sy = insert->scale.y;
+        double base_x = hdr->base_pt.x;
+        double base_y = hdr->base_pt.y;
+        tx = ins_pt.x - sx * base_x - model_xmin;
+        ty = page_height - ins_pt.y + sy * base_y + model_ymin;
+      }
+
       printf ("\t<!-- insert-%d -->\n", obj->index);
-      printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
-              "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
-              "\" />"
-              "<!-- block_header->handleref: " FORMAT_H " -->\n",
-              obj->index, transform_X (ins_pt.x), transform_Y (ins_pt.y),
-              (180.0 / M_PI) * insert->rotation, insert->scale.x,
-              insert->scale.y, insert->block_header->absolute_ref,
-              ARGS_H (insert->block_header->handleref));
+      // Using matrix for precise control. For rotation=0:
+      // matrix(sx, 0, 0, -sy, tx, ty)
+      if (fabs (insert->rotation) < 0.0001)
+        {
+          printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
+                  "xlink:href=\"#symbol-" FORMAT_HV "\" />"
+                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                  obj->index, insert->scale.x, -insert->scale.y, tx, ty,
+                  insert->block_header->absolute_ref,
+                  ARGS_H (insert->block_header->handleref));
+        }
+      else
+        {
+          // With rotation, need full matrix calculation
+          // For now, use translate+rotate+scale (may need refinement)
+          printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
+                  "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
+                  "\" />"
+                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                  obj->index, tx, ty,
+                  rotation_deg, insert->scale.x, -insert->scale.y,
+                  insert->block_header->absolute_ref,
+                  ARGS_H (insert->block_header->handleref));
+        }
     }
   else
     {
       printf ("\n\n<!-- WRONG INSERT(" FORMAT_H ") -->\n",
               ARGS_H (obj->handle));
     }
+}
+
+static void
+output_IMAGE (Dwg_Object *obj)
+{
+  Dwg_Entity_IMAGE *img = obj->tio.entity->tio.IMAGE;
+  Dwg_Object_IMAGEDEF *imagedef = NULL;
+  double x, y, width, height;
+  double ux, uy, vx, vy;
+  double a, b, c, d, e, f;
+  char *file_path = NULL;
+  Dwg_Data *dwg = obj->parent;
+
+  if (entity_invisible (obj))
+    return;
+  if (isnan_3BD (img->pt0) || isnan_3BD (img->uvec) || isnan_3BD (img->vvec)
+      || isnan (img->image_size.x) || isnan (img->image_size.y))
+    return;
+
+  // Get IMAGEDEF to retrieve the file path
+  if (img->imagedef && img->imagedef->obj
+      && img->imagedef->obj->fixedtype == DWG_TYPE_IMAGEDEF)
+    {
+      imagedef = img->imagedef->obj->tio.object->tio.IMAGEDEF;
+      if (imagedef && imagedef->file_path)
+        {
+          if (dwg->header.version >= R_2007)
+            file_path = htmlwescape ((BITCODE_TU)imagedef->file_path);
+          else
+            file_path = htmlescape (imagedef->file_path, dwg->header.codepage);
+        }
+    }
+
+  // Calculate the SVG transform matrix
+  // The image is defined by:
+  //   pt0: insertion point (lower-left corner in WCS)
+  //   uvec: vector for one pixel in U direction (scaled by image width gives full width)
+  //   vvec: vector for one pixel in V direction (scaled by image height gives full height)
+  //
+  // For SVG <image>, we need to transform from image space (0,0 at top-left) to model space
+  // The transform matrix maps the image (width x height pixels) to model coordinates
+
+  width = img->image_size.x;
+  height = img->image_size.y;
+
+  // uvec and vvec are per-pixel vectors, so full size vectors are:
+  ux = img->uvec.x * width;
+  uy = img->uvec.y * width;
+  vx = img->vvec.x * height;
+  vy = img->vvec.y * height;
+
+  // SVG image origin is top-left, DWG pt0 is at bottom-left
+  // So the top-left corner in model space is: pt0 + vvec * height
+  x = img->pt0.x + vx;
+  y = img->pt0.y + vy;
+
+  // Build affine transform matrix for SVG
+  // SVG matrix(a,b,c,d,e,f) transforms as:
+  //   x' = a*x + c*y + e
+  //   y' = b*x + d*y + f
+  //
+  // We want to map image pixels (0..width, 0..height) to model coordinates
+  // In image space: u goes right (0 to width), v goes down (0 to height)
+  // In model space: u maps to uvec direction, v maps to -vvec direction (since SVG y is flipped)
+  //
+  // After transform_X/transform_Y, model coords become SVG coords
+
+  // The per-pixel vectors in model space:
+  // u_per_pixel = uvec
+  // v_per_pixel = vvec (but v in image goes down, model vvec goes up, so we negate)
+
+  // Matrix elements (before Y flip):
+  // a = uvec.x (x change per image-u)
+  // b = uvec.y (y change per image-u)
+  // c = -vvec.x (x change per image-v, negated because image-v is down)
+  // d = -vvec.y (y change per image-v, negated)
+  // e = x (x origin in model space)
+  // f = y (y origin in model space)
+
+  // Apply coordinate transformation (Y flip: y' = page_height - (y - model_ymin))
+  a = img->uvec.x;
+  b = -img->uvec.y; // Y flip
+  c = -img->vvec.x;
+  d = img->vvec.y;  // Y flip (double negative)
+  e = transform_X (x);
+  f = transform_Y (y);
+
+  printf ("\t<!-- image-%d -->\n", obj->index);
+  printf ("\t<image id=\"dwg-object-%d\" "
+          "width=\"%f\" height=\"%f\" "
+          "transform=\"matrix(%f %f %f %f %f %f)\" "
+          "xlink:href=\"%s\" "
+          "preserveAspectRatio=\"none\" />\n",
+          obj->index, width, height, a, b, c, d, e, f,
+          file_path ? file_path : "");
+
+  if (file_path)
+    free (file_path);
 }
 
 static int
@@ -1039,6 +1416,9 @@ output_object (Dwg_Object *obj)
 
   switch (obj->fixedtype)
     {
+    case DWG_TYPE_IMAGE:
+      output_IMAGE (obj);
+      break;
     case DWG_TYPE_INSERT:
       output_INSERT (obj);
       break;
@@ -1146,10 +1526,15 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
               *(s + 1) = '_';
             }
         }
-      // don't group *Model_Space
-      if (!escaped || strcmp (escaped, "*Model_Space") != 0)
+      // don't group *Model_Space or *Paper_Space (case-insensitive)
+      if (!escaped || (strcasecmp (escaped, "*Model_Space") != 0
+                       && strncasecmp_prefix (escaped, "*Paper_Space") != 0))
         {
           is_g = 1;
+          // Set block definition mode with block's base point
+          in_block_definition = 1;
+          block_base_x = hdr->base_pt.x;
+          block_base_y = hdr->base_pt.y;
           printf ("\t<g id=\"symbol-" FORMAT_HV "\" >\n\t\t<!-- %s -->\n",
                   ref->absolute_ref, escaped ? escaped : "");
         }
@@ -1167,7 +1552,10 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
     }
 
   if (is_g)
-    printf ("\t</g>\n");
+    {
+      printf ("\t</g>\n");
+      in_block_definition = 0; // restore normal mode
+    }
   return num;
 }
 
@@ -1375,14 +1763,65 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
       {
         Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
         BITCODE_3DPOINT ins_pt;
-        if (!insert->block_header || !insert->block_header->handleref.value)
+        Dwg_Object *blk_obj;
+        Dwg_Object_BLOCK_HEADER *hdr;
+        Extents block_ext;
+        double sx, sy, base_x, base_y, cos_r, sin_r;
+        double corners[4][2];
+        int i;
+
+        if (!insert->block_header || !insert->block_header->handleref.value
+            || !insert->block_header->obj)
           break;
         if (isnan_3BD (insert->ins_pt) || isnan_3BD (insert->extrusion)
-            || isnan_3BD (insert->scale))
+            || isnan_3BD (insert->scale) || isnan (insert->rotation))
           break;
+
+        blk_obj = insert->block_header->obj;
+        if (blk_obj->fixedtype != DWG_TYPE_BLOCK_HEADER)
+          break;
+        hdr = blk_obj->tio.object->tio.BLOCK_HEADER;
+
         transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
-        // Add insertion point; block contents will be handled separately
-        extents_add_point (ext, ins_pt.x, ins_pt.y);
+
+        // Compute extents of the block's geometry
+        extents_init (&block_ext);
+        compute_block_extents (&block_ext, insert->block_header);
+
+        if (!block_ext.initialized)
+          {
+            // Fallback: just add insertion point if block is empty
+            extents_add_point (ext, ins_pt.x, ins_pt.y);
+            break;
+          }
+
+        // Transform block extents by INSERT's scale, rotation, and position
+        sx = insert->scale.x;
+        sy = insert->scale.y;
+        base_x = hdr->base_pt.x;
+        base_y = hdr->base_pt.y;
+        cos_r = cos (insert->rotation);
+        sin_r = sin (insert->rotation);
+
+        // Four corners of block bounding box (relative to base point)
+        corners[0][0] = block_ext.xmin - base_x;
+        corners[0][1] = block_ext.ymin - base_y;
+        corners[1][0] = block_ext.xmax - base_x;
+        corners[1][1] = block_ext.ymin - base_y;
+        corners[2][0] = block_ext.xmax - base_x;
+        corners[2][1] = block_ext.ymax - base_y;
+        corners[3][0] = block_ext.xmin - base_x;
+        corners[3][1] = block_ext.ymax - base_y;
+
+        // Transform each corner: scale, rotate, translate to insertion point
+        for (i = 0; i < 4; i++)
+          {
+            double lx = corners[i][0] * sx;
+            double ly = corners[i][1] * sy;
+            double rx = lx * cos_r - ly * sin_r;
+            double ry = lx * sin_r + ly * cos_r;
+            extents_add_point (ext, ins_pt.x + rx, ins_pt.y + ry);
+          }
       }
       break;
 
@@ -1472,6 +1911,45 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
                   }
               }
           }
+      }
+      break;
+
+    case DWG_TYPE_IMAGE:
+      {
+        Dwg_Entity_IMAGE *img = obj->tio.entity->tio.IMAGE;
+        double width, height;
+        double ux, uy, vx, vy;
+        double x0, y0, x1, y1, x2, y2, x3, y3;
+
+        if (isnan_3BD (img->pt0) || isnan_3BD (img->uvec)
+            || isnan_3BD (img->vvec) || isnan (img->image_size.x)
+            || isnan (img->image_size.y))
+          break;
+
+        width = img->image_size.x;
+        height = img->image_size.y;
+
+        // Full size vectors
+        ux = img->uvec.x * width;
+        uy = img->uvec.y * width;
+        vx = img->vvec.x * height;
+        vy = img->vvec.y * height;
+
+        // Four corners of the image in model space
+        // pt0 is the lower-left corner
+        x0 = img->pt0.x;
+        y0 = img->pt0.y;
+        x1 = img->pt0.x + ux;
+        y1 = img->pt0.y + uy;
+        x2 = img->pt0.x + ux + vx;
+        y2 = img->pt0.y + uy + vy;
+        x3 = img->pt0.x + vx;
+        y3 = img->pt0.y + vy;
+
+        extents_add_point (ext, x0, y0);
+        extents_add_point (ext, x1, y1);
+        extents_add_point (ext, x2, y2);
+        extents_add_point (ext, x3, y3);
       }
       break;
 
@@ -1570,7 +2048,7 @@ output_SVG (Dwg_Data *dwg)
           "   xmlns:svg=\"http://www.w3.org/2000/svg\"\n"
           "   xmlns=\"http://www.w3.org/2000/svg\"\n"
           "   xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n"
-          "   data-gen-vers=\"2026-01-15d\"\n"
+          "   data-gen-vers=\"2026-01-26a\"\n"
           "   version=\"1.1\" baseProfile=\"basic\"\n"
           "   width=\"100%%\" height=\"100%%\"\n"
           "   viewBox=\"%f %f %f %f\">\n",
