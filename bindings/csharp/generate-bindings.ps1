@@ -61,6 +61,25 @@ if (-not $SwigPath) {
     exit 1
 }
 
+# WinGet installs a shortcut in Links\ that doesn't have a Lib\ directory alongside it.
+# SWIG needs SWIG_LIB set so it can find swig.swg, csharp.swg, etc.
+if (-not $env:SWIG_LIB) {
+    # First try: Lib\ next to the reported swig.exe (works for direct installs)
+    $swigLibCandidate = Join-Path (Split-Path $SwigPath) "Lib"
+    if (-not (Test-Path (Join-Path $swigLibCandidate "swig.swg"))) {
+        # Fallback: search WinGet packages for any Lib\swig.swg
+        $wingetPkgs = "$env:LOCALAPPDATA\Microsoft\WinGet\Packages"
+        $found = Get-ChildItem $wingetPkgs -Filter "swig.swg" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) { $swigLibCandidate = $found.DirectoryName }
+    }
+    if (Test-Path (Join-Path $swigLibCandidate "swig.swg")) {
+        $env:SWIG_LIB = $swigLibCandidate
+        Write-Host "  SWIG_LIB: $swigLibCandidate" -ForegroundColor Green
+    } else {
+        Write-Host "WARNING: Could not locate SWIG library files. Set SWIG_LIB manually if generation fails." -ForegroundColor Yellow
+    }
+}
+
 # Check SWIG version
 $swigVersion = & $SwigPath -version 2>&1 | Select-String "SWIG Version"
 Write-Host "Using: $swigVersion" -ForegroundColor Green

@@ -164,6 +164,9 @@ extents_add_circle (Extents *ext, double cx, double cy, double radius)
 static void output_SVG (Dwg_Data *dwg);
 static void compute_entity_extents (Extents *ext, Dwg_Object *obj);
 static void compute_block_extents (Extents *ext, Dwg_Object_Ref *ref);
+static void output_bulge_arc (double x1, double y1, double x2, double y2,
+                              double bulge);
+static int output_object (Dwg_Object *obj);
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -317,7 +320,7 @@ aci_color (unsigned int index)
       case 6:
         return (char *)"magenta";
       case 7:
-        return (char *)"white";
+        return (char *)"black"; // ACI 7 is "foreground" — black on light bg
       case 0:   // ByBlock
       default:
         return (char *)"black";
@@ -468,20 +471,31 @@ output_text_element (Dwg_Object *obj, double x, double y,
   int has_rotation = fabs (rotation_deg) > 0.001;
   int has_scale = fabs (width_factor - 1.0) > 0.001;
   double tx = has_scale ? x / width_factor : x;
+  /* When inside a block definition the INSERT transform applies a Y-flip
+     (matrix with -sy) which mirrors text.  Counter this by rendering text
+     with scale(1,-1) and negated Y so the double-flip produces readable
+     text while keeping the position correct. */
+  double render_y = in_block_definition ? -y : y;
+  int ys = in_block_definition ? -1 : 1;
 
   printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
           "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
           "text-anchor=\"%s\" dominant-baseline=\"%s\"",
-          obj->index, tx, y, fontfamily, font_size, color,
+          obj->index, tx, render_y, fontfamily, font_size, color,
           text_anchor, dominant_baseline);
 
   if (has_rotation && has_scale)
-    printf (" transform=\"rotate(%f %f %f) scale(%f 1)\"",
-            -rotation_deg, tx, y, width_factor);
+    printf (" transform=\"rotate(%f %f %f) scale(%f %d)\"",
+            -rotation_deg, tx, render_y, width_factor, ys);
+  else if (has_rotation && in_block_definition)
+    printf (" transform=\"rotate(%f %f %f) scale(1 -1)\"",
+            -rotation_deg, tx, render_y);
   else if (has_rotation)
-    printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, y);
+    printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, render_y);
   else if (has_scale)
-    printf (" transform=\"scale(%f 1)\"", width_factor);
+    printf (" transform=\"scale(%f %d)\"", width_factor, ys);
+  else if (in_block_definition)
+    printf (" transform=\"scale(1 -1)\"");
 
   printf (">%s</text>\n", escaped ? escaped : "");
 }
@@ -528,7 +542,7 @@ output_TEXT (Dwg_Object *obj)
                        entity_color (obj),
                        get_text_anchor (text->horiz_alignment),
                        get_dominant_baseline (text->vert_alignment),
-                       0.0, wf, escaped);
+                       text->rotation * 180.0 / M_PI, wf, escaped);
 
   if (escaped)
     free (escaped);
@@ -576,6 +590,57 @@ output_ATTDEF (Dwg_Object *obj)
                        entity_color (obj),
                        get_text_anchor (attdef->horiz_alignment),
                        get_dominant_baseline (attdef->vert_alignment),
+                       rotation_deg, wf, escaped);
+
+  if (escaped)
+    free (escaped);
+}
+
+static void
+output_ATTRIB (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Entity_ATTRIB *attrib = obj->tio.entity->tio.ATTRIB;
+  char *escaped;
+  const char *fontfamily;
+  double cap_height_ratio;
+  BITCODE_H style_ref = attrib->style;
+  Dwg_Object *o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
+  Dwg_Object_STYLE *style = o ? o->tio.object->tio.STYLE : NULL;
+  BITCODE_2DPOINT pt;
+  double rotation_deg, wf;
+
+  if (!attrib->text_value || entity_invisible (obj))
+    return;
+  /* flags bit 0 = invisible attribute */
+  if (attrib->flags & 1)
+    return;
+  if (isnan_2BD (attrib->ins_pt) || isnan_3BD (attrib->extrusion))
+    return;
+  if (dwg->header.version >= R_2007)
+    escaped = htmlwescape ((BITCODE_TU)attrib->text_value);
+  else
+    escaped = htmlescape (attrib->text_value, dwg->header.codepage);
+
+  get_font_info (style, o, &fontfamily, &cap_height_ratio);
+
+  if (attrib->horiz_alignment != 0 || attrib->vert_alignment != 0)
+    transform_OCS_2d (&pt, attrib->alignment_pt, attrib->extrusion);
+  else
+    transform_OCS_2d (&pt, attrib->ins_pt, attrib->extrusion);
+  rotation_deg = attrib->rotation * 180.0 / M_PI;
+
+  wf = attrib->width_factor;
+  if (wf == 0.0 && style)
+    wf = style->width_factor;
+  if (wf == 0.0)
+    wf = 1.0;
+
+  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                       fontfamily, attrib->height / cap_height_ratio,
+                       entity_color (obj),
+                       get_text_anchor (attrib->horiz_alignment),
+                       get_dominant_baseline (attrib->vert_alignment),
                        rotation_deg, wf, escaped);
 
   if (escaped)
@@ -947,19 +1012,27 @@ output_LWPOLYLINE (Dwg_Object *obj)
   numpts = dwg_ent_lwpline_get_numpoints (pline, &error);
   if (numpts && !error)
     {
-      BITCODE_2DPOINT pt, ptin;
+      BITCODE_2DPOINT pt, prev_pt, ptin;
       dwg_point_2d *pts = dwg_ent_lwpline_get_points (pline, &error);
+      BITCODE_BD *bulges = NULL;
+      BITCODE_BL num_bulges = 0;
       BITCODE_RL j;
 
       if (error || isnan_2pt (pts[0]) || isnan_3BD (pline->extrusion))
         return;
+
+      if (pline->num_bulges > 0 && pline->bulges)
+        {
+          bulges = pline->bulges;
+          num_bulges = pline->num_bulges;
+        }
+
       ptin.x = pts[0].x;
       ptin.y = pts[0].y;
-      transform_OCS_2d (&pt, ptin, pline->extrusion);
+      transform_OCS_2d (&prev_pt, ptin, pline->extrusion);
       printf ("\t<!-- lwpolyline-%d -->\n", obj->index);
       printf ("\t<path id=\"dwg-object-%d\" d=\"M %f,%f", obj->index,
-              transform_X (pt.x), transform_Y (pt.y));
-      // TODO curve_types, C for Bezier https://svgwg.org/specs/paths/#PathData
+              transform_X (prev_pt.x), transform_Y (prev_pt.y));
       for (j = 1; j < numpts; j++)
         {
           ptin.x = pts[j].x;
@@ -967,11 +1040,27 @@ output_LWPOLYLINE (Dwg_Object *obj)
           if (isnan_2BD (ptin))
             continue;
           transform_OCS_2d (&pt, ptin, pline->extrusion);
-          // TODO bulge -> arc, widths
-          printf (" L %f,%f", transform_X (pt.x), transform_Y (pt.y));
+          if (bulges && (j - 1) < num_bulges
+              && fabs (bulges[j - 1]) > 1e-6)
+            output_bulge_arc (prev_pt.x, prev_pt.y, pt.x, pt.y,
+                              bulges[j - 1]);
+          else
+            printf (" L %f,%f", transform_X (pt.x), transform_Y (pt.y));
+          prev_pt = pt;
         }
       if (pline->flag & 512) // closed
-        printf (" Z");
+        {
+          /* Close with an arc if the last vertex has a bulge */
+          ptin.x = pts[0].x;
+          ptin.y = pts[0].y;
+          transform_OCS_2d (&pt, ptin, pline->extrusion);
+          if (bulges && (numpts - 1) < num_bulges
+              && fabs (bulges[numpts - 1]) > 1e-6)
+            output_bulge_arc (prev_pt.x, prev_pt.y, pt.x, pt.y,
+                              bulges[numpts - 1]);
+          else
+            printf (" Z");
+        }
       printf ("\"\n\t");
       common_entity (obj);
       free (pts);
@@ -1304,6 +1393,25 @@ output_INSERT (Dwg_Object *obj)
       printf ("\n\n<!-- WRONG INSERT(" FORMAT_H ") -->\n",
               ARGS_H (obj->handle));
     }
+
+  /* Process attached entities (ATTRIBs, and sometimes other entities like
+     LWPOLYLINE revision clouds).  These have entmode=2 and are not part
+     of the block's entity chain, so get_next_owned_entity skips them. */
+  if (insert->has_attribs && insert->num_owned > 0 && insert->attribs)
+    {
+      Dwg_Data *dwg = obj->parent;
+      BITCODE_BL i;
+      for (i = 0; i < insert->num_owned; i++)
+        {
+          Dwg_Object *aobj
+              = dwg_ref_object_silent (dwg, insert->attribs[i]);
+          if (!aobj)
+            continue;
+          if (aobj->fixedtype == DWG_TYPE_SEQEND)
+            continue;
+          output_object (aobj);
+        }
+    }
 }
 
 static void
@@ -1434,6 +1542,9 @@ output_object (Dwg_Object *obj)
     case DWG_TYPE_ATTDEF:
       output_ATTDEF (obj);
       break;
+    case DWG_TYPE_ATTRIB:
+      output_ATTRIB (obj);
+      break;
     case DWG_TYPE_ARC:
       output_ARC (obj);
       break;
@@ -1478,12 +1589,188 @@ output_object (Dwg_Object *obj)
   return num;
 }
 
+/* ── Layer handle→name lookup table ─────────────────────────────────────────
+   Built once per SVG generation from the LAYER_CONTROL table.  Provides a
+   reliable fallback when ent->layer->obj is NULL and dwg_ref_object_silent
+   also fails — common in certain DWG encodings.  Same data source that
+   dwg_get_layers() uses, so it works even when entity handle refs don't. */
+
+typedef struct
+{
+  BITCODE_RLL handle_value; /* LAYER object's handle.value */
+  char *name;               /* HTML-escaped layer name (heap) */
+} LayerHandleEntry;
+
+static LayerHandleEntry *g_layer_htbl = NULL;
+static unsigned int g_layer_htbl_n = 0;
+
+static void
+build_layer_handle_table (Dwg_Data *dwg)
+{
+  unsigned int i;
+  Dwg_Object *ctrl;
+  Dwg_Object_LAYER_CONTROL *_ctrl;
+  unsigned int num_layers;
+
+  /* Free previous table if any */
+  for (i = 0; i < g_layer_htbl_n; i++)
+    free (g_layer_htbl[i].name);
+  free (g_layer_htbl);
+  g_layer_htbl = NULL;
+  g_layer_htbl_n = 0;
+
+  ctrl = dwg_get_first_object (dwg, DWG_TYPE_LAYER_CONTROL);
+  if (!ctrl || !ctrl->tio.object || !ctrl->tio.object->tio.LAYER_CONTROL)
+    return;
+  _ctrl = ctrl->tio.object->tio.LAYER_CONTROL;
+  num_layers = _ctrl->num_entries;
+  if (!num_layers)
+    return;
+
+  g_layer_htbl
+      = (LayerHandleEntry *)calloc (num_layers, sizeof (LayerHandleEntry));
+  if (!g_layer_htbl)
+    return;
+
+  for (i = 0; i < num_layers; i++)
+    {
+      Dwg_Object *obj = dwg_ref_object (dwg, _ctrl->entries[i]);
+      if (obj && obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer = obj->tio.object->tio.LAYER;
+          char *escaped = NULL;
+          if (layer->name)
+            {
+              if (dwg->header.version >= R_2007)
+                escaped = htmlwescape ((BITCODE_TU)layer->name);
+              else
+                escaped = htmlescape (layer->name, dwg->header.codepage);
+            }
+          g_layer_htbl[g_layer_htbl_n].handle_value = obj->handle.value;
+          g_layer_htbl[g_layer_htbl_n].name
+              = escaped ? escaped : strdup ("0");
+          g_layer_htbl_n++;
+        }
+    }
+}
+
+static void
+free_layer_handle_table (void)
+{
+  unsigned int i;
+  for (i = 0; i < g_layer_htbl_n; i++)
+    free (g_layer_htbl[i].name);
+  free (g_layer_htbl);
+  g_layer_htbl = NULL;
+  g_layer_htbl_n = 0;
+}
+
+/* Look up layer name by absolute_ref in the handle table.
+   Returns a heap-allocated copy, or NULL if not found. */
+static char *
+layer_name_from_handle_table (BITCODE_RLL abs_ref)
+{
+  unsigned int i;
+  for (i = 0; i < g_layer_htbl_n; i++)
+    {
+      if (g_layer_htbl[i].handle_value == abs_ref)
+        return strdup (g_layer_htbl[i].name);
+    }
+  return NULL;
+}
+
+/* Layer grouping helpers */
+typedef struct
+{
+  char *attr_name;     /* HTML-escaped name — identity AND data-layer attribute */
+  char *safe_id;       /* sanitized for use as XML id suffix */
+} LayerEntry;
+
+static char *
+layer_safe_id (const char *attr_name)
+{
+  /* Build a version of the layer name safe for use in an XML id attribute.
+     Must start with a letter or underscore; only letters, digits, hyphens,
+     underscores and dots are kept; everything else becomes an underscore. */
+  size_t len = strlen (attr_name) + 2;
+  char *safe = (char *)malloc (len);
+  char *out = safe;
+  const char *in = attr_name;
+
+  if (!isalpha ((unsigned char)*in) && *in != '_')
+    *out++ = '_';
+  while (*in)
+    {
+      char c = *in++;
+      *out++ = (isalnum ((unsigned char)c) || c == '-' || c == '_' || c == '.') ? c : '_';
+    }
+  *out = '\0';
+  return safe;
+}
+
+static char *
+layer_get_attr_name (Dwg_Object *layer_obj, Dwg_Data *dwg)
+{
+  /* Returns a heap-allocated, HTML-escaped UTF-8 layer name.
+     Caller must free. Returns strdup("0") for missing/invalid layers. */
+  Dwg_Object_LAYER *layer;
+  char *escaped;
+  if (!layer_obj || layer_obj->fixedtype != DWG_TYPE_LAYER)
+    return strdup ("0");
+  layer = layer_obj->tio.object->tio.LAYER;
+  if (!layer->name)
+    return strdup ("0");
+  if (dwg->header.version >= R_2007)
+    escaped = htmlwescape ((BITCODE_TU)layer->name);
+  else
+    escaped = htmlescape (layer->name, dwg->header.codepage);
+  return escaped ? escaped : strdup ("0");
+}
+
+/* Returns heap-allocated HTML-escaped layer name for an entity.
+   Resolution order:
+     1. ent->layer->obj (pre-resolved pointer)
+     2. dwg_ref_object_silent (handle-based lookup)
+     3. g_layer_htbl (brute-force handle table built from LAYER_CONTROL)
+   Caller must free. */
+static char *
+entity_layer_name (Dwg_Object *obj, Dwg_Data *dwg)
+{
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  Dwg_Object *lobj = NULL;
+
+  if (ent->layer)
+    {
+      if (ent->layer->obj && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        lobj = ent->layer->obj;
+      else
+        {
+          /* Handle not pre-resolved — force lookup now */
+          Dwg_Object *resolved = dwg_ref_object_silent (dwg, ent->layer);
+          if (resolved && resolved->fixedtype == DWG_TYPE_LAYER)
+            lobj = resolved;
+        }
+
+      /* Third fallback: match absolute_ref against the pre-built handle table.
+         This succeeds even when the entity's handle encoding prevents normal
+         resolution — the LAYER_CONTROL entries always resolve correctly. */
+      if (!lobj && ent->layer->absolute_ref)
+        {
+          char *name = layer_name_from_handle_table (ent->layer->absolute_ref);
+          if (name)
+            return name;
+        }
+    }
+  return layer_get_attr_name (lobj, dwg);
+}
+
 static int
 output_BLOCK_HEADER (Dwg_Object_Ref *ref)
 {
   Dwg_Object *obj;
   Dwg_Object_BLOCK_HEADER *hdr;
   int is_g = 0;
+  int is_main_space = 0;
   int num = 0;
 
   if (!ref) // silently ignore empty pspaces
@@ -1539,16 +1826,93 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
                   ref->absolute_ref, escaped ? escaped : "");
         }
       else
-        printf ("\t<!-- %s -->\n", escaped);
+        {
+          is_main_space = 1;
+          printf ("\t<!-- %s -->\n", escaped);
+        }
       if (escaped)
         free (escaped);
     }
 
-  obj = get_first_owned_entity (ref->obj);
-  while (obj)
+  if (is_main_space || is_g)
     {
-      num += output_object (obj);
-      obj = get_next_owned_entity (ref->obj, obj);
+      /* Group entities by layer. Two passes:
+         1. collect unique layer objects used by entities in this block
+         2. for each layer emit a <g data-layer="..."> wrapping its entities
+         Applied to both the main rendering space (paper/model) AND named block
+         definitions in <defs>, so the FE can toggle layer visibility globally
+         by setting display:none on [data-layer="X"] — changes propagate through
+         all <use> references that reference a block containing that layer. */
+      Dwg_Data *dwg = ref->obj->parent;
+      LayerEntry *layers = NULL;
+      int nlayers = 0, layer_cap = 0;
+      int i, li;
+
+      /* Pass 1: collect unique layer names.
+         Uses string comparison so handle resolution failures (->obj == NULL)
+         don't silently collapse every entity onto "layer 0". */
+      obj = get_first_owned_entity (ref->obj);
+      while (obj)
+        {
+          char *name = entity_layer_name (obj, dwg);
+          int found = 0;
+          for (i = 0; i < nlayers; i++)
+            if (strcmp (layers[i].attr_name, name) == 0)
+              {
+                found = 1;
+                break;
+              }
+          if (!found)
+            {
+              if (nlayers >= layer_cap)
+                {
+                  layer_cap = layer_cap == 0 ? 8 : layer_cap * 2;
+                  layers = (LayerEntry *)realloc (
+                      layers, (size_t)layer_cap * sizeof (LayerEntry));
+                }
+              layers[nlayers].attr_name = name;
+              layers[nlayers].safe_id = layer_safe_id (name);
+              nlayers++;
+              name = NULL; /* ownership transferred */
+            }
+          if (name)
+            free (name);
+          obj = get_next_owned_entity (ref->obj, obj);
+        }
+
+      /* Pass 2: emit entities grouped into per-layer <g> elements */
+      for (li = 0; li < nlayers; li++)
+        {
+          printf ("\t<g data-layer=\"%s\" id=\"layer-%s\">\n",
+                  layers[li].attr_name, layers[li].safe_id);
+          obj = get_first_owned_entity (ref->obj);
+          while (obj)
+            {
+              char *name = entity_layer_name (obj, dwg);
+              if (strcmp (name, layers[li].attr_name) == 0)
+                num += output_object (obj);
+              free (name);
+              obj = get_next_owned_entity (ref->obj, obj);
+            }
+          printf ("\t</g>\n");
+        }
+
+      for (i = 0; i < nlayers; i++)
+        {
+          free (layers[i].attr_name);
+          free (layers[i].safe_id);
+        }
+      free (layers);
+    }
+  else
+    {
+      /* Unnamed blocks: output entities sequentially */
+      obj = get_first_owned_entity (ref->obj);
+      while (obj)
+        {
+          num += output_object (obj);
+          obj = get_next_owned_entity (ref->obj, obj);
+        }
     }
 
   if (is_g)
@@ -1986,12 +2350,15 @@ compute_modelspace_extents (Dwg_Data *dwg)
 
   extents_init (&ext);
 
-  // Compute extents from paper space if available
+  /* Compute extents only from the space that will actually be rendered.
+     Never mix paper-space and model-space extents: their coordinate systems
+     are typically unrelated, so combining them produces a wrong page_height
+     and causes the Y-flip to map content to the wrong region (upside-down). */
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
     compute_block_extents (&ext, ref);
 
-  // Always compute model space
-  if ((ref = dwg_model_space_ref (dwg)))
+  /* Fall back to model space only when paper space contributed nothing. */
+  if (!ext.initialized && (ref = dwg_model_space_ref (dwg)))
     compute_block_extents (&ext, ref);
 
   // If we found geometry, use computed extents
@@ -2021,6 +2388,9 @@ output_SVG (Dwg_Data *dwg)
   Dwg_Object_Ref *ref;
   Dwg_Object_BLOCK_CONTROL *block_control;
   double dx, dy;
+
+  // Build the layer handle→name lookup table (used by entity_layer_name)
+  build_layer_handle_table (dwg);
 
   // Compute actual geometry extents instead of using header values
   compute_modelspace_extents (dwg);
@@ -2054,11 +2424,94 @@ output_SVG (Dwg_Data *dwg)
           "   viewBox=\"%f %f %f %f\">\n",
           0.0, 0.0, page_width, page_height);
 
+  /* Enumerate every layer defined in the DWG layer table so FE JS has a
+     complete list — including layers whose geometry lives inside block defs.
+     Format is intentionally simple for regex:
+       <!-- dwg-layers-count:N -->
+       <!-- dwg-layer:LayerName --> */
+  {
+    unsigned int num_all_layers = dwg_get_layer_count (dwg);
+    Dwg_Object_LAYER **all_layers = dwg_get_layers (dwg);
+    unsigned int li;
+    printf ("\t<!-- dwg-layers-count:%u -->\n", num_all_layers);
+    for (li = 0; li < num_all_layers; li++)
+      {
+        if (all_layers && all_layers[li] && all_layers[li]->name)
+          {
+            char *escaped;
+            if (dwg->header.version >= R_2007)
+              escaped = htmlwescape ((BITCODE_TU)all_layers[li]->name);
+            else
+              escaped = htmlescape (all_layers[li]->name,
+                                    dwg->header.codepage);
+            if (escaped)
+              {
+                char *s;
+                while ((s = strstr (escaped, "--")))
+                  { *s = '_'; *(s + 1) = '_'; }
+                printf ("\t<!-- dwg-layer:%s -->\n", escaped);
+                free (escaped);
+              }
+          }
+      }
+    free (all_layers);
+  }
+
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
     num = output_BLOCK_HEADER (
         ref); // how many paper-space entities we did print
   if (!num && (ref = dwg_model_space_ref (dwg)))
     output_BLOCK_HEADER (ref);
+
+  /* Render Model_Space content through Paper_Space VIEWPORTs.
+     Each VIEWPORT defines a window from Paper_Space into Model_Space.
+     We render Model_Space content with a transform that maps it
+     to the viewport's region in Paper_Space (SVG coordinates). */
+  if (num && !mspace)
+    {
+      Dwg_Object_Ref *ms_ref = dwg_model_space_ref (dwg);
+      Dwg_Object_Ref *ps_ref = dwg_paper_space_ref (dwg);
+      if (ms_ref && ms_ref->obj && ps_ref && ps_ref->obj)
+        {
+          /* Find VIEWPORTs in Paper_Space */
+          Dwg_Object *vpobj = get_first_owned_entity (ps_ref->obj);
+          while (vpobj)
+            {
+              if (vpobj->fixedtype == DWG_TYPE_VIEWPORT)
+                {
+                  Dwg_Entity_VIEWPORT *vp
+                      = vpobj->tio.entity->tio.VIEWPORT;
+                  /* Skip the paper-space frame viewport (id 1 or very large) */
+                  if (vp->VIEWSIZE > 0.0 && vp->width > 0.0
+                      && vp->height > 0.0
+                      && vp->width < page_width * 1.5)
+                    {
+                      double s = vp->height / vp->VIEWSIZE;
+                      double tx = vp->center.x - s * vp->VIEWCTR.x
+                                  - model_xmin;
+                      double ty = page_height - vp->center.y
+                                  + s * vp->VIEWCTR.y + model_ymin;
+
+                      printf ("\t<g transform=\"matrix(%f 0 0 %f %f %f)\">"
+                              "<!-- viewport-%d -->\n",
+                              s, -s, tx, ty, vpobj->index);
+
+                      /* Render Model_Space content with raw coordinates */
+                      {
+                        int save_ibd = in_block_definition;
+                        in_block_definition = 1;
+                        output_BLOCK_HEADER (ms_ref);
+                        in_block_definition = save_ibd;
+                      }
+
+                      printf ("\t</g>\n");
+                    }
+                }
+              vpobj = get_next_owned_entity (ps_ref->obj, vpobj);
+            }
+        }
+    }
+
   printf ("\t<defs>\n");
   for (i = 0; i < dwg->block_control.num_entries; i++)
     {
@@ -2066,8 +2519,18 @@ output_SVG (Dwg_Data *dwg)
         output_BLOCK_HEADER (ref);
     }
   printf ("\t</defs>\n");
+
+  /* Diagnostic comment: extents used for coordinate mapping */
+  printf ("\t<!-- dwg-extents: xmin=%f ymin=%f xmax=%f ymax=%f "
+          "page=%fx%f space=%s htbl_layers=%u -->\n",
+          model_xmin, model_ymin, model_xmax, model_ymax,
+          page_width, page_height,
+          num ? "paper" : "model",
+          g_layer_htbl_n);
+
   printf ("</svg>\n");
   fflush (stdout);
+  free_layer_handle_table ();
 }
 
 #ifndef DWG2SVG_NO_MAIN
