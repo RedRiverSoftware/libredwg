@@ -271,8 +271,9 @@ entity_invisible (Dwg_Object *obj)
 static double
 entity_lweight (Dwg_Object_Entity *ent)
 {
-  // stroke-width in px. lweights are in 100th of a mm
+  // dxf_cvt_lweight returns lineweight in 100ths of a mm
   int lw = dxf_cvt_lweight (ent->linewt);
+  double result;
 
   // BYLAYER (-1): look up layer's lineweight
   if (lw == -1 && ent->layer && ent->layer->obj
@@ -284,13 +285,14 @@ entity_lweight (Dwg_Object_Entity *ent)
 
   // Default/ByBlock/negative: use minimum visible width
   if (lw <= 0)
-    return 0.1;
+    return 0.25;
 
-  lw = (double)(lw * 0.001);
-  if (lw <= 0.1)
-    return 0.1;
+  // Convert from 100ths of mm to mm (SVG coordinate units)
+  result = (double)lw / 100.0;
+  if (result < 0.25)
+    return 0.25;
 
-  return lw;
+  return result;
 }
 
 static char *
@@ -1062,7 +1064,37 @@ output_LWPOLYLINE (Dwg_Object *obj)
             printf (" Z");
         }
       printf ("\"\n\t");
-      common_entity (obj);
+
+      /* Use polyline width for stroke-width when available.
+         const_width > 0 means uniform width; otherwise check per-vertex
+         widths and use the maximum. */
+      {
+        double pw = pline->const_width;
+        if (pw <= 0.0 && pline->num_widths > 0 && pline->widths)
+          {
+            BITCODE_BL wi;
+            for (wi = 0; wi < pline->num_widths; wi++)
+              {
+                if (pline->widths[wi].start > pw)
+                  pw = pline->widths[wi].start;
+                if (pline->widths[wi].end > pw)
+                  pw = pline->widths[wi].end;
+              }
+          }
+        if (pw > 0.0)
+          {
+            double lweight = entity_lweight (obj->tio.entity);
+            char *color = entity_color (obj);
+            if (pw > lweight)
+              lweight = pw;
+            printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+                    color, lweight);
+            if (*color == '#')
+              free (color);
+          }
+        else
+          common_entity (obj);
+      }
       free (pts);
     }
 }
@@ -1540,7 +1572,11 @@ output_object (Dwg_Object *obj)
       output_TEXT (obj);
       break;
     case DWG_TYPE_ATTDEF:
-      output_ATTDEF (obj);
+      /* ATTDEFs are attribute templates inside block definitions.
+         When the block is INSERTed, ATTRIBs replace them with actual values.
+         Skip ATTDEFs in block definitions to avoid overlapping text. */
+      if (!in_block_definition)
+        output_ATTDEF (obj);
       break;
     case DWG_TYPE_ATTRIB:
       output_ATTRIB (obj);
@@ -2473,18 +2509,22 @@ output_SVG (Dwg_Data *dwg)
       Dwg_Object_Ref *ps_ref = dwg_paper_space_ref (dwg);
       if (ms_ref && ms_ref->obj && ps_ref && ps_ref->obj)
         {
-          /* Find VIEWPORTs in Paper_Space */
+          /* Find VIEWPORTs in Paper_Space.  Skip the first one encountered —
+             it is the paper-space frame viewport (covers the whole page)
+             and should not render Model_Space content. */
           Dwg_Object *vpobj = get_first_owned_entity (ps_ref->obj);
+          int vp_seen = 0;
           while (vpobj)
             {
               if (vpobj->fixedtype == DWG_TYPE_VIEWPORT)
                 {
                   Dwg_Entity_VIEWPORT *vp
                       = vpobj->tio.entity->tio.VIEWPORT;
-                  /* Skip the paper-space frame viewport (id 1 or very large) */
-                  if (vp->VIEWSIZE > 0.0 && vp->width > 0.0
-                      && vp->height > 0.0
-                      && vp->width < page_width * 1.5)
+                  vp_seen++;
+                  /* The first VIEWPORT is the paper-space frame — skip it.
+                     Only render Model_Space through subsequent viewports. */
+                  if (vp_seen > 1 && vp->VIEWSIZE > 0.0
+                      && vp->width > 0.0 && vp->height > 0.0)
                     {
                       double s = vp->height / vp->VIEWSIZE;
                       double tx = vp->center.x - s * vp->VIEWCTR.x
