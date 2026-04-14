@@ -322,7 +322,7 @@ aci_color (unsigned int index)
       case 6:
         return (char *)"magenta";
       case 7:
-        return (char *)"black"; // ACI 7 is "foreground" — black on light bg
+        return (char *)"white"; // ACI 7 is "foreground" — white on dark bg
       case 0:   // ByBlock
       default:
         return (char *)"black";
