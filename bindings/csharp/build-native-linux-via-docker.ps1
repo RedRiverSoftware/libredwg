@@ -24,9 +24,9 @@ $generatedDir = Join-Path $scriptDir "generated"
 $libredwgRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
 $libredwgParent = Split-Path -Parent $libredwgRoot
 $includeDir = Join-Path $libredwgRoot "include"
+$buildSrcDir = Join-Path $libredwgRoot ".build-linux\src"
 $srcDir = Join-Path $libredwgRoot "src"
 $libDir = Join-Path $libredwgParent "bin\linux"
-$buildSrcDir = Join-Path $libDir ".build-linux\src"
 $outputDir = Join-Path $scriptDir "bin\linux"
 
 Write-Host "LibreDWG C# Native Wrapper Builder (Linux via Docker)" -ForegroundColor Cyan
