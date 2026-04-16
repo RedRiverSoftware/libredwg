@@ -64,6 +64,7 @@
 static int opts = 0;
 static int mspace = 0; // only mspace, even when pspace is defined
 static int in_block_definition = 0; // 1 when outputting block symbol entities
+static int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 
 // Case-insensitive prefix match
 static int
@@ -322,7 +323,9 @@ aci_color (unsigned int index)
       case 6:
         return (char *)"magenta";
       case 7:
-        return (char *)"white"; // ACI 7 is "foreground" — white on dark bg
+        // ACI 7 is the "foreground" colour — it contrasts with the background.
+        // White on a dark model-space canvas, black on a light paper-space page.
+        return (char *)(paper_space_bg ? "black" : "white");
       case 0:   // ByBlock
       default:
         return (char *)"black";
@@ -367,15 +370,56 @@ entity_color (Dwg_Object *obj)
   return cmc_color (&ent->color);
 }
 
+/* Returns the resolved ACI index for an entity (0-255), or -1 for truecolor.
+   Resolves ByLayer (256) to the layer's ACI index.
+   Used to emit data-aci="N" for frontend CTB print-mode styling. */
+static int
+entity_aci_index (Dwg_Object *obj)
+{
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  BITCODE_CMC *color;
+
+  if (ent->color.index == 256) /* ByLayer */
+    {
+      if (ent->layer && ent->layer->obj
+          && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer
+              = ent->layer->obj->tio.object->tio.LAYER;
+          color = &layer->color;
+        }
+      else
+        color = &ent->color;
+    }
+  else
+    color = &ent->color;
+
+  /* Truecolor: flag bit 0x80 set, bit 0x40 clear => RGB, not ACI */
+  if (color->flag & 0x80 && !(color->flag & 0x40))
+    return -1;
+
+  /* ACI stored in low byte of rgb with method 0xc3 (layer encoding) */
+  if (color->index == 256 && (color->rgb >> 24) == 0xc3)
+    return (int)(color->rgb & 0xff);
+
+  if (color->index >= 0 && color->index < 256)
+    return (int)color->index;
+
+  return 7; /* fallback to foreground */
+}
+
 static void
 common_entity (Dwg_Object *obj)
 {
   double lweight;
   char *color;
+  int aci;
   lweight = entity_lweight (obj->tio.entity);
   color = entity_color (obj);
-  printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-          color, lweight);
+  aci = entity_aci_index (obj);
+  printf ("      data-aci=\"%d\""
+          " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+          aci, color, lweight);
   if (*color == '#')
     free (color);
 }
@@ -468,7 +512,7 @@ output_text_element (Dwg_Object *obj, double x, double y,
                      const char *fontfamily, double font_size,
                      const char *color, const char *text_anchor,
                      const char *dominant_baseline, double rotation_deg,
-                     double width_factor, const char *escaped)
+                     double width_factor, const char *escaped, int aci)
 {
   int has_rotation = fabs (rotation_deg) > 0.001;
   int has_scale = fabs (width_factor - 1.0) > 0.001;
@@ -482,16 +526,36 @@ output_text_element (Dwg_Object *obj, double x, double y,
 
   printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
           "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
-          "text-anchor=\"%s\" dominant-baseline=\"%s\"",
+          "text-anchor=\"%s\" dominant-baseline=\"%s\" data-aci=\"%d\"",
           obj->index, tx, render_y, fontfamily, font_size, color,
-          text_anchor, dominant_baseline);
+          text_anchor, dominant_baseline, aci);
 
-  if (has_rotation && has_scale)
+  if (has_rotation && in_block_definition)
+    {
+      /* When text is rotated inside a block definition, the naive
+         rotate(angle, cx, cy) scale(1, -1) produces wrong positions:
+         the scale moves the text away from the rotation centre and the
+         rotation amplifies that offset, scattering text diagonally.
+         Instead, compute a single matrix that combines rotation, Y-flip
+         (for parent INSERT Y-flip compensation), and optional width
+         scaling while preserving the text's anchor position.
+
+         Derivation:
+           T = translate(x, y) * rotate(α) * scale(wf, -1)
+                 * translate(-x/wf, y)
+         which simplifies to the matrix below. */
+      double rot_rad = rotation_deg * M_PI / 180.0;
+      double c = cos (rot_rad);
+      double s = sin (rot_rad);
+      double wf = has_scale ? width_factor : 1.0;
+      printf (" transform=\"matrix(%f %f %f %f %f %f)\"",
+              c * wf, s * wf, s, -c,
+              x * (1 - c) + s * y,
+              y * (1 - c) - s * x);
+    }
+  else if (has_rotation && has_scale)
     printf (" transform=\"rotate(%f %f %f) scale(%f %d)\"",
             -rotation_deg, tx, render_y, width_factor, ys);
-  else if (has_rotation && in_block_definition)
-    printf (" transform=\"rotate(%f %f %f) scale(1 -1)\"",
-            -rotation_deg, tx, render_y);
   else if (has_rotation)
     printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, render_y);
   else if (has_scale)
@@ -544,7 +608,8 @@ output_TEXT (Dwg_Object *obj)
                        entity_color (obj),
                        get_text_anchor (text->horiz_alignment),
                        get_dominant_baseline (text->vert_alignment),
-                       text->rotation * 180.0 / M_PI, wf, escaped);
+                       text->rotation * 180.0 / M_PI, wf, escaped,
+                       entity_aci_index (obj));
 
   if (escaped)
     free (escaped);
@@ -592,7 +657,8 @@ output_ATTDEF (Dwg_Object *obj)
                        entity_color (obj),
                        get_text_anchor (attdef->horiz_alignment),
                        get_dominant_baseline (attdef->vert_alignment),
-                       rotation_deg, wf, escaped);
+                       rotation_deg, wf, escaped,
+                       entity_aci_index (obj));
 
   if (escaped)
     free (escaped);
@@ -643,7 +709,8 @@ output_ATTRIB (Dwg_Object *obj)
                        entity_color (obj),
                        get_text_anchor (attrib->horiz_alignment),
                        get_dominant_baseline (attrib->vert_alignment),
-                       rotation_deg, wf, escaped);
+                       rotation_deg, wf, escaped,
+                       entity_aci_index (obj));
 
   if (escaped)
     free (escaped);
@@ -1085,10 +1152,12 @@ output_LWPOLYLINE (Dwg_Object *obj)
           {
             double lweight = entity_lweight (obj->tio.entity);
             char *color = entity_color (obj);
+            int aci = entity_aci_index (obj);
             if (pw > lweight)
               lweight = pw;
-            printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-                    color, lweight);
+            printf ("      data-aci=\"%d\""
+                    " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+                    aci, color, lweight);
             if (*color == '#')
               free (color);
           }
@@ -1300,31 +1369,36 @@ output_HATCH (Dwg_Object *obj)
 
   fill_color = entity_color (obj);
   lweight = entity_lweight (obj->tio.entity);
+  {
+    int aci = entity_aci_index (obj);
 
-  printf ("\t<!-- hatch-%d -->\n", obj->index);
+    printf ("\t<!-- hatch-%d -->\n", obj->index);
 
-  if (hatch->is_solid_fill)
-    {
-      printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
-      for (i = 0; i < hatch->num_paths; i++)
-        {
-          output_hatch_path_data (&hatch->paths[i]);
-          if (i < hatch->num_paths - 1)
-            printf (" ");
-        }
-      printf ("\"\n\t      style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
-              fill_color);
-    }
-  else
-    {
-      for (i = 0; i < hatch->num_paths; i++)
-        {
-          printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
-          output_hatch_path_data (&hatch->paths[i]);
-          printf ("\"\n\t      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
-                  fill_color, lweight);
-        }
-    }
+    if (hatch->is_solid_fill)
+      {
+        printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+        for (i = 0; i < hatch->num_paths; i++)
+          {
+            output_hatch_path_data (&hatch->paths[i]);
+            if (i < hatch->num_paths - 1)
+              printf (" ");
+          }
+        printf ("\"\n\t      data-aci=\"%d\""
+                " style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
+                aci, fill_color);
+      }
+    else
+      {
+        for (i = 0; i < hatch->num_paths; i++)
+          {
+            printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
+            output_hatch_path_data (&hatch->paths[i]);
+            printf ("\"\n\t      data-aci=\"%d\""
+                    " style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
+                    aci, fill_color, lweight);
+          }
+      }
+  }
 
   if (*fill_color == '#')
     free (fill_color);
@@ -1390,35 +1464,49 @@ output_INSERT (Dwg_Object *obj)
         double sy = insert->scale.y;
         double base_x = hdr->base_pt.x;
         double base_y = hdr->base_pt.y;
-        tx = ins_pt.x - sx * base_x - model_xmin;
-        ty = page_height - ins_pt.y + sy * base_y + model_ymin;
+        if (in_block_definition)
+          {
+            /* Raw DWG coords — the parent transform (viewport matrix or
+               enclosing INSERT's <use>) handles the final mapping. */
+            tx = ins_pt.x - sx * base_x;
+            ty = ins_pt.y - sy * base_y;
+          }
+        else
+          {
+            tx = ins_pt.x - sx * base_x - model_xmin;
+            ty = page_height - ins_pt.y + sy * base_y + model_ymin;
+          }
       }
 
-      printf ("\t<!-- insert-%d -->\n", obj->index);
-      // Using matrix for precise control. For rotation=0:
-      // matrix(sx, 0, 0, -sy, tx, ty)
-      if (fabs (insert->rotation) < 0.0001)
-        {
-          printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
-                  "xlink:href=\"#symbol-" FORMAT_HV "\" />"
-                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
-                  obj->index, insert->scale.x, -insert->scale.y, tx, ty,
-                  insert->block_header->absolute_ref,
-                  ARGS_H (insert->block_header->handleref));
-        }
-      else
-        {
-          // With rotation, need full matrix calculation
-          // For now, use translate+rotate+scale (may need refinement)
-          printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
-                  "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
-                  "\" />"
-                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
-                  obj->index, tx, ty,
-                  rotation_deg, insert->scale.x, -insert->scale.y,
-                  insert->block_header->absolute_ref,
-                  ARGS_H (insert->block_header->handleref));
-        }
+      {
+        /* In block definitions / viewports the parent transform provides the
+           Y-flip, so the INSERT itself must NOT negate sy.  In top-level
+           rendering there is no parent flip, so INSERT does it. */
+        double y_scale = in_block_definition ? insert->scale.y
+                                             : -insert->scale.y;
+
+        printf ("\t<!-- insert-%d -->\n", obj->index);
+        if (fabs (insert->rotation) < 0.0001)
+          {
+            printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
+                    "xlink:href=\"#symbol-" FORMAT_HV "\" />"
+                    "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                    obj->index, insert->scale.x, y_scale, tx, ty,
+                    insert->block_header->absolute_ref,
+                    ARGS_H (insert->block_header->handleref));
+          }
+        else
+          {
+            printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
+                    "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
+                    "\" />"
+                    "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                    obj->index, tx, ty,
+                    rotation_deg, insert->scale.x, y_scale,
+                    insert->block_header->absolute_ref,
+                    ARGS_H (insert->block_header->handleref));
+          }
+      }
     }
   else
     {
@@ -2494,8 +2582,19 @@ output_SVG (Dwg_Data *dwg)
   }
 
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
-    num = output_BLOCK_HEADER (
-        ref); // how many paper-space entities we did print
+    {
+      paper_space_bg = 1; // paper-space has a white background
+      /* White paper rectangle so the SVG is self-contained.  Viewers
+         can set the area outside the viewBox to grey (#8A8A8A) to
+         match the AutoCAD paper-space chrome. */
+      printf ("\t<rect x=\"%f\" y=\"%f\" width=\"%f\" height=\"%f\" "
+              "fill=\"white\" />\n",
+              0.0, 0.0, page_width, page_height);
+      num = output_BLOCK_HEADER (
+          ref); // how many paper-space entities we did print
+      if (!num)
+        paper_space_bg = 0; // paper space was empty, falling back to model
+    }
   if (!num && (ref = dwg_model_space_ref (dwg)))
     output_BLOCK_HEADER (ref);
 
@@ -2532,7 +2631,23 @@ output_SVG (Dwg_Data *dwg)
                       double ty = page_height - vp->center.y
                                   + s * vp->VIEWCTR.y + model_ymin;
 
-                      printf ("\t<g transform=\"matrix(%f 0 0 %f %f %f)\">"
+                      /* Clip rectangle in SVG paper-space coordinates */
+                      double clip_x = vp->center.x - vp->width / 2.0
+                                      - model_xmin;
+                      double clip_y = page_height
+                                      - (vp->center.y + vp->height / 2.0)
+                                      + model_ymin;
+
+                      printf ("\t<defs><clipPath id=\"vp-clip-%d\">"
+                              "<rect x=\"%f\" y=\"%f\" "
+                              "width=\"%f\" height=\"%f\"/>"
+                              "</clipPath></defs>\n",
+                              vpobj->index, clip_x, clip_y,
+                              vp->width, vp->height);
+
+                      printf ("\t<g clip-path=\"url(#vp-clip-%d)\">\n",
+                              vpobj->index);
+                      printf ("\t\t<g transform=\"matrix(%f 0 0 %f %f %f)\">"
                               "<!-- viewport-%d -->\n",
                               s, -s, tx, ty, vpobj->index);
 
@@ -2544,6 +2659,7 @@ output_SVG (Dwg_Data *dwg)
                         in_block_definition = save_ibd;
                       }
 
+                      printf ("\t\t</g>\n");
                       printf ("\t</g>\n");
                     }
                 }
@@ -2568,9 +2684,35 @@ output_SVG (Dwg_Data *dwg)
           num ? "paper" : "model",
           g_layer_htbl_n);
 
+  /* Emit the CTB stylesheet from the active layout's PLOTSETTINGS.
+     The frontend uses this to select the correct CTB for print mode. */
+  {
+    Dwg_Object_Ref *ps_ref
+        = mspace ? dwg_model_space_ref (dwg) : dwg_paper_space_ref (dwg);
+    if (!ps_ref)
+      ps_ref = dwg_model_space_ref (dwg);
+    if (ps_ref && ps_ref->obj
+        && ps_ref->obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+      {
+        Dwg_Object_BLOCK_HEADER *bh
+            = ps_ref->obj->tio.object->tio.BLOCK_HEADER;
+        if (bh->layout && bh->layout->obj
+            && bh->layout->obj->fixedtype == DWG_TYPE_LAYOUT)
+          {
+            Dwg_Object_LAYOUT *lo
+                = bh->layout->obj->tio.object->tio.LAYOUT;
+            if (lo->plotsettings.stylesheet
+                && *(lo->plotsettings.stylesheet))
+              printf ("\t<!-- dwg-ctb:%s -->\n",
+                      (const char *)lo->plotsettings.stylesheet);
+          }
+      }
+  }
+
   printf ("</svg>\n");
   fflush (stdout);
   free_layer_handle_table ();
+  paper_space_bg = 0; // reset for next call when used as a library
 }
 
 #ifndef DWG2SVG_NO_MAIN
