@@ -269,6 +269,16 @@ entity_invisible (Dwg_Object *obj)
   return false;
 }
 
+/* Display boost for lineweights.  A 0.25mm pen on an A1 viewBox rendered
+   to a typical screen produces a subpixel stroke that's nearly invisible;
+   combined with vector-effect="non-scaling-stroke" (which strips the
+   accidental inflation previously applied by enclosing INSERT transforms)
+   the lines become too thin to read.  Multiplying all lineweights by this
+   factor makes them visually distinct while preserving proportionality.
+   This mirrors AutoCAD's LWDISPSCALE, which is a display-only scale on
+   lineweights (not applied to the actual plot). */
+#define LINEWEIGHT_DISPLAY_SCALE 8.0
+
 static double
 entity_lweight (Dwg_Object_Entity *ent)
 {
@@ -286,14 +296,14 @@ entity_lweight (Dwg_Object_Entity *ent)
 
   // Default/ByBlock/negative: use minimum visible width
   if (lw <= 0)
-    return 0.25;
+    return 0.25 * LINEWEIGHT_DISPLAY_SCALE;
 
   // Convert from 100ths of mm to mm (SVG coordinate units)
   result = (double)lw / 100.0;
   if (result < 0.25)
-    return 0.25;
+    result = 0.25;
 
-  return result;
+  return result * LINEWEIGHT_DISPLAY_SCALE;
 }
 
 static char *
@@ -408,20 +418,126 @@ entity_aci_index (Dwg_Object *obj)
   return 7; /* fallback to foreground */
 }
 
+/* Resolve an entity's effective linetype, following ByLayer if needed.
+   Returns NULL for Continuous (solid) lines. */
+static Dwg_Object_LTYPE *
+entity_ltype (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  BITCODE_H ltype_h = NULL;
+
+  /* ltype_flags: 0=ByLayer, 1=ByBlock, 2=Continuous, 3=explicit handle */
+  if (ent->ltype_flags == 2)
+    return NULL; /* Continuous — solid line */
+  if (ent->ltype_flags == 3 && ent->ltype)
+    ltype_h = ent->ltype;
+  else if (ent->ltype_flags == 0) /* ByLayer */
+    {
+      if (ent->layer && ent->layer->obj
+          && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer
+              = ent->layer->obj->tio.object->tio.LAYER;
+          ltype_h = layer->ltype;
+        }
+    }
+  /* ByBlock (1) and unresolved: treat as Continuous */
+  if (!ltype_h)
+    return NULL;
+
+  {
+    Dwg_Object *o = dwg_ref_object_silent (dwg, ltype_h);
+    if (o && o->fixedtype == DWG_TYPE_LTYPE)
+      {
+        Dwg_Object_LTYPE *lt = o->tio.object->tio.LTYPE;
+        /* Continuous / ByBlock linetypes have numdashes == 0 */
+        if (lt->numdashes > 0)
+          return lt;
+      }
+  }
+  return NULL;
+}
+
+/* Build an SVG stroke-dasharray string from a linetype's dash pattern.
+   Caller must free() the returned string.  Returns NULL for solid lines. */
+static char *
+entity_dasharray (Dwg_Object *obj)
+{
+  Dwg_Object_LTYPE *lt = entity_ltype (obj);
+  Dwg_Object_Entity *ent;
+  double lt_scale;
+  char buf[512];
+  int pos = 0;
+  int i;
+
+  if (!lt)
+    return NULL;
+
+  ent = obj->tio.entity;
+  /* Effective scale = entity ltype_scale * global LTSCALE
+     When PSLTSCALE=1 (the default in modern DWGs) linetypes in paper
+     space render at their defined paper-space length regardless of the
+     global LTSCALE, so we skip the LTSCALE multiplier in that case. */
+  lt_scale = ent->ltype_scale > 0.0 ? ent->ltype_scale : 1.0;
+  {
+    Dwg_Data *dwg = obj->parent;
+    double global_ltscale = dwg->header_vars.LTSCALE;
+    int psltscale = dwg->header_vars.PSLTSCALE;
+    if (!psltscale && global_ltscale > 0.0)
+      lt_scale *= global_ltscale;
+  }
+
+  for (i = 0; i < lt->numdashes && pos < (int)sizeof (buf) - 20; i++)
+    {
+      double len = lt->dashes[i].length * lt_scale;
+      if (len < 0.0)
+        len = -len; /* gaps are stored as negative */
+      if (len < 0.01)
+        len = 0.01; /* SVG needs non-zero for dots */
+      if (pos > 0)
+        pos += sprintf (buf + pos, " ");
+      pos += sprintf (buf + pos, "%.2f", len);
+    }
+
+  if (pos == 0)
+    return NULL;
+
+  {
+    char *result = (char *)malloc ((size_t)(pos + 1));
+    memcpy (result, buf, (size_t)(pos + 1));
+    return result;
+  }
+}
+
+/* Emit the closing attributes and style for a stroked SVG element. */
 static void
 common_entity (Dwg_Object *obj)
 {
   double lweight;
   char *color;
+  char *dashes;
   int aci;
   lweight = entity_lweight (obj->tio.entity);
   color = entity_color (obj);
   aci = entity_aci_index (obj);
-  printf ("      data-aci=\"%d\""
-          " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-          aci, color, lweight);
+  dashes = entity_dasharray (obj);
+  /* vector-effect="non-scaling-stroke" makes stroke width computed in the
+     root viewport's coordinate system, so lines inside a non-uniformly
+     scaled INSERT keep a uniform thickness — matching AutoCAD's semantic
+     that lineweight is a plot property, not geometry. */
+  if (dashes)
+    printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+            " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
+            "stroke-dasharray:%s;stroke-linecap:round\" />\n",
+            aci, color, lweight, dashes);
+  else
+    printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+            " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+            aci, color, lweight);
   if (*color == '#')
     free (color);
+  free (dashes);
 }
 
 // Get font family and cap height ratio from a STYLE object
@@ -1152,14 +1268,22 @@ output_LWPOLYLINE (Dwg_Object *obj)
           {
             double lweight = entity_lweight (obj->tio.entity);
             char *color = entity_color (obj);
+            char *dashes = entity_dasharray (obj);
             int aci = entity_aci_index (obj);
             if (pw > lweight)
               lweight = pw;
-            printf ("      data-aci=\"%d\""
-                    " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-                    aci, color, lweight);
+            if (dashes)
+              printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+                      " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
+                      "stroke-dasharray:%s;stroke-linecap:round\" />\n",
+                      aci, color, lweight, dashes);
+            else
+              printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+                      " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+                      aci, color, lweight);
             if (*color == '#')
               free (color);
+            free (dashes);
           }
         else
           common_entity (obj);
@@ -1393,7 +1517,7 @@ output_HATCH (Dwg_Object *obj)
           {
             printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
             output_hatch_path_data (&hatch->paths[i]);
-            printf ("\"\n\t      data-aci=\"%d\""
+            printf ("\"\n\t      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
                     " style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
                     aci, fill_color, lweight);
           }
