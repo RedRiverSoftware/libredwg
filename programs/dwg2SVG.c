@@ -269,41 +269,53 @@ entity_invisible (Dwg_Object *obj)
   return false;
 }
 
-/* Display boost for lineweights.  A 0.25mm pen on an A1 viewBox rendered
-   to a typical screen produces a subpixel stroke that's nearly invisible;
-   combined with vector-effect="non-scaling-stroke" (which strips the
-   accidental inflation previously applied by enclosing INSERT transforms)
-   the lines become too thin to read.  Multiplying all lineweights by this
-   factor makes them visually distinct while preserving proportionality.
-   This mirrors AutoCAD's LWDISPSCALE, which is a display-only scale on
-   lineweights (not applied to the actual plot). */
-#define LINEWEIGHT_DISPLAY_SCALE 8.0
+/* For entities WITH an explicit lineweight (set on the entity or its
+   layer), the paper-space mm value is multiplied by this factor so the
+   stroke is clearly visible on screen.  At this value a 0.25mm lineweight
+   (the common default) renders at ~1 viewport-unit — same visual thickness
+   as DEFAULT_STROKE_WIDTH_PX — so thin explicit lineweights look fine,
+   while thicker weights (0.5mm, 0.7mm, 1.0mm) scale up proportionally.
+   Because these strokes do NOT get non-scaling-stroke, they also inflate
+   with any enclosing block transform, matching AutoCAD's semantics for
+   entities that have a deliberate drawing-unit thickness. */
+#define LINEWEIGHT_DISPLAY_SCALE 4.0
 
+/* For entities with default / ByBlock / unset lineweight we render at a
+   fixed minimum stroke width in the root viewport's user units.  These
+   strokes DO use non-scaling-stroke, so they stay consistent across the
+   drawing regardless of block transforms. */
+#define DEFAULT_STROKE_WIDTH_PX 1.0
+
+/* Resolved lineweight in paper-space millimetres, or 0.0 when the entity
+   uses default / ByBlock / unset lineweight.  Resolves ByLayer. */
 static double
-entity_lweight (Dwg_Object_Entity *ent)
+entity_lweight_mm (Dwg_Object_Entity *ent)
 {
-  // dxf_cvt_lweight returns lineweight in 100ths of a mm
   int lw = dxf_cvt_lweight (ent->linewt);
-  double result;
-
-  // BYLAYER (-1): look up layer's lineweight
   if (lw == -1 && ent->layer && ent->layer->obj
       && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
     {
       Dwg_Object_LAYER *layer = ent->layer->obj->tio.object->tio.LAYER;
       lw = dxf_cvt_lweight (layer->linewt);
     }
+  return lw > 0 ? (double)lw / 100.0 : 0.0;
+}
 
-  // Default/ByBlock/negative: use minimum visible width
-  if (lw <= 0)
-    return 0.25 * LINEWEIGHT_DISPLAY_SCALE;
+/* Whether the entity has an explicit (non-default) lineweight.  Used to
+   decide if the SVG stroke should be given vector-effect="non-scaling-stroke". */
+static int
+entity_lweight_is_explicit (Dwg_Object_Entity *ent)
+{
+  return entity_lweight_mm (ent) > 0.0 ? 1 : 0;
+}
 
-  // Convert from 100ths of mm to mm (SVG coordinate units)
-  result = (double)lw / 100.0;
-  if (result < 0.25)
-    result = 0.25;
-
-  return result * LINEWEIGHT_DISPLAY_SCALE;
+static double
+entity_lweight (Dwg_Object_Entity *ent)
+{
+  double mm = entity_lweight_mm (ent);
+  if (mm <= 0.0)
+    return DEFAULT_STROKE_WIDTH_PX;
+  return mm * LINEWEIGHT_DISPLAY_SCALE;
 }
 
 static char *
@@ -518,23 +530,28 @@ common_entity (Dwg_Object *obj)
   char *color;
   char *dashes;
   int aci;
+  const char *ve_attr;
   lweight = entity_lweight (obj->tio.entity);
   color = entity_color (obj);
   aci = entity_aci_index (obj);
   dashes = entity_dasharray (obj);
-  /* vector-effect="non-scaling-stroke" makes stroke width computed in the
-     root viewport's coordinate system, so lines inside a non-uniformly
-     scaled INSERT keep a uniform thickness — matching AutoCAD's semantic
-     that lineweight is a plot property, not geometry. */
+  /* Only default-lineweight strokes get non-scaling-stroke, so they stay
+     at a uniform minimum thickness even inside non-uniformly scaled INSERT
+     transforms.  Explicit lineweights are meant to be prominent and are
+     allowed to scale with their enclosing transform (typically they're
+     only used on paper-space entities that aren't inside such blocks). */
+  ve_attr = entity_lweight_is_explicit (obj->tio.entity)
+                ? ""
+                : " vector-effect=\"non-scaling-stroke\"";
   if (dashes)
-    printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+    printf ("      data-aci=\"%d\"%s"
             " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
             "stroke-dasharray:%s;stroke-linecap:round\" />\n",
-            aci, color, lweight, dashes);
+            aci, ve_attr, color, lweight, dashes);
   else
-    printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+    printf ("      data-aci=\"%d\"%s"
             " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-            aci, color, lweight);
+            aci, ve_attr, color, lweight);
   if (*color == '#')
     free (color);
   free (dashes);
@@ -1266,19 +1283,27 @@ output_LWPOLYLINE (Dwg_Object *obj)
           }
         if (pw > 0.0)
           {
-            double lweight = entity_lweight (obj->tio.entity);
             char *color = entity_color (obj);
             char *dashes = entity_dasharray (obj);
             int aci = entity_aci_index (obj);
-            if (pw > lweight)
-              lweight = pw;
+            /* A polyline const_width / vertex width is a deliberate
+               geometric thickness in drawing units set by the drawing
+               author (e.g. 0.97mm).  Unlike the small fraction-of-a-mm
+               lineweight indices, these values are already at a visible
+               scale so they're used directly — no display boost.  No
+               non-scaling-stroke either: the width is geometry and should
+               inflate with any enclosing block transform, matching
+               AutoCAD's rendering. */
+            double lweight = pw;
+            if (lweight < DEFAULT_STROKE_WIDTH_PX)
+              lweight = DEFAULT_STROKE_WIDTH_PX;
             if (dashes)
-              printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+              printf ("      data-aci=\"%d\""
                       " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
                       "stroke-dasharray:%s;stroke-linecap:round\" />\n",
                       aci, color, lweight, dashes);
             else
-              printf ("      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+              printf ("      data-aci=\"%d\""
                       " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
                       aci, color, lweight);
             if (*color == '#')
@@ -1513,13 +1538,17 @@ output_HATCH (Dwg_Object *obj)
       }
     else
       {
+        const char *ve_attr
+            = entity_lweight_is_explicit (obj->tio.entity)
+                  ? ""
+                  : " vector-effect=\"non-scaling-stroke\"";
         for (i = 0; i < hatch->num_paths; i++)
           {
             printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
             output_hatch_path_data (&hatch->paths[i]);
-            printf ("\"\n\t      data-aci=\"%d\" vector-effect=\"non-scaling-stroke\""
+            printf ("\"\n\t      data-aci=\"%d\"%s"
                     " style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
-                    aci, fill_color, lweight);
+                    aci, ve_attr, fill_color, lweight);
           }
       }
   }
