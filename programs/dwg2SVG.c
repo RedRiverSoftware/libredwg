@@ -699,7 +699,187 @@ output_text_element (Dwg_Object *obj, double x, double y,
   printf (">%s</text>\n", escaped ? escaped : "");
 }
 
-// TODO: MTEXT
+/* Strip MTEXT inline formatting codes from a text buffer, returning a newly
+   allocated plain-text string.  MTEXT adds codes that TEXT never has:
+     \P                   paragraph break (becomes a space here)
+     \~                   non-breaking space (becomes a space)
+     \\                   literal backslash
+     {...}                grouping braces
+     \C<n>; \H<n>[x];     inline style changes (color, height, ...)
+     \W<n>; \Q<n>;
+     \f<font>|...; \F..;
+     \T<n>;
+     \L ... \l            underline on/off (stripped)
+     \O ... \o            overline on/off (stripped)
+     \S<num>^<den>;       stacked fraction -> "num/den"
+   Caller frees the returned string.  Accepts NULL (returns NULL). */
+static char *
+mtext_strip_formatting (const char *src)
+{
+  size_t len, i, o;
+  char *out;
+  if (!src)
+    return NULL;
+  len = strlen (src);
+  out = (char *)malloc (len + 1);
+  if (!out)
+    return NULL;
+  for (i = 0, o = 0; i < len;)
+    {
+      char c = src[i];
+      if (c == '{' || c == '}')
+        {
+          i++;
+          continue;
+        }
+      if (c == '\\' && i + 1 < len)
+        {
+          char n = src[i + 1];
+          switch (n)
+            {
+            case 'P':
+            case '~':
+              out[o++] = ' ';
+              i += 2;
+              continue;
+            case '\\':
+              out[o++] = '\\';
+              i += 2;
+              continue;
+            case 'L':
+            case 'l':
+            case 'O':
+            case 'o':
+              /* underline/overline toggles — no text content */
+              i += 2;
+              continue;
+            case 'S':
+              {
+                /* Stacked fraction \Snum^den;  ->  num/den  */
+                size_t j = i + 2;
+                while (j < len && src[j] != '^' && src[j] != ';')
+                  out[o++] = src[j++];
+                if (j < len && src[j] == '^')
+                  {
+                    out[o++] = '/';
+                    j++;
+                    while (j < len && src[j] != ';')
+                      out[o++] = src[j++];
+                  }
+                if (j < len && src[j] == ';')
+                  j++;
+                i = j;
+                continue;
+              }
+            case 'C':
+            case 'H':
+            case 'W':
+            case 'Q':
+            case 'T':
+            case 'f':
+            case 'F':
+            case 'A':
+            case 'p':
+              {
+                /* Style-change codes: skip up to (and including) the
+                   terminating ';'. */
+                size_t j = i + 2;
+                while (j < len && src[j] != ';')
+                  j++;
+                if (j < len)
+                  j++;
+                i = j;
+                continue;
+              }
+            default:
+              /* Unknown escape — keep the character after the backslash
+                 and drop the backslash itself. */
+              out[o++] = n;
+              i += 2;
+              continue;
+            }
+        }
+      out[o++] = c;
+      i++;
+    }
+  out[o] = '\0';
+  return out;
+}
+
+static void
+output_MTEXT (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Entity_MTEXT *mtext = obj->tio.entity->tio.MTEXT;
+  char *plain;
+  char *escaped;
+  const char *fontfamily;
+  double cap_height_ratio;
+  BITCODE_H style_ref;
+  Dwg_Object *o;
+  Dwg_Object_STYLE *style;
+  BITCODE_2DPOINT pt_in, pt;
+  double rotation_rad;
+  int horiz, vert;
+
+  if (!mtext->text || entity_invisible (obj))
+    return;
+  if (isnan_3BD (mtext->ins_pt) || isnan_3BD (mtext->extrusion))
+    return;
+
+  style_ref = mtext->style;
+  o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
+  style = o ? o->tio.object->tio.STYLE : NULL;
+  get_font_info (style, o, &fontfamily, &cap_height_ratio);
+
+  plain = mtext_strip_formatting (mtext->text);
+  if (!plain)
+    return;
+  if (dwg->header.version >= R_2007)
+    escaped = htmlwescape ((BITCODE_TU)plain);
+  else
+    escaped = htmlescape (plain, dwg->header.codepage);
+  free (plain);
+
+  pt_in.x = mtext->ins_pt.x;
+  pt_in.y = mtext->ins_pt.y;
+  transform_OCS_2d (&pt, pt_in, mtext->extrusion);
+
+  /* MTEXT rotation comes from x_axis_dir, not an explicit angle. */
+  if (!isnan (mtext->x_axis_dir.x) && !isnan (mtext->x_axis_dir.y)
+      && (mtext->x_axis_dir.x != 0.0 || mtext->x_axis_dir.y != 0.0))
+    rotation_rad = atan2 (mtext->x_axis_dir.y, mtext->x_axis_dir.x);
+  else
+    rotation_rad = 0.0;
+
+  /* Attachment is a 1-9 grid: TL, TC, TR, ML, MC, MR, BL, BC, BR.
+     Map to (horiz, vert) values expected by get_text_anchor /
+     get_dominant_baseline. */
+  switch (mtext->attachment)
+    {
+    case 2: case 5: case 8: horiz = 1; break; /* centre */
+    case 3: case 6: case 9: horiz = 2; break; /* right */
+    default:                horiz = 0; break; /* left (1,4,7) */
+    }
+  switch (mtext->attachment)
+    {
+    case 1: case 2: case 3: vert = 3; break; /* top */
+    case 4: case 5: case 6: vert = 2; break; /* middle */
+    default:                vert = 0; break; /* baseline (7,8,9) */
+    }
+
+  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                       fontfamily, mtext->text_height / cap_height_ratio,
+                       entity_color (obj),
+                       get_text_anchor (horiz),
+                       get_dominant_baseline (vert),
+                       rotation_rad * 180.0 / M_PI, 1.0, escaped,
+                       entity_aci_index (obj));
+
+  if (escaped)
+    free (escaped);
+}
+
 static void
 output_TEXT (Dwg_Object *obj)
 {
@@ -1330,8 +1510,17 @@ output_bulge_arc (double x1, double y1, double x2, double y2, double bulge)
   double sagitta = fabs (bulge) * chord / 2.0;
   double radius = (chord * chord / 4.0 + sagitta * sagitta) / (2.0 * sagitta);
   int large_arc = fabs (bulge) > 1.0 ? 1 : 0;
-  // Positive bulge = CCW in DWG, but with Y-flip becomes CW in SVG (sweep=1)
-  int sweep = bulge > 0 ? 1 : 0;
+  /* Positive bulge = CCW in DWG (Y-up).  The sweep-flag must be chosen
+     relative to the path's local coordinate system:
+       - in_block_definition == 1: coords are raw DWG, parent <g> applies
+         a Y-flip via matrix(…,-s,…) which reflects the rendering space —
+         that reflection inverts the visual sweep direction, so we emit the
+         sweep value that's "opposite" to what the final appearance needs.
+       - in_block_definition == 0: transform_Y already Y-flipped the
+         coordinate values (no reflection in the render matrix), so the
+         sweep-flag is interpreted directly against the final visual. */
+  int sweep = in_block_definition ? (bulge > 0 ? 1 : 0)
+                                   : (bulge > 0 ? 0 : 1);
   printf (" A %f,%f 0 %d,%d %f,%f", radius, radius, large_arc, sweep,
           transform_X (x2), transform_Y (y2));
 }
@@ -1821,6 +2010,9 @@ output_object (Dwg_Object *obj)
       break;
     case DWG_TYPE_ATTRIB:
       output_ATTRIB (obj);
+      break;
+    case DWG_TYPE_MTEXT:
+      output_MTEXT (obj);
       break;
     case DWG_TYPE_ARC:
       output_ARC (obj);
