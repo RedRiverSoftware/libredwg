@@ -868,13 +868,18 @@ output_MTEXT (Dwg_Object *obj)
     default:                vert = 0; break; /* baseline (7,8,9) */
     }
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, mtext->text_height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (horiz),
-                       get_dominant_baseline (vert),
-                       rotation_rad * 180.0 / M_PI, 1.0, escaped,
-                       entity_aci_index (obj));
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, mtext->text_height / cap_height_ratio,
+                         color,
+                         get_text_anchor (horiz),
+                         get_dominant_baseline (vert),
+                         rotation_rad * 180.0 / M_PI, 1.0, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -916,13 +921,18 @@ output_TEXT (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, text->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (text->horiz_alignment),
-                       get_dominant_baseline (text->vert_alignment),
-                       text->rotation * 180.0 / M_PI, wf, escaped,
-                       entity_aci_index (obj));
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, text->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (text->horiz_alignment),
+                         get_dominant_baseline (text->vert_alignment),
+                         text->rotation * 180.0 / M_PI, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -965,13 +975,18 @@ output_ATTDEF (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, attdef->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (attdef->horiz_alignment),
-                       get_dominant_baseline (attdef->vert_alignment),
-                       rotation_deg, wf, escaped,
-                       entity_aci_index (obj));
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, attdef->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (attdef->horiz_alignment),
+                         get_dominant_baseline (attdef->vert_alignment),
+                         rotation_deg, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -1017,13 +1032,18 @@ output_ATTRIB (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, attrib->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (attrib->horiz_alignment),
-                       get_dominant_baseline (attrib->vert_alignment),
-                       rotation_deg, wf, escaped,
-                       entity_aci_index (obj));
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, attrib->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (attrib->horiz_alignment),
+                         get_dominant_baseline (attrib->vert_alignment),
+                         rotation_deg, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -3029,11 +3049,14 @@ output_SVG (Dwg_Data *dwg)
           num ? "paper" : "model",
           g_layer_htbl_n);
 
-  /* Emit the CTB stylesheet from the active layout's PLOTSETTINGS.
-     The frontend uses this to select the correct CTB for print mode. */
+  /* Emit the CTB stylesheet from the layout of the space actually rendered.
+     The frontend uses this to select the correct CTB for print mode, so when
+     paper space was requested but empty and we fell back to model space
+     (num == 0), the CTB source must also switch to model space. */
   {
-    Dwg_Object_Ref *ps_ref
-        = mspace ? dwg_model_space_ref (dwg) : dwg_paper_space_ref (dwg);
+    Dwg_Object_Ref *ps_ref = (mspace || !num)
+                                 ? dwg_model_space_ref (dwg)
+                                 : dwg_paper_space_ref (dwg);
     if (!ps_ref)
       ps_ref = dwg_model_space_ref (dwg);
     if (ps_ref && ps_ref->obj
@@ -3048,8 +3071,26 @@ output_SVG (Dwg_Data *dwg)
                 = bh->layout->obj->tio.object->tio.LAYOUT;
             if (lo->plotsettings.stylesheet
                 && *(lo->plotsettings.stylesheet))
-              printf ("\t<!-- dwg-ctb:%s -->\n",
-                      (const char *)lo->plotsettings.stylesheet);
+              {
+                /* Convert TU (UTF-16) to UTF-8 for R_2007+ and entity-escape,
+                   then neutralise any "--" which is illegal inside an XML
+                   comment (same pattern as dwg-layer emission above). */
+                char *escaped;
+                if (dwg->header.version >= R_2007)
+                  escaped
+                      = htmlwescape ((BITCODE_TU)lo->plotsettings.stylesheet);
+                else
+                  escaped = htmlescape (lo->plotsettings.stylesheet,
+                                        dwg->header.codepage);
+                if (escaped)
+                  {
+                    char *s;
+                    while ((s = strstr (escaped, "--")))
+                      { *s = '_'; *(s + 1) = '_'; }
+                    printf ("\t<!-- dwg-ctb:%s -->\n", escaped);
+                    free (escaped);
+                  }
+              }
           }
       }
   }
