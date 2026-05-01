@@ -64,6 +64,7 @@
 static int opts = 0;
 static int mspace = 0; // only mspace, even when pspace is defined
 static int in_block_definition = 0; // 1 when outputting block symbol entities
+static int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 
 // Case-insensitive prefix match
 static int
@@ -268,31 +269,53 @@ entity_invisible (Dwg_Object *obj)
   return false;
 }
 
-static double
-entity_lweight (Dwg_Object_Entity *ent)
-{
-  // dxf_cvt_lweight returns lineweight in 100ths of a mm
-  int lw = dxf_cvt_lweight (ent->linewt);
-  double result;
+/* For entities WITH an explicit lineweight (set on the entity or its
+   layer), the paper-space mm value is multiplied by this factor so the
+   stroke is clearly visible on screen.  At this value a 0.25mm lineweight
+   (the common default) renders at ~1 viewport-unit — same visual thickness
+   as DEFAULT_STROKE_WIDTH_PX — so thin explicit lineweights look fine,
+   while thicker weights (0.5mm, 0.7mm, 1.0mm) scale up proportionally.
+   Because these strokes do NOT get non-scaling-stroke, they also inflate
+   with any enclosing block transform, matching AutoCAD's semantics for
+   entities that have a deliberate drawing-unit thickness. */
+#define LINEWEIGHT_DISPLAY_SCALE 4.0
 
-  // BYLAYER (-1): look up layer's lineweight
+/* For entities with default / ByBlock / unset lineweight we render at a
+   fixed minimum stroke width in the root viewport's user units.  These
+   strokes DO use non-scaling-stroke, so they stay consistent across the
+   drawing regardless of block transforms. */
+#define DEFAULT_STROKE_WIDTH_PX 1.0
+
+/* Resolved lineweight in paper-space millimetres, or 0.0 when the entity
+   uses default / ByBlock / unset lineweight.  Resolves ByLayer. */
+static double
+entity_lweight_mm (Dwg_Object_Entity *ent)
+{
+  int lw = dxf_cvt_lweight (ent->linewt);
   if (lw == -1 && ent->layer && ent->layer->obj
       && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
     {
       Dwg_Object_LAYER *layer = ent->layer->obj->tio.object->tio.LAYER;
       lw = dxf_cvt_lweight (layer->linewt);
     }
+  return lw > 0 ? (double)lw / 100.0 : 0.0;
+}
 
-  // Default/ByBlock/negative: use minimum visible width
-  if (lw <= 0)
-    return 0.25;
+/* Whether the entity has an explicit (non-default) lineweight.  Used to
+   decide if the SVG stroke should be given vector-effect="non-scaling-stroke". */
+static int
+entity_lweight_is_explicit (Dwg_Object_Entity *ent)
+{
+  return entity_lweight_mm (ent) > 0.0 ? 1 : 0;
+}
 
-  // Convert from 100ths of mm to mm (SVG coordinate units)
-  result = (double)lw / 100.0;
-  if (result < 0.25)
-    return 0.25;
-
-  return result;
+static double
+entity_lweight (Dwg_Object_Entity *ent)
+{
+  double mm = entity_lweight_mm (ent);
+  if (mm <= 0.0)
+    return DEFAULT_STROKE_WIDTH_PX;
+  return mm * LINEWEIGHT_DISPLAY_SCALE;
 }
 
 static char *
@@ -322,7 +345,9 @@ aci_color (unsigned int index)
       case 6:
         return (char *)"magenta";
       case 7:
-        return (char *)"white"; // ACI 7 is "foreground" — white on dark bg
+        // ACI 7 is the "foreground" colour — it contrasts with the background.
+        // White on a dark model-space canvas, black on a light paper-space page.
+        return (char *)(paper_space_bg ? "black" : "white");
       case 0:   // ByBlock
       default:
         return (char *)"black";
@@ -367,17 +392,169 @@ entity_color (Dwg_Object *obj)
   return cmc_color (&ent->color);
 }
 
+/* Returns the resolved ACI index for an entity (0-255), or -1 for truecolor.
+   Resolves ByLayer (256) to the layer's ACI index.
+   Used to emit data-aci="N" for frontend CTB print-mode styling. */
+static int
+entity_aci_index (Dwg_Object *obj)
+{
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  BITCODE_CMC *color;
+
+  if (ent->color.index == 256) /* ByLayer */
+    {
+      if (ent->layer && ent->layer->obj
+          && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer
+              = ent->layer->obj->tio.object->tio.LAYER;
+          color = &layer->color;
+        }
+      else
+        color = &ent->color;
+    }
+  else
+    color = &ent->color;
+
+  /* Truecolor: flag bit 0x80 set, bit 0x40 clear => RGB, not ACI */
+  if (color->flag & 0x80 && !(color->flag & 0x40))
+    return -1;
+
+  /* ACI stored in low byte of rgb with method 0xc3 (layer encoding) */
+  if (color->index == 256 && (color->rgb >> 24) == 0xc3)
+    return (int)(color->rgb & 0xff);
+
+  if (color->index >= 0 && color->index < 256)
+    return (int)color->index;
+
+  return 7; /* fallback to foreground */
+}
+
+/* Resolve an entity's effective linetype, following ByLayer if needed.
+   Returns NULL for Continuous (solid) lines. */
+static Dwg_Object_LTYPE *
+entity_ltype (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  BITCODE_H ltype_h = NULL;
+
+  /* ltype_flags: 0=ByLayer, 1=ByBlock, 2=Continuous, 3=explicit handle */
+  if (ent->ltype_flags == 2)
+    return NULL; /* Continuous — solid line */
+  if (ent->ltype_flags == 3 && ent->ltype)
+    ltype_h = ent->ltype;
+  else if (ent->ltype_flags == 0) /* ByLayer */
+    {
+      if (ent->layer && ent->layer->obj
+          && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer
+              = ent->layer->obj->tio.object->tio.LAYER;
+          ltype_h = layer->ltype;
+        }
+    }
+  /* ByBlock (1) and unresolved: treat as Continuous */
+  if (!ltype_h)
+    return NULL;
+
+  {
+    Dwg_Object *o = dwg_ref_object_silent (dwg, ltype_h);
+    if (o && o->fixedtype == DWG_TYPE_LTYPE)
+      {
+        Dwg_Object_LTYPE *lt = o->tio.object->tio.LTYPE;
+        /* Continuous / ByBlock linetypes have numdashes == 0 */
+        if (lt->numdashes > 0)
+          return lt;
+      }
+  }
+  return NULL;
+}
+
+/* Build an SVG stroke-dasharray string from a linetype's dash pattern.
+   Caller must free() the returned string.  Returns NULL for solid lines. */
+static char *
+entity_dasharray (Dwg_Object *obj)
+{
+  Dwg_Object_LTYPE *lt = entity_ltype (obj);
+  Dwg_Object_Entity *ent;
+  double lt_scale;
+  char buf[512];
+  int pos = 0;
+  int i;
+
+  if (!lt)
+    return NULL;
+
+  ent = obj->tio.entity;
+  /* Effective scale = entity ltype_scale * global LTSCALE
+     When PSLTSCALE=1 (the default in modern DWGs) linetypes in paper
+     space render at their defined paper-space length regardless of the
+     global LTSCALE, so we skip the LTSCALE multiplier in that case. */
+  lt_scale = ent->ltype_scale > 0.0 ? ent->ltype_scale : 1.0;
+  {
+    Dwg_Data *dwg = obj->parent;
+    double global_ltscale = dwg->header_vars.LTSCALE;
+    int psltscale = dwg->header_vars.PSLTSCALE;
+    if (!psltscale && global_ltscale > 0.0)
+      lt_scale *= global_ltscale;
+  }
+
+  for (i = 0; i < lt->numdashes && pos < (int)sizeof (buf) - 20; i++)
+    {
+      double len = lt->dashes[i].length * lt_scale;
+      if (len < 0.0)
+        len = -len; /* gaps are stored as negative */
+      if (len < 0.01)
+        len = 0.01; /* SVG needs non-zero for dots */
+      if (pos > 0)
+        pos += sprintf (buf + pos, " ");
+      pos += sprintf (buf + pos, "%.2f", len);
+    }
+
+  if (pos == 0)
+    return NULL;
+
+  {
+    char *result = (char *)malloc ((size_t)(pos + 1));
+    memcpy (result, buf, (size_t)(pos + 1));
+    return result;
+  }
+}
+
+/* Emit the closing attributes and style for a stroked SVG element. */
 static void
 common_entity (Dwg_Object *obj)
 {
   double lweight;
   char *color;
+  char *dashes;
+  int aci;
+  const char *ve_attr;
   lweight = entity_lweight (obj->tio.entity);
   color = entity_color (obj);
-  printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-          color, lweight);
+  aci = entity_aci_index (obj);
+  dashes = entity_dasharray (obj);
+  /* Only default-lineweight strokes get non-scaling-stroke, so they stay
+     at a uniform minimum thickness even inside non-uniformly scaled INSERT
+     transforms.  Explicit lineweights are meant to be prominent and are
+     allowed to scale with their enclosing transform (typically they're
+     only used on paper-space entities that aren't inside such blocks). */
+  ve_attr = entity_lweight_is_explicit (obj->tio.entity)
+                ? ""
+                : " vector-effect=\"non-scaling-stroke\"";
+  if (dashes)
+    printf ("      data-aci=\"%d\"%s"
+            " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
+            "stroke-dasharray:%s;stroke-linecap:round\" />\n",
+            aci, ve_attr, color, lweight, dashes);
+  else
+    printf ("      data-aci=\"%d\"%s"
+            " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+            aci, ve_attr, color, lweight);
   if (*color == '#')
     free (color);
+  free (dashes);
 }
 
 // Get font family and cap height ratio from a STYLE object
@@ -468,7 +645,7 @@ output_text_element (Dwg_Object *obj, double x, double y,
                      const char *fontfamily, double font_size,
                      const char *color, const char *text_anchor,
                      const char *dominant_baseline, double rotation_deg,
-                     double width_factor, const char *escaped)
+                     double width_factor, const char *escaped, int aci)
 {
   int has_rotation = fabs (rotation_deg) > 0.001;
   int has_scale = fabs (width_factor - 1.0) > 0.001;
@@ -482,16 +659,36 @@ output_text_element (Dwg_Object *obj, double x, double y,
 
   printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
           "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
-          "text-anchor=\"%s\" dominant-baseline=\"%s\"",
+          "text-anchor=\"%s\" dominant-baseline=\"%s\" data-aci=\"%d\"",
           obj->index, tx, render_y, fontfamily, font_size, color,
-          text_anchor, dominant_baseline);
+          text_anchor, dominant_baseline, aci);
 
-  if (has_rotation && has_scale)
+  if (has_rotation && in_block_definition)
+    {
+      /* When text is rotated inside a block definition, the naive
+         rotate(angle, cx, cy) scale(1, -1) produces wrong positions:
+         the scale moves the text away from the rotation centre and the
+         rotation amplifies that offset, scattering text diagonally.
+         Instead, compute a single matrix that combines rotation, Y-flip
+         (for parent INSERT Y-flip compensation), and optional width
+         scaling while preserving the text's anchor position.
+
+         Derivation:
+           T = translate(x, y) * rotate(α) * scale(wf, -1)
+                 * translate(-x/wf, y)
+         which simplifies to the matrix below. */
+      double rot_rad = rotation_deg * M_PI / 180.0;
+      double c = cos (rot_rad);
+      double s = sin (rot_rad);
+      double wf = has_scale ? width_factor : 1.0;
+      printf (" transform=\"matrix(%f %f %f %f %f %f)\"",
+              c * wf, s * wf, s, -c,
+              x * (1 - c) + s * y,
+              y * (1 - c) - s * x);
+    }
+  else if (has_rotation && has_scale)
     printf (" transform=\"rotate(%f %f %f) scale(%f %d)\"",
             -rotation_deg, tx, render_y, width_factor, ys);
-  else if (has_rotation && in_block_definition)
-    printf (" transform=\"rotate(%f %f %f) scale(1 -1)\"",
-            -rotation_deg, tx, render_y);
   else if (has_rotation)
     printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, render_y);
   else if (has_scale)
@@ -502,7 +699,192 @@ output_text_element (Dwg_Object *obj, double x, double y,
   printf (">%s</text>\n", escaped ? escaped : "");
 }
 
-// TODO: MTEXT
+/* Strip MTEXT inline formatting codes from a text buffer, returning a newly
+   allocated plain-text string.  MTEXT adds codes that TEXT never has:
+     \P                   paragraph break (becomes a space here)
+     \~                   non-breaking space (becomes a space)
+     \\                   literal backslash
+     {...}                grouping braces
+     \C<n>; \H<n>[x];     inline style changes (color, height, ...)
+     \W<n>; \Q<n>;
+     \f<font>|...; \F..;
+     \T<n>;
+     \L ... \l            underline on/off (stripped)
+     \O ... \o            overline on/off (stripped)
+     \S<num>^<den>;       stacked fraction -> "num/den"
+   Caller frees the returned string.  Accepts NULL (returns NULL). */
+static char *
+mtext_strip_formatting (const char *src)
+{
+  size_t len, i, o;
+  char *out;
+  if (!src)
+    return NULL;
+  len = strlen (src);
+  out = (char *)malloc (len + 1);
+  if (!out)
+    return NULL;
+  for (i = 0, o = 0; i < len;)
+    {
+      char c = src[i];
+      if (c == '{' || c == '}')
+        {
+          i++;
+          continue;
+        }
+      if (c == '\\' && i + 1 < len)
+        {
+          char n = src[i + 1];
+          switch (n)
+            {
+            case 'P':
+            case '~':
+              out[o++] = ' ';
+              i += 2;
+              continue;
+            case '\\':
+              out[o++] = '\\';
+              i += 2;
+              continue;
+            case 'L':
+            case 'l':
+            case 'O':
+            case 'o':
+              /* underline/overline toggles — no text content */
+              i += 2;
+              continue;
+            case 'S':
+              {
+                /* Stacked fraction \Snum^den;  ->  num/den  */
+                size_t j = i + 2;
+                while (j < len && src[j] != '^' && src[j] != ';')
+                  out[o++] = src[j++];
+                if (j < len && src[j] == '^')
+                  {
+                    out[o++] = '/';
+                    j++;
+                    while (j < len && src[j] != ';')
+                      out[o++] = src[j++];
+                  }
+                if (j < len && src[j] == ';')
+                  j++;
+                i = j;
+                continue;
+              }
+            case 'C':
+            case 'H':
+            case 'W':
+            case 'Q':
+            case 'T':
+            case 'f':
+            case 'F':
+            case 'A':
+            case 'p':
+              {
+                /* Style-change codes: skip up to (and including) the
+                   terminating ';'. */
+                size_t j = i + 2;
+                while (j < len && src[j] != ';')
+                  j++;
+                if (j < len)
+                  j++;
+                i = j;
+                continue;
+              }
+            default:
+              /* Unknown escape — keep the character after the backslash
+                 and drop the backslash itself. */
+              out[o++] = n;
+              i += 2;
+              continue;
+            }
+        }
+      out[o++] = c;
+      i++;
+    }
+  out[o] = '\0';
+  return out;
+}
+
+static void
+output_MTEXT (Dwg_Object *obj)
+{
+  Dwg_Data *dwg = obj->parent;
+  Dwg_Entity_MTEXT *mtext = obj->tio.entity->tio.MTEXT;
+  char *plain;
+  char *escaped;
+  const char *fontfamily;
+  double cap_height_ratio;
+  BITCODE_H style_ref;
+  Dwg_Object *o;
+  Dwg_Object_STYLE *style;
+  BITCODE_2DPOINT pt_in, pt;
+  double rotation_rad;
+  int horiz, vert;
+
+  if (!mtext->text || entity_invisible (obj))
+    return;
+  if (isnan_3BD (mtext->ins_pt) || isnan_3BD (mtext->extrusion))
+    return;
+
+  style_ref = mtext->style;
+  o = style_ref ? dwg_ref_object_silent (dwg, style_ref) : NULL;
+  style = o ? o->tio.object->tio.STYLE : NULL;
+  get_font_info (style, o, &fontfamily, &cap_height_ratio);
+
+  plain = mtext_strip_formatting (mtext->text);
+  if (!plain)
+    return;
+  if (dwg->header.version >= R_2007)
+    escaped = htmlwescape ((BITCODE_TU)plain);
+  else
+    escaped = htmlescape (plain, dwg->header.codepage);
+  free (plain);
+
+  pt_in.x = mtext->ins_pt.x;
+  pt_in.y = mtext->ins_pt.y;
+  transform_OCS_2d (&pt, pt_in, mtext->extrusion);
+
+  /* MTEXT rotation comes from x_axis_dir, not an explicit angle. */
+  if (!isnan (mtext->x_axis_dir.x) && !isnan (mtext->x_axis_dir.y)
+      && (mtext->x_axis_dir.x != 0.0 || mtext->x_axis_dir.y != 0.0))
+    rotation_rad = atan2 (mtext->x_axis_dir.y, mtext->x_axis_dir.x);
+  else
+    rotation_rad = 0.0;
+
+  /* Attachment is a 1-9 grid: TL, TC, TR, ML, MC, MR, BL, BC, BR.
+     Map to (horiz, vert) values expected by get_text_anchor /
+     get_dominant_baseline. */
+  switch (mtext->attachment)
+    {
+    case 2: case 5: case 8: horiz = 1; break; /* centre */
+    case 3: case 6: case 9: horiz = 2; break; /* right */
+    default:                horiz = 0; break; /* left (1,4,7) */
+    }
+  switch (mtext->attachment)
+    {
+    case 1: case 2: case 3: vert = 3; break; /* top */
+    case 4: case 5: case 6: vert = 2; break; /* middle */
+    default:                vert = 0; break; /* baseline (7,8,9) */
+    }
+
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, mtext->text_height / cap_height_ratio,
+                         color,
+                         get_text_anchor (horiz),
+                         get_dominant_baseline (vert),
+                         rotation_rad * 180.0 / M_PI, 1.0, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
+
+  if (escaped)
+    free (escaped);
+}
+
 static void
 output_TEXT (Dwg_Object *obj)
 {
@@ -539,12 +921,18 @@ output_TEXT (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, text->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (text->horiz_alignment),
-                       get_dominant_baseline (text->vert_alignment),
-                       text->rotation * 180.0 / M_PI, wf, escaped);
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, text->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (text->horiz_alignment),
+                         get_dominant_baseline (text->vert_alignment),
+                         text->rotation * 180.0 / M_PI, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -587,12 +975,18 @@ output_ATTDEF (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, attdef->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (attdef->horiz_alignment),
-                       get_dominant_baseline (attdef->vert_alignment),
-                       rotation_deg, wf, escaped);
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, attdef->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (attdef->horiz_alignment),
+                         get_dominant_baseline (attdef->vert_alignment),
+                         rotation_deg, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -638,12 +1032,18 @@ output_ATTRIB (Dwg_Object *obj)
   if (wf == 0.0)
     wf = 1.0;
 
-  output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                       fontfamily, attrib->height / cap_height_ratio,
-                       entity_color (obj),
-                       get_text_anchor (attrib->horiz_alignment),
-                       get_dominant_baseline (attrib->vert_alignment),
-                       rotation_deg, wf, escaped);
+  {
+    char *color = entity_color (obj);
+    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
+                         fontfamily, attrib->height / cap_height_ratio,
+                         color,
+                         get_text_anchor (attrib->horiz_alignment),
+                         get_dominant_baseline (attrib->vert_alignment),
+                         rotation_deg, wf, escaped,
+                         entity_aci_index (obj));
+    if (*color == '#')
+      free (color);
+  }
 
   if (escaped)
     free (escaped);
@@ -1083,14 +1483,32 @@ output_LWPOLYLINE (Dwg_Object *obj)
           }
         if (pw > 0.0)
           {
-            double lweight = entity_lweight (obj->tio.entity);
             char *color = entity_color (obj);
-            if (pw > lweight)
-              lweight = pw;
-            printf ("      style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
-                    color, lweight);
+            char *dashes = entity_dasharray (obj);
+            int aci = entity_aci_index (obj);
+            /* A polyline const_width / vertex width is a deliberate
+               geometric thickness in drawing units set by the drawing
+               author (e.g. 0.97mm).  Unlike the small fraction-of-a-mm
+               lineweight indices, these values are already at a visible
+               scale so they're used directly — no display boost.  No
+               non-scaling-stroke either: the width is geometry and should
+               inflate with any enclosing block transform, matching
+               AutoCAD's rendering. */
+            double lweight = pw;
+            if (lweight < DEFAULT_STROKE_WIDTH_PX)
+              lweight = DEFAULT_STROKE_WIDTH_PX;
+            if (dashes)
+              printf ("      data-aci=\"%d\""
+                      " style=\"fill:none;stroke:%s;stroke-width:%.2fpx;"
+                      "stroke-dasharray:%s;stroke-linecap:round\" />\n",
+                      aci, color, lweight, dashes);
+            else
+              printf ("      data-aci=\"%d\""
+                      " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\" />\n",
+                      aci, color, lweight);
             if (*color == '#')
               free (color);
+            free (dashes);
           }
         else
           common_entity (obj);
@@ -1112,8 +1530,17 @@ output_bulge_arc (double x1, double y1, double x2, double y2, double bulge)
   double sagitta = fabs (bulge) * chord / 2.0;
   double radius = (chord * chord / 4.0 + sagitta * sagitta) / (2.0 * sagitta);
   int large_arc = fabs (bulge) > 1.0 ? 1 : 0;
-  // Positive bulge = CCW in DWG, but with Y-flip becomes CW in SVG (sweep=1)
-  int sweep = bulge > 0 ? 1 : 0;
+  /* Positive bulge = CCW in DWG (Y-up).  The sweep-flag must be chosen
+     relative to the path's local coordinate system:
+       - in_block_definition == 1: coords are raw DWG, parent <g> applies
+         a Y-flip via matrix(…,-s,…) which reflects the rendering space —
+         that reflection inverts the visual sweep direction, so we emit the
+         sweep value that's "opposite" to what the final appearance needs.
+       - in_block_definition == 0: transform_Y already Y-flipped the
+         coordinate values (no reflection in the render matrix), so the
+         sweep-flag is interpreted directly against the final visual. */
+  int sweep = in_block_definition ? (bulge > 0 ? 1 : 0)
+                                   : (bulge > 0 ? 0 : 1);
   printf (" A %f,%f 0 %d,%d %f,%f", radius, radius, large_arc, sweep,
           transform_X (x2), transform_Y (y2));
 }
@@ -1300,31 +1727,40 @@ output_HATCH (Dwg_Object *obj)
 
   fill_color = entity_color (obj);
   lweight = entity_lweight (obj->tio.entity);
+  {
+    int aci = entity_aci_index (obj);
 
-  printf ("\t<!-- hatch-%d -->\n", obj->index);
+    printf ("\t<!-- hatch-%d -->\n", obj->index);
 
-  if (hatch->is_solid_fill)
-    {
-      printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
-      for (i = 0; i < hatch->num_paths; i++)
-        {
-          output_hatch_path_data (&hatch->paths[i]);
-          if (i < hatch->num_paths - 1)
-            printf (" ");
-        }
-      printf ("\"\n\t      style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
-              fill_color);
-    }
-  else
-    {
-      for (i = 0; i < hatch->num_paths; i++)
-        {
-          printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
-          output_hatch_path_data (&hatch->paths[i]);
-          printf ("\"\n\t      style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
-                  fill_color, lweight);
-        }
-    }
+    if (hatch->is_solid_fill)
+      {
+        printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+        for (i = 0; i < hatch->num_paths; i++)
+          {
+            output_hatch_path_data (&hatch->paths[i]);
+            if (i < hatch->num_paths - 1)
+              printf (" ");
+          }
+        printf ("\"\n\t      data-aci=\"%d\""
+                " style=\"fill:%s;stroke:none;fill-rule:evenodd\" />\n",
+                aci, fill_color);
+      }
+    else
+      {
+        const char *ve_attr
+            = entity_lweight_is_explicit (obj->tio.entity)
+                  ? ""
+                  : " vector-effect=\"non-scaling-stroke\"";
+        for (i = 0; i < hatch->num_paths; i++)
+          {
+            printf ("\t<path id=\"dwg-object-%d-path-%d\" d=\"", obj->index, i);
+            output_hatch_path_data (&hatch->paths[i]);
+            printf ("\"\n\t      data-aci=\"%d\"%s"
+                    " style=\"fill:none;stroke:%s;stroke-width:%.1fpx\" />\n",
+                    aci, ve_attr, fill_color, lweight);
+          }
+      }
+  }
 
   if (*fill_color == '#')
     free (fill_color);
@@ -1390,35 +1826,49 @@ output_INSERT (Dwg_Object *obj)
         double sy = insert->scale.y;
         double base_x = hdr->base_pt.x;
         double base_y = hdr->base_pt.y;
-        tx = ins_pt.x - sx * base_x - model_xmin;
-        ty = page_height - ins_pt.y + sy * base_y + model_ymin;
+        if (in_block_definition)
+          {
+            /* Raw DWG coords — the parent transform (viewport matrix or
+               enclosing INSERT's <use>) handles the final mapping. */
+            tx = ins_pt.x - sx * base_x;
+            ty = ins_pt.y - sy * base_y;
+          }
+        else
+          {
+            tx = ins_pt.x - sx * base_x - model_xmin;
+            ty = page_height - ins_pt.y + sy * base_y + model_ymin;
+          }
       }
 
-      printf ("\t<!-- insert-%d -->\n", obj->index);
-      // Using matrix for precise control. For rotation=0:
-      // matrix(sx, 0, 0, -sy, tx, ty)
-      if (fabs (insert->rotation) < 0.0001)
-        {
-          printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
-                  "xlink:href=\"#symbol-" FORMAT_HV "\" />"
-                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
-                  obj->index, insert->scale.x, -insert->scale.y, tx, ty,
-                  insert->block_header->absolute_ref,
-                  ARGS_H (insert->block_header->handleref));
-        }
-      else
-        {
-          // With rotation, need full matrix calculation
-          // For now, use translate+rotate+scale (may need refinement)
-          printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
-                  "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
-                  "\" />"
-                  "<!-- block_header->handleref: " FORMAT_H " -->\n",
-                  obj->index, tx, ty,
-                  rotation_deg, insert->scale.x, -insert->scale.y,
-                  insert->block_header->absolute_ref,
-                  ARGS_H (insert->block_header->handleref));
-        }
+      {
+        /* In block definitions / viewports the parent transform provides the
+           Y-flip, so the INSERT itself must NOT negate sy.  In top-level
+           rendering there is no parent flip, so INSERT does it. */
+        double y_scale = in_block_definition ? insert->scale.y
+                                             : -insert->scale.y;
+
+        printf ("\t<!-- insert-%d -->\n", obj->index);
+        if (fabs (insert->rotation) < 0.0001)
+          {
+            printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
+                    "xlink:href=\"#symbol-" FORMAT_HV "\" />"
+                    "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                    obj->index, insert->scale.x, y_scale, tx, ty,
+                    insert->block_header->absolute_ref,
+                    ARGS_H (insert->block_header->handleref));
+          }
+        else
+          {
+            printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
+                    "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
+                    "\" />"
+                    "<!-- block_header->handleref: " FORMAT_H " -->\n",
+                    obj->index, tx, ty,
+                    rotation_deg, insert->scale.x, y_scale,
+                    insert->block_header->absolute_ref,
+                    ARGS_H (insert->block_header->handleref));
+          }
+      }
     }
   else
     {
@@ -1580,6 +2030,9 @@ output_object (Dwg_Object *obj)
       break;
     case DWG_TYPE_ATTRIB:
       output_ATTRIB (obj);
+      break;
+    case DWG_TYPE_MTEXT:
+      output_MTEXT (obj);
       break;
     case DWG_TYPE_ARC:
       output_ARC (obj);
@@ -2494,8 +2947,19 @@ output_SVG (Dwg_Data *dwg)
   }
 
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
-    num = output_BLOCK_HEADER (
-        ref); // how many paper-space entities we did print
+    {
+      paper_space_bg = 1; // paper-space has a white background
+      /* White paper rectangle so the SVG is self-contained.  Viewers
+         can set the area outside the viewBox to grey (#8A8A8A) to
+         match the AutoCAD paper-space chrome. */
+      printf ("\t<rect x=\"%f\" y=\"%f\" width=\"%f\" height=\"%f\" "
+              "fill=\"white\" />\n",
+              0.0, 0.0, page_width, page_height);
+      num = output_BLOCK_HEADER (
+          ref); // how many paper-space entities we did print
+      if (!num)
+        paper_space_bg = 0; // paper space was empty, falling back to model
+    }
   if (!num && (ref = dwg_model_space_ref (dwg)))
     output_BLOCK_HEADER (ref);
 
@@ -2532,7 +2996,23 @@ output_SVG (Dwg_Data *dwg)
                       double ty = page_height - vp->center.y
                                   + s * vp->VIEWCTR.y + model_ymin;
 
-                      printf ("\t<g transform=\"matrix(%f 0 0 %f %f %f)\">"
+                      /* Clip rectangle in SVG paper-space coordinates */
+                      double clip_x = vp->center.x - vp->width / 2.0
+                                      - model_xmin;
+                      double clip_y = page_height
+                                      - (vp->center.y + vp->height / 2.0)
+                                      + model_ymin;
+
+                      printf ("\t<defs><clipPath id=\"vp-clip-%d\">"
+                              "<rect x=\"%f\" y=\"%f\" "
+                              "width=\"%f\" height=\"%f\"/>"
+                              "</clipPath></defs>\n",
+                              vpobj->index, clip_x, clip_y,
+                              vp->width, vp->height);
+
+                      printf ("\t<g clip-path=\"url(#vp-clip-%d)\">\n",
+                              vpobj->index);
+                      printf ("\t\t<g transform=\"matrix(%f 0 0 %f %f %f)\">"
                               "<!-- viewport-%d -->\n",
                               s, -s, tx, ty, vpobj->index);
 
@@ -2544,6 +3024,7 @@ output_SVG (Dwg_Data *dwg)
                         in_block_definition = save_ibd;
                       }
 
+                      printf ("\t\t</g>\n");
                       printf ("\t</g>\n");
                     }
                 }
@@ -2568,9 +3049,56 @@ output_SVG (Dwg_Data *dwg)
           num ? "paper" : "model",
           g_layer_htbl_n);
 
+  /* Emit the CTB stylesheet from the layout of the space actually rendered.
+     The frontend uses this to select the correct CTB for print mode, so when
+     paper space was requested but empty and we fell back to model space
+     (num == 0), the CTB source must also switch to model space. */
+  {
+    Dwg_Object_Ref *ps_ref = (mspace || !num)
+                                 ? dwg_model_space_ref (dwg)
+                                 : dwg_paper_space_ref (dwg);
+    if (!ps_ref)
+      ps_ref = dwg_model_space_ref (dwg);
+    if (ps_ref && ps_ref->obj
+        && ps_ref->obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+      {
+        Dwg_Object_BLOCK_HEADER *bh
+            = ps_ref->obj->tio.object->tio.BLOCK_HEADER;
+        if (bh->layout && bh->layout->obj
+            && bh->layout->obj->fixedtype == DWG_TYPE_LAYOUT)
+          {
+            Dwg_Object_LAYOUT *lo
+                = bh->layout->obj->tio.object->tio.LAYOUT;
+            if (lo->plotsettings.stylesheet
+                && *(lo->plotsettings.stylesheet))
+              {
+                /* Convert TU (UTF-16) to UTF-8 for R_2007+ and entity-escape,
+                   then neutralise any "--" which is illegal inside an XML
+                   comment (same pattern as dwg-layer emission above). */
+                char *escaped;
+                if (dwg->header.version >= R_2007)
+                  escaped
+                      = htmlwescape ((BITCODE_TU)lo->plotsettings.stylesheet);
+                else
+                  escaped = htmlescape (lo->plotsettings.stylesheet,
+                                        dwg->header.codepage);
+                if (escaped)
+                  {
+                    char *s;
+                    while ((s = strstr (escaped, "--")))
+                      { *s = '_'; *(s + 1) = '_'; }
+                    printf ("\t<!-- dwg-ctb:%s -->\n", escaped);
+                    free (escaped);
+                  }
+              }
+          }
+      }
+  }
+
   printf ("</svg>\n");
   fflush (stdout);
   free_layer_handle_table ();
+  paper_space_bg = 0; // reset for next call when used as a library
 }
 
 #ifndef DWG2SVG_NO_MAIN
