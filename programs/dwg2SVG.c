@@ -61,10 +61,14 @@
 #include "suffix.inc"
 #include "my_getopt.h"
 
-static int opts = 0;
-static int mspace = 0; // only mspace, even when pspace is defined
-static int in_block_definition = 0; // 1 when outputting block symbol entities
-static int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
+/* Per-call rendering state.  Marked _Thread_local so concurrent calls to
+   the SVG entry points in dwg_svg_api.c don't trample each other — each
+   thread gets its own copy.  This replaced a process-wide mutex that
+   previously serialised all renderer calls. */
+static _Thread_local int opts = 0;
+static _Thread_local int mspace = 0; // only mspace, even when pspace is defined
+static _Thread_local int in_block_definition = 0; // 1 when outputting block symbol entities
+static _Thread_local int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 
 // Case-insensitive prefix match
 static int
@@ -114,10 +118,10 @@ strcasestr_compat (const char *haystack, const char *needle)
   return NULL;
 #endif
 }
-static double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
-Dwg_Data g_dwg;
-double model_xmin, model_ymin, model_xmax, model_ymax;
-double page_width, page_height, scale;
+static _Thread_local double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
+_Thread_local Dwg_Data g_dwg;
+_Thread_local double model_xmin, model_ymin, model_xmax, model_ymax;
+_Thread_local double page_width, page_height, scale;
 
 // Extents calculation structure
 typedef struct _Extents
@@ -3004,8 +3008,8 @@ typedef struct
   char *name;               /* HTML-escaped layer name (heap) */
 } LayerHandleEntry;
 
-static LayerHandleEntry *g_layer_htbl = NULL;
-static unsigned int g_layer_htbl_n = 0;
+static _Thread_local LayerHandleEntry *g_layer_htbl = NULL;
+static _Thread_local unsigned int g_layer_htbl_n = 0;
 
 static void
 build_layer_handle_table (Dwg_Data *dwg)
@@ -4025,7 +4029,9 @@ main (int argc, char *argv[])
   int c;
 #ifdef HAVE_GETOPT_LONG
   int option_index = 0;
-  static struct option long_options[]
+  /* Not static: &opts is no longer a constant expression because `opts` is
+     _Thread_local.  Auto storage allows runtime initializers. */
+  struct option long_options[]
       = { { "verbose", 1, &opts, 1 }, // optional
           { "mspace", 0, 0, 0 },      { "force-free", 0, 0, 0 },
           { "help", 0, 0, 0 },        { "version", 0, 0, 0 },

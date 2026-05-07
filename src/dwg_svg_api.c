@@ -27,21 +27,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 
 #include <dwg.h>
 #include <dwg_api.h>
 #include <dwg_svg_api.h>
 
-/* dwg2SVG.c uses ~10 file-scope globals (g_dwg, model_xmin/ymin/xmax/ymax,
+/* dwg2SVG.c's file-scope globals (g_dwg, model_xmin/ymin/xmax/ymax,
    page_width/height, scale, in_block_definition, block_base_x/y, mspace,
-   opts, paper_space_bg) plus this file's static writer-callback pointer.
-   Concurrent calls to the public API would trample those.  Until the
-   globals are refactored into a per-call context, serialise the entry
-   points with a process-wide mutex.  The lock is held only for the
-   render call itself; per-call buffer ownership and file I/O happen
-   outside the critical section. */
-static pthread_mutex_t g_svg_api_mutex = PTHREAD_MUTEX_INITIALIZER;
+   opts, paper_space_bg) plus this file's writer-callback pair below are
+   all marked _Thread_local, so concurrent calls to the public API don't
+   trample each other's state.  Each thread gets its own copy of every
+   variable. */
 
 #if defined(__GNUC__)
 #  define SVG_PRINTF_ATTR __attribute__ ((format (gnu_printf, 1, 2)))
@@ -55,8 +51,8 @@ static pthread_mutex_t g_svg_api_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef void (*dwg_svg_write_cb)(const char *data, size_t len, void *user);
 
-static dwg_svg_write_cb g_svg_writer = NULL;
-static void *g_svg_writer_user = NULL;
+static _Thread_local dwg_svg_write_cb g_svg_writer = NULL;
+static _Thread_local void *g_svg_writer_user = NULL;
 
 SVG_PRINTF_ATTR
 static int
@@ -240,10 +236,8 @@ dwg_to_svg(const char *dwg_path, char **svg_out, size_t *svg_len,
   if (!dwg_path || !svg_out || !svg_len)
     return DWG_ERR_INVALIDDWG;
 
-  pthread_mutex_lock(&g_svg_api_mutex);
   rc = dwg_svg_render_file(dwg_path, 0, mspace_only, dwg_svg_buffer_writer,
                            &buf);
-  pthread_mutex_unlock(&g_svg_api_mutex);
 
   if (rc != 0)
     {
@@ -279,9 +273,7 @@ dwg_data_to_svg(Dwg_Data *dwg, char **svg_out, size_t *svg_len, int mspace_only)
   if (!dwg || !svg_out || !svg_len)
     return DWG_ERR_INVALIDDWG;
 
-  pthread_mutex_lock(&g_svg_api_mutex);
   rc = dwg_svg_render_data(dwg, mspace_only, dwg_svg_buffer_writer, &buf);
-  pthread_mutex_unlock(&g_svg_api_mutex);
 
   if (rc != 0)
     {
@@ -331,9 +323,7 @@ dwg_write_svg(const char *dwg_path, const char *svg_path, int mspace_only)
   if (!f)
     return DWG_ERR_IOERROR;
 
-  pthread_mutex_lock(&g_svg_api_mutex);
   rc = dwg_svg_render_file(dwg_path, 0, mspace_only, dwg_svg_file_writer, f);
-  pthread_mutex_unlock(&g_svg_api_mutex);
 
   fflush(f);
   fclose(f);
