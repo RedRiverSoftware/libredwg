@@ -885,9 +885,16 @@ mtext_buf_append (Mtext_Buf *b, const char *src, size_t n)
   if (b->len + n + 1 > b->cap)
     {
       size_t newcap = b->cap ? b->cap : 64;
+      char *p;
       while (newcap < b->len + n + 1)
         newcap *= 2;
-      b->data = (char *)realloc (b->data, newcap);
+      /* OOM: keep the existing buffer and drop this append.  The caller
+         continues with whatever was already accumulated; the worst-case
+         result is truncated text, never a NULL deref. */
+      p = (char *)realloc (b->data, newcap);
+      if (!p)
+        return;
+      b->data = p;
       b->cap = newcap;
     }
   memcpy (b->data + b->len, src, n);
@@ -967,7 +974,20 @@ mtext_runs_append (Mtext_Runs *rs, Mtext_Run r)
   if (rs->count == rs->cap)
     {
       size_t newcap = rs->cap ? rs->cap * 2 : 8;
-      rs->runs = (Mtext_Run *)realloc (rs->runs, newcap * sizeof (Mtext_Run));
+      Mtext_Run *p = (Mtext_Run *)realloc (rs->runs,
+                                           newcap * sizeof (Mtext_Run));
+      if (!p)
+        {
+          /* OOM: free the run we just took ownership of (text/style/denom
+             were transferred from the parser's working buffers) and
+             continue with what's already collected. */
+          free (r.text);
+          mtext_style_free_owned (&r.style);
+          if (r.denom)
+            free (r.denom);
+          return;
+        }
+      rs->runs = p;
       rs->cap = newcap;
     }
   rs->runs[rs->count++] = r;
@@ -1737,7 +1757,19 @@ output_MTEXT (Dwg_Object *obj)
           if (r->newlines_before > 0)
             printf (" x=\"%f\" dy=\"%fem\"", tx, line_dy);
           if (r->style.font_family)
-            printf (" font-family=\"%s\"", r->style.font_family);
+            {
+              /* The font name comes from the MTEXT \f<face>|...; code in
+                 the source DWG and is therefore caller-controlled.  Run
+                 it through the XML escape so a malicious face name like
+                 `Arial" onload="evil()` can't break out of the attribute
+                 and inject hostile attributes into the SVG. */
+              char *escaped_ff = mtext_escape_utf8 (r->style.font_family);
+              if (escaped_ff)
+                {
+                  printf (" font-family=\"%s\"", escaped_ff);
+                  free (escaped_ff);
+                }
+            }
           if (r->style.bold)
             printf (" font-weight=\"bold\"");
           if (r->style.italic)
