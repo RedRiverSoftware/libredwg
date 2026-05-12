@@ -32,6 +32,13 @@
 #include <dwg_api.h>
 #include <dwg_svg_api.h>
 
+/* dwg2SVG.c's file-scope globals (g_dwg, model_xmin/ymin/xmax/ymax,
+   page_width/height, scale, in_block_definition, block_base_x/y, mspace,
+   opts, paper_space_bg) plus this file's writer-callback pair below are
+   all marked _Thread_local, so concurrent calls to the public API don't
+   trample each other's state.  Each thread gets its own copy of every
+   variable. */
+
 #if defined(__GNUC__)
 #  define SVG_PRINTF_ATTR __attribute__ ((format (gnu_printf, 1, 2)))
 #else
@@ -44,8 +51,8 @@
 
 typedef void (*dwg_svg_write_cb)(const char *data, size_t len, void *user);
 
-static dwg_svg_write_cb g_svg_writer = NULL;
-static void *g_svg_writer_user = NULL;
+static _Thread_local dwg_svg_write_cb g_svg_writer = NULL;
+static _Thread_local void *g_svg_writer_user = NULL;
 
 SVG_PRINTF_ATTR
 static int

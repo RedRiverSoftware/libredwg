@@ -61,10 +61,14 @@
 #include "suffix.inc"
 #include "my_getopt.h"
 
-static int opts = 0;
-static int mspace = 0; // only mspace, even when pspace is defined
-static int in_block_definition = 0; // 1 when outputting block symbol entities
-static int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
+/* Per-call rendering state.  Marked _Thread_local so concurrent calls to
+   the SVG entry points in dwg_svg_api.c don't trample each other — each
+   thread gets its own copy.  This replaced a process-wide mutex that
+   previously serialised all renderer calls. */
+static _Thread_local int opts = 0;
+static _Thread_local int mspace = 0; // only mspace, even when pspace is defined
+static _Thread_local int in_block_definition = 0; // 1 when outputting block symbol entities
+static _Thread_local int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 
 // Case-insensitive prefix match
 static int
@@ -114,10 +118,10 @@ strcasestr_compat (const char *haystack, const char *needle)
   return NULL;
 #endif
 }
-static double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
-Dwg_Data g_dwg;
-double model_xmin, model_ymin, model_xmax, model_ymax;
-double page_width, page_height, scale;
+static _Thread_local double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
+_Thread_local Dwg_Data g_dwg;
+_Thread_local double model_xmin, model_ymin, model_xmax, model_ymax;
+_Thread_local double page_width, page_height, scale;
 
 // Extents calculation structure
 typedef struct _Extents
@@ -380,7 +384,16 @@ entity_color (Dwg_Object *obj)
 {
   Dwg_Object_Entity *ent = obj->tio.entity;
 
-  if (ent->color.index == 256) // ByLayer
+  /* ByLayer (256) and ByBlock (0) both resolve to the layer's color for
+     top-level entities.  AutoCAD treats top-level ByBlock entities as
+     ByLayer because there is no enclosing block reference to inherit from;
+     the calling INSERT's color isn't propagated through dwg2SVG's block
+     expansion either, so block-defined ByBlock entities also fall back to
+     the layer's color.  This is closer to AutoCAD's display than returning
+     literal black.  Don't redirect when the entity carries an explicit
+     truecolor (`flag & 0x80`) — that's a deliberate per-entity RGB value. */
+  if ((ent->color.index == 256 || ent->color.index == 0)
+      && !(ent->color.flag & 0x80))
     {
       if (ent->layer && ent->layer->obj
           && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
@@ -393,15 +406,16 @@ entity_color (Dwg_Object *obj)
 }
 
 /* Returns the resolved ACI index for an entity (0-255), or -1 for truecolor.
-   Resolves ByLayer (256) to the layer's ACI index.
-   Used to emit data-aci="N" for frontend CTB print-mode styling. */
+   Resolves ByLayer (256) and ByBlock (0) to the layer's ACI index — see
+   entity_color() for the reasoning. */
 static int
 entity_aci_index (Dwg_Object *obj)
 {
   Dwg_Object_Entity *ent = obj->tio.entity;
   BITCODE_CMC *color;
 
-  if (ent->color.index == 256) /* ByLayer */
+  if ((ent->color.index == 256 || ent->color.index == 0)
+      && !(ent->color.flag & 0x80))
     {
       if (ent->layer && ent->layer->obj
           && ent->layer->obj->fixedtype == DWG_TYPE_LAYER)
@@ -699,90 +713,632 @@ output_text_element (Dwg_Object *obj, double x, double y,
   printf (">%s</text>\n", escaped ? escaped : "");
 }
 
-/* Strip MTEXT inline formatting codes from a text buffer, returning a newly
-   allocated plain-text string.  MTEXT adds codes that TEXT never has:
-     \P                   paragraph break (becomes a space here)
-     \~                   non-breaking space (becomes a space)
+/* ===========================================================================
+   MTEXT inline-formatting parser.
+   ---------------------------------------------------------------------------
+   AutoCAD MTEXT embeds formatting codes in the text string:
+     \P                   paragraph break  -> tspan on a new line
+     \~                   non-breaking space (U+00A0)
      \\                   literal backslash
-     {...}                grouping braces
-     \C<n>; \H<n>[x];     inline style changes (color, height, ...)
-     \W<n>; \Q<n>;
-     \f<font>|...; \F..;
-     \T<n>;
-     \L ... \l            underline on/off (stripped)
-     \O ... \o            overline on/off (stripped)
-     \S<num>^<den>;       stacked fraction -> "num/den"
-   Caller frees the returned string.  Accepts NULL (returns NULL). */
+     \{ \}                literal braces
+     {...}                grouping (push/pop style)
+     \L ... \l            underline on/off
+     \O ... \o            overline on/off
+     \K ... \k            strike-through on/off
+     \C<n>;               ACI color (256 = revert to base, ByLayer)
+     \H<n>;  \H<n>x;      text height (absolute or relative to base)
+     \f<face>|b<0|1>|i<0|1>|c<n>|p<n>;
+                          font face, bold, italic (codepage/pitch ignored)
+     \F<file>;            font file (extension stripped)
+     \W<n>; \Q<n>; \T<n>; \A<n>; \p<args>;
+                          width / oblique / tracking / vertical-align /
+                          paragraph indent — consumed but not rendered
+                          (negligible visual impact in the corpus)
+     \S<num>^<den>;       stacked fraction (rendered flat as num/den)
+     \U+XXXX              Unicode codepoint
+     %%c %%d %%p          diameter / degree / plus-minus symbols
+     %%u %%o              underline / overline toggles
+
+   The parser produces a list of `Mtext_Run` segments, each with a snapshot
+   of the active style.  output_MTEXT walks the list emitting one <tspan>
+   per run, advancing dy on paragraph breaks. */
+
+/* Escape an MTEXT run's text for direct embedding in SVG.  Unlike the
+   shared htmlescape() which interprets each byte through the DWG codepage
+   (turning UTF-8 multi-byte sequences like ⌀ E2 8C 80 into garbled
+   &#xE2;&#x152;&#x20AC;), this function treats the input as UTF-8 — what
+   the parser already produces — and only escapes XML metacharacters.  The
+   SVG declares encoding="UTF-8" so the multi-byte bytes pass through
+   untouched and the browser decodes them correctly.  Caller frees. */
 static char *
-mtext_strip_formatting (const char *src)
+mtext_escape_utf8 (const char *src)
 {
-  size_t len, i, o;
+  size_t len, i, pos = 0, cap;
   char *out;
   if (!src)
-    return NULL;
+    return strdup ("");
   len = strlen (src);
-  out = (char *)malloc (len + 1);
+  /* Worst case: every byte expands to "&quot;" (6 chars). */
+  cap = len * 6 + 1;
+  out = (char *)malloc (cap);
   if (!out)
     return NULL;
-  for (i = 0, o = 0; i < len;)
+  for (i = 0; i < len; i++)
+    {
+      unsigned char c = (unsigned char)src[i];
+      const char *replacement = NULL;
+      size_t rlen = 0;
+      switch (c)
+        {
+        case '&':  replacement = "&amp;";  rlen = 5; break;
+        case '<':  replacement = "&lt;";   rlen = 4; break;
+        case '>':  replacement = "&gt;";   rlen = 4; break;
+        case '"':  replacement = "&quot;"; rlen = 6; break;
+        case '\'': replacement = "&#39;";  rlen = 5; break;
+        case '{':  replacement = "&#123;"; rlen = 6; break;
+        case '}':  replacement = "&#125;"; rlen = 6; break;
+        default: break;
+        }
+      if (replacement)
+        {
+          memcpy (out + pos, replacement, rlen);
+          pos += rlen;
+        }
+      else
+        {
+          /* Pass the byte through.  ASCII (< 0x80) is fine; high bytes
+             are part of UTF-8 multi-byte sequences and are decoded by the
+             SVG renderer. */
+          out[pos++] = (char)c;
+        }
+    }
+  out[pos] = '\0';
+  return out;
+}
+
+#define MTEXT_GROUP_STACK_MAX 16
+
+typedef struct
+{
+  int    underline;
+  int    overline;
+  int    strike;
+  int    bold;
+  int    italic;
+  char  *font_family;     /* malloc'd, NULL = inherit base */
+  int    has_color;       /* 1 when \C<n>; with n != 256/0 is active */
+  int    aci_color_idx;
+  double height_scale;    /* multiplier on base font_size; 1.0 = inherit */
+} Mtext_Style;
+
+typedef struct
+{
+  char        *text;            /* malloc'd UTF-8, escape codes resolved.
+                                   Never empty for content runs; emitted only
+                                   when the parser flushes a non-empty buf. */
+  int          newlines_before; /* 0 = continue current line, 1 = next line,
+                                   2 = next line plus 1 blank line, etc.
+                                   Renderer emits (n - 1) blank tspans before
+                                   the content tspan when n >= 1. */
+  Mtext_Style  style;           /* snapshot of style active for this run */
+  char        *denom;           /* non-NULL for \S stacked fractions */
+} Mtext_Run;
+
+typedef struct
+{
+  char  *data;
+  size_t len;
+  size_t cap;
+} Mtext_Buf;
+
+typedef struct
+{
+  Mtext_Run *runs;
+  size_t     count;
+  size_t     cap;
+} Mtext_Runs;
+
+static void
+mtext_style_init (Mtext_Style *s)
+{
+  s->underline = 0;
+  s->overline = 0;
+  s->strike = 0;
+  s->bold = 0;
+  s->italic = 0;
+  s->font_family = NULL;
+  s->has_color = 0;
+  s->aci_color_idx = 0;
+  s->height_scale = 1.0;
+}
+
+/* Deep-copy `src` into `dst`.  `dst` must be uninitialised or just freed. */
+static void
+mtext_style_copy (Mtext_Style *dst, const Mtext_Style *src)
+{
+  *dst = *src;
+  if (src->font_family)
+    dst->font_family = strdup (src->font_family);
+}
+
+static void
+mtext_style_free_owned (Mtext_Style *s)
+{
+  if (s->font_family)
+    {
+      free (s->font_family);
+      s->font_family = NULL;
+    }
+}
+
+static void
+mtext_buf_init (Mtext_Buf *b)
+{
+  b->data = NULL;
+  b->len = 0;
+  b->cap = 0;
+}
+
+static void
+mtext_buf_append (Mtext_Buf *b, const char *src, size_t n)
+{
+  if (b->len + n + 1 > b->cap)
+    {
+      size_t newcap = b->cap ? b->cap : 64;
+      char *p;
+      while (newcap < b->len + n + 1)
+        newcap *= 2;
+      /* OOM: keep the existing buffer and drop this append.  The caller
+         continues with whatever was already accumulated; the worst-case
+         result is truncated text, never a NULL deref. */
+      p = (char *)realloc (b->data, newcap);
+      if (!p)
+        return;
+      b->data = p;
+      b->cap = newcap;
+    }
+  memcpy (b->data + b->len, src, n);
+  b->len += n;
+  b->data[b->len] = '\0';
+}
+
+static void
+mtext_buf_append_char (Mtext_Buf *b, char c)
+{
+  mtext_buf_append (b, &c, 1);
+}
+
+/* Encode a Unicode codepoint as UTF-8 into `b`. */
+static void
+mtext_buf_append_codepoint (Mtext_Buf *b, unsigned int cp)
+{
+  if (cp < 0x80)
+    {
+      char c = (char)cp;
+      mtext_buf_append (b, &c, 1);
+    }
+  else if (cp < 0x800)
+    {
+      char s[2];
+      s[0] = (char)(0xC0 | (cp >> 6));
+      s[1] = (char)(0x80 | (cp & 0x3F));
+      mtext_buf_append (b, s, 2);
+    }
+  else if (cp < 0x10000)
+    {
+      char s[3];
+      s[0] = (char)(0xE0 | (cp >> 12));
+      s[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      s[2] = (char)(0x80 | (cp & 0x3F));
+      mtext_buf_append (b, s, 3);
+    }
+  else
+    {
+      char s[4];
+      s[0] = (char)(0xF0 | (cp >> 18));
+      s[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+      s[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      s[3] = (char)(0x80 | (cp & 0x3F));
+      mtext_buf_append (b, s, 4);
+    }
+}
+
+/* Take ownership of the buffer's data, returning a NUL-terminated string.
+   Resets the buffer to empty.  Always returns non-NULL. */
+static char *
+mtext_buf_steal (Mtext_Buf *b)
+{
+  char *out;
+  if (!b->data)
+    return strdup ("");
+  out = b->data;
+  b->data = NULL;
+  b->len = 0;
+  b->cap = 0;
+  return out;
+}
+
+static void
+mtext_buf_reset (Mtext_Buf *b)
+{
+  if (b->data)
+    free (b->data);
+  b->data = NULL;
+  b->len = 0;
+  b->cap = 0;
+}
+
+static void
+mtext_runs_append (Mtext_Runs *rs, Mtext_Run r)
+{
+  if (rs->count == rs->cap)
+    {
+      size_t newcap = rs->cap ? rs->cap * 2 : 8;
+      Mtext_Run *p = (Mtext_Run *)realloc (rs->runs,
+                                           newcap * sizeof (Mtext_Run));
+      if (!p)
+        {
+          /* OOM: free the run we just took ownership of (text/style/denom
+             were transferred from the parser's working buffers) and
+             continue with what's already collected. */
+          free (r.text);
+          mtext_style_free_owned (&r.style);
+          if (r.denom)
+            free (r.denom);
+          return;
+        }
+      rs->runs = p;
+      rs->cap = newcap;
+    }
+  rs->runs[rs->count++] = r;
+}
+
+static void
+mtext_runs_free (Mtext_Runs *rs)
+{
+  size_t i;
+  for (i = 0; i < rs->count; i++)
+    {
+      free (rs->runs[i].text);
+      mtext_style_free_owned (&rs->runs[i].style);
+      if (rs->runs[i].denom)
+        free (rs->runs[i].denom);
+    }
+  if (rs->runs)
+    free (rs->runs);
+  rs->runs = NULL;
+  rs->count = 0;
+  rs->cap = 0;
+}
+
+/* Parser state shared between flush calls. */
+typedef struct
+{
+  Mtext_Runs   runs;
+  Mtext_Buf    buf;
+  int          pending_newlines; /* incremented by \P; consumed by next flush */
+} Mtext_Parser;
+
+/* Emit a run only if `buf` has accumulated content.  `pending_newlines`
+   transfers onto the run and resets to 0; if `buf` is empty the call is a
+   no-op (so style-change handlers don't litter the SVG with empty tspans). */
+static void
+mtext_flush (Mtext_Parser *p, const Mtext_Style *cur)
+{
+  Mtext_Run r;
+  if (p->buf.len == 0)
+    return;
+  r.text = mtext_buf_steal (&p->buf);
+  r.newlines_before = p->pending_newlines;
+  mtext_style_init (&r.style);
+  mtext_style_copy (&r.style, cur);
+  r.denom = NULL;
+  mtext_runs_append (&p->runs, r);
+  p->pending_newlines = 0;
+}
+
+/* Parse `src` into a list of styled runs.  `base_text_height` is used to
+   normalise absolute \H<n>; values into a scale factor.  Returns an empty
+   list on NULL input.  Caller frees with mtext_runs_free(). */
+static Mtext_Runs
+mtext_parse (const char *src, double base_text_height)
+{
+  Mtext_Parser p;
+  Mtext_Style  cur;
+  Mtext_Style  stack[MTEXT_GROUP_STACK_MAX];
+  int          stack_depth = 0;
+  size_t       i, len;
+
+  p.runs.runs = NULL;
+  p.runs.count = 0;
+  p.runs.cap = 0;
+  mtext_buf_init (&p.buf);
+  p.pending_newlines = 0;
+  mtext_style_init (&cur);
+
+  if (!src)
+    return p.runs;
+  len = strlen (src);
+
+  for (i = 0; i < len;)
     {
       char c = src[i];
-      if (c == '{' || c == '}')
+
+      /* {} grouping */
+      if (c == '{')
         {
+          if (stack_depth < MTEXT_GROUP_STACK_MAX)
+            mtext_style_copy (&stack[stack_depth++], &cur);
           i++;
           continue;
         }
+      if (c == '}')
+        {
+          mtext_flush (&p, &cur);
+          if (stack_depth > 0)
+            {
+              mtext_style_free_owned (&cur);
+              cur = stack[--stack_depth];
+            }
+          i++;
+          continue;
+        }
+
+      /* %%X codes */
+      if (c == '%' && i + 2 < len && src[i + 1] == '%')
+        {
+          char m = src[i + 2];
+          if (m == 'c' || m == 'C')
+            {
+              mtext_buf_append (&p.buf, "\xe2\x8c\x80", 3); /* U+2300 ⌀ */
+              i += 3;
+              continue;
+            }
+          if (m == 'd' || m == 'D')
+            {
+              mtext_buf_append (&p.buf, "\xc2\xb0", 2); /* U+00B0 ° */
+              i += 3;
+              continue;
+            }
+          if (m == 'p' || m == 'P')
+            {
+              mtext_buf_append (&p.buf, "\xc2\xb1", 2); /* U+00B1 ± */
+              i += 3;
+              continue;
+            }
+          if (m == 'u' || m == 'U')
+            {
+              mtext_flush (&p, &cur);
+              cur.underline = !cur.underline;
+              i += 3;
+              continue;
+            }
+          if (m == 'o' || m == 'O')
+            {
+              mtext_flush (&p, &cur);
+              cur.overline = !cur.overline;
+              i += 3;
+              continue;
+            }
+          /* Unknown %% sequence — fall through to literal '%' */
+        }
+
+      /* Backslash escapes */
       if (c == '\\' && i + 1 < len)
         {
           char n = src[i + 1];
           switch (n)
             {
             case 'P':
+              mtext_flush (&p, &cur);
+              p.pending_newlines++;
+              i += 2;
+              continue;
             case '~':
-              out[o++] = ' ';
+              mtext_buf_append (&p.buf, "\xc2\xa0", 2); /* U+00A0 NBSP */
               i += 2;
               continue;
             case '\\':
-              out[o++] = '\\';
+              mtext_buf_append_char (&p.buf, '\\');
+              i += 2;
+              continue;
+            case '{':
+            case '}':
+              mtext_buf_append_char (&p.buf, n);
               i += 2;
               continue;
             case 'L':
             case 'l':
             case 'O':
             case 'o':
-              /* underline/overline toggles — no text content */
+            case 'K':
+            case 'k':
+              mtext_flush (&p, &cur);
+              switch (n)
+                {
+                case 'L': cur.underline = 1; break;
+                case 'l': cur.underline = 0; break;
+                case 'O': cur.overline = 1; break;
+                case 'o': cur.overline = 0; break;
+                case 'K': cur.strike = 1; break;
+                case 'k': cur.strike = 0; break;
+                default: break; /* unreachable */
+                }
               i += 2;
               continue;
-            case 'S':
+            case 'C':
               {
-                /* Stacked fraction \Snum^den;  ->  num/den  */
+                /* \C<n>; */
                 size_t j = i + 2;
-                while (j < len && src[j] != '^' && src[j] != ';')
-                  out[o++] = src[j++];
-                if (j < len && src[j] == '^')
+                long val = 0;
+                int has_digit = 0;
+                while (j < len && src[j] >= '0' && src[j] <= '9')
                   {
-                    out[o++] = '/';
+                    val = val * 10 + (src[j] - '0');
+                    has_digit = 1;
                     j++;
-                    while (j < len && src[j] != ';')
-                      out[o++] = src[j++];
+                  }
+                if (j < len && src[j] == ';')
+                  j++;
+                mtext_flush (&p, &cur);
+                if (has_digit)
+                  {
+                    if (val == 0 || val == 256)
+                      cur.has_color = 0; /* ByBlock / ByLayer => use base */
+                    else
+                      {
+                        cur.has_color = 1;
+                        cur.aci_color_idx = (int)val;
+                      }
+                  }
+                i = j;
+                continue;
+              }
+            case 'H':
+              {
+                /* \H<n>; (absolute, in drawing units) or \H<n>x; (multiplier) */
+                size_t j = i + 2;
+                double val = 0.0;
+                double frac = 0.0;
+                double frac_scale = 1.0;
+                int relative = 0;
+                int has_digit = 0;
+                int in_frac = 0;
+                while (j < len)
+                  {
+                    char d = src[j];
+                    if (d >= '0' && d <= '9')
+                      {
+                        if (in_frac)
+                          {
+                            frac_scale *= 0.1;
+                            frac += (d - '0') * frac_scale;
+                          }
+                        else
+                          val = val * 10.0 + (d - '0');
+                        has_digit = 1;
+                        j++;
+                      }
+                    else if (d == '.' && !in_frac)
+                      {
+                        in_frac = 1;
+                        j++;
+                      }
+                    else
+                      break;
+                  }
+                val += frac;
+                if (j < len && src[j] == 'x')
+                  {
+                    relative = 1;
+                    j++;
+                  }
+                if (j < len && src[j] == ';')
+                  j++;
+                mtext_flush (&p, &cur);
+                if (has_digit && val > 0.0)
+                  {
+                    if (relative)
+                      cur.height_scale = val;
+                    else if (base_text_height > 0.0)
+                      cur.height_scale = val / base_text_height;
+                  }
+                i = j;
+                continue;
+              }
+            case 'f':
+              {
+                /* \f<face>|b<0|1>|i<0|1>|c<n>|p<n>; */
+                size_t j = i + 2;
+                size_t name_start = j;
+                size_t name_end;
+                while (j < len && src[j] != '|' && src[j] != ';')
+                  j++;
+                name_end = j;
+                mtext_flush (&p, &cur);
+                mtext_style_free_owned (&cur);
+                cur.bold = 0;
+                cur.italic = 0;
+                if (name_end > name_start)
+                  {
+                    size_t nlen = name_end - name_start;
+                    cur.font_family = (char *)malloc (nlen + 1);
+                    memcpy (cur.font_family, src + name_start, nlen);
+                    cur.font_family[nlen] = '\0';
+                  }
+                while (j < len && src[j] == '|')
+                  {
+                    char tag;
+                    j++;
+                    if (j >= len)
+                      break;
+                    tag = src[j];
+                    j++;
+                    if (tag == 'b' && j < len && src[j] >= '0' && src[j] <= '9')
+                      {
+                        cur.bold = (src[j] != '0');
+                        j++;
+                      }
+                    else if (tag == 'i' && j < len && src[j] >= '0' && src[j] <= '9')
+                      {
+                        cur.italic = (src[j] != '0');
+                        j++;
+                      }
+                    /* skip up to next '|' or ';' */
+                    while (j < len && src[j] != '|' && src[j] != ';')
+                      j++;
                   }
                 if (j < len && src[j] == ';')
                   j++;
                 i = j;
                 continue;
               }
-            case 'C':
-            case 'H':
+            case 'F':
+              {
+                /* \F<file>;  — font file, strip extension */
+                size_t j = i + 2;
+                size_t name_start = j;
+                size_t name_end;
+                size_t nlen;
+                while (j < len && src[j] != ';')
+                  j++;
+                name_end = j;
+                if (j < len)
+                  j++;
+                mtext_flush (&p, &cur);
+                mtext_style_free_owned (&cur);
+                cur.bold = 0;
+                cur.italic = 0;
+                nlen = name_end - name_start;
+                if (nlen > 0)
+                  {
+                    size_t k;
+                    for (k = nlen; k > 0; k--)
+                      {
+                        if (src[name_start + k - 1] == '.')
+                          {
+                            nlen = k - 1;
+                            break;
+                          }
+                      }
+                    if (nlen > 0)
+                      {
+                        cur.font_family = (char *)malloc (nlen + 1);
+                        memcpy (cur.font_family, src + name_start, nlen);
+                        cur.font_family[nlen] = '\0';
+                      }
+                  }
+                i = j;
+                continue;
+              }
             case 'W':
             case 'Q':
             case 'T':
-            case 'f':
-            case 'F':
             case 'A':
             case 'p':
               {
-                /* Style-change codes: skip up to (and including) the
-                   terminating ';'. */
+                /* Consume + ignore — the corpus shows these have negligible
+                   visual impact; revisit if a real test case demands it. */
                 size_t j = i + 2;
                 while (j < len && src[j] != ';')
                   j++;
@@ -791,19 +1347,257 @@ mtext_strip_formatting (const char *src)
                 i = j;
                 continue;
               }
+            case 'S':
+              {
+                /* \S<num>^<den>;  or  \S<num>/<den>;
+                   Stored as a single run with `denom` set; the renderer
+                   currently emits this flat as "num/den" but the structured
+                   data is preserved for a future stacked-tspan upgrade. */
+                size_t j = i + 2;
+                Mtext_Buf num_buf, den_buf;
+                Mtext_Run sr;
+                mtext_buf_init (&num_buf);
+                mtext_buf_init (&den_buf);
+                while (j < len && src[j] != '^' && src[j] != '/'
+                       && src[j] != ';')
+                  {
+                    mtext_buf_append_char (&num_buf, src[j]);
+                    j++;
+                  }
+                if (j < len && (src[j] == '^' || src[j] == '/'))
+                  {
+                    j++;
+                    while (j < len && src[j] != ';')
+                      {
+                        mtext_buf_append_char (&den_buf, src[j]);
+                        j++;
+                      }
+                  }
+                if (j < len && src[j] == ';')
+                  j++;
+                mtext_flush (&p, &cur);
+                sr.text = mtext_buf_steal (&num_buf);
+                sr.denom = mtext_buf_steal (&den_buf);
+                sr.newlines_before = p.pending_newlines;
+                mtext_style_init (&sr.style);
+                mtext_style_copy (&sr.style, &cur);
+                mtext_runs_append (&p.runs, sr);
+                p.pending_newlines = 0;
+                mtext_buf_reset (&num_buf);
+                mtext_buf_reset (&den_buf);
+                i = j;
+                continue;
+              }
+            case 'U':
+              {
+                /* \U+XXXX */
+                if (i + 7 <= len && src[i + 2] == '+')
+                  {
+                    unsigned int cp = 0;
+                    int valid = 1;
+                    int k;
+                    for (k = 0; k < 4; k++)
+                      {
+                        char d = src[i + 3 + k];
+                        cp <<= 4;
+                        if (d >= '0' && d <= '9')
+                          cp |= (unsigned)(d - '0');
+                        else if (d >= 'a' && d <= 'f')
+                          cp |= (unsigned)(d - 'a' + 10);
+                        else if (d >= 'A' && d <= 'F')
+                          cp |= (unsigned)(d - 'A' + 10);
+                        else
+                          {
+                            valid = 0;
+                            break;
+                          }
+                      }
+                    if (valid)
+                      {
+                        mtext_buf_append_codepoint (&p.buf, cp);
+                        i += 7;
+                        continue;
+                      }
+                  }
+                /* Malformed — fall through to default */
+                mtext_buf_append_char (&p.buf, n);
+                i += 2;
+                continue;
+              }
             default:
-              /* Unknown escape — keep the character after the backslash
-                 and drop the backslash itself. */
-              out[o++] = n;
+              /* Unknown escape — drop the backslash, keep the next char.
+                 Matches the legacy stripper's behaviour. */
+              mtext_buf_append_char (&p.buf, n);
               i += 2;
               continue;
             }
         }
-      out[o++] = c;
+
+      if (c == '\t')
+        {
+          /* Tabs aren't reliable in SVG.  Substitute four spaces — matches
+             the visual width that engineering-note MTEXTs are built around
+             (e.g. "SC3-1 & 2:[TAB]CT CABLING…"). */
+          mtext_buf_append (&p.buf, "    ", 4);
+          i++;
+          continue;
+        }
+      mtext_buf_append_char (&p.buf, c);
       i++;
     }
-  out[o] = '\0';
+
+  mtext_flush (&p, &cur);
+  mtext_buf_reset (&p.buf);
+  mtext_style_free_owned (&cur);
+  while (stack_depth > 0)
+    mtext_style_free_owned (&stack[--stack_depth]);
+
+  return p.runs;
+}
+
+/* Word-wrap pass.  Walks `in` and splits any run whose text would push the
+   visual line width past `rect_width` (in drawing units), inserting wrap-
+   induced line breaks (newlines_before = 1) at the most recent whitespace.
+
+   `cwf` is a char-width factor — proportional fonts ≈ 0.55, monospace ≈ 0.6.
+   Width estimation is rough (we don't run the real font metrics), so the
+   factor errs on the early-wrap side rather than the overflow side.
+
+   Stacked-fraction runs (`denom != NULL`) are treated atomically.
+
+   Ownership: takes `in` by value, frees it before returning, and returns a
+   fresh `Mtext_Runs`.  Caller frees the returned value with mtext_runs_free.
+   If `rect_width <= 0` the input is returned untouched (no copy). */
+static Mtext_Runs
+mtext_runs_wrap (Mtext_Runs in, double font_size, double rect_width,
+                 double cwf)
+{
+  Mtext_Runs out = { NULL, 0, 0 };
+  size_t i;
+  double cur_line_width = 0.0;
+
+  if (rect_width <= 0.0 || font_size <= 0.0 || cwf <= 0.0)
+    return in;
+
+  for (i = 0; i < in.count; i++)
+    {
+      Mtext_Run *src = &in.runs[i];
+      double hscale = src->style.height_scale > 0.0
+                          ? src->style.height_scale
+                          : 1.0;
+      double cw = font_size * hscale * cwf;
+      const char *text = src->text;
+      size_t pos = 0;
+      size_t tlen;
+      int first_emit = 1;
+      int pending_nl = src->newlines_before;
+
+      if (src->newlines_before > 0)
+        cur_line_width = 0.0;
+
+      /* Stacked fractions and empty-text runs are emitted atomically. */
+      if (src->denom || !text || *text == '\0')
+        {
+          Mtext_Run nr;
+          nr.text = strdup (text ? text : "");
+          nr.newlines_before = pending_nl;
+          nr.denom = src->denom ? strdup (src->denom) : NULL;
+          mtext_style_init (&nr.style);
+          mtext_style_copy (&nr.style, &src->style);
+          mtext_runs_append (&out, nr);
+          if (text)
+            cur_line_width += strlen (text) * cw;
+          continue;
+        }
+
+      tlen = strlen (text);
+
+      while (pos < tlen)
+        {
+          double avail = rect_width - cur_line_width;
+          size_t max_chars = (avail > 0.0 && cw > 0.0)
+                                 ? (size_t)(avail / cw)
+                                 : 0;
+          size_t end = pos + max_chars;
+          size_t break_at;
+          size_t rlen;
+          Mtext_Run nr;
+
+          if (end >= tlen)
+            {
+              /* Rest of the run fits on the current line. */
+              rlen = tlen - pos;
+              nr.text = (char *)malloc (rlen + 1);
+              memcpy (nr.text, text + pos, rlen);
+              nr.text[rlen] = '\0';
+              nr.newlines_before = first_emit ? pending_nl : 1;
+              nr.denom = NULL;
+              mtext_style_init (&nr.style);
+              mtext_style_copy (&nr.style, &src->style);
+              mtext_runs_append (&out, nr);
+              cur_line_width += rlen * cw;
+              break;
+            }
+
+          /* Need a wrap point.  Prefer the last whitespace at or before
+             `end`; if there isn't one within the current run, hard-break
+             at `end` (or pos+1 to guarantee progress). */
+          break_at = end;
+          while (break_at > pos && text[break_at - 1] != ' ')
+            break_at--;
+          if (break_at <= pos)
+            {
+              break_at = (max_chars > 0) ? end : pos + 1;
+              if (break_at > tlen)
+                break_at = tlen;
+              if (break_at == pos)
+                break_at = pos + 1;
+            }
+
+          rlen = break_at - pos;
+          while (rlen > 0 && text[pos + rlen - 1] == ' ')
+            rlen--;
+
+          nr.text = (char *)malloc (rlen + 1);
+          if (rlen > 0)
+            memcpy (nr.text, text + pos, rlen);
+          nr.text[rlen] = '\0';
+          nr.newlines_before = first_emit ? pending_nl : 1;
+          nr.denom = NULL;
+          mtext_style_init (&nr.style);
+          mtext_style_copy (&nr.style, &src->style);
+          mtext_runs_append (&out, nr);
+
+          /* Skip leading whitespace for the wrapped continuation. */
+          pos = break_at;
+          while (pos < tlen && text[pos] == ' ')
+            pos++;
+          cur_line_width = 0.0;
+          first_emit = 0;
+        }
+    }
+
+  mtext_runs_free (&in);
   return out;
+}
+
+/* True when the run carries no style overrides relative to the base text
+   element — used to decide whether to take the legacy single-element fast
+   path (which produces byte-equal output to the old renderer). */
+static int
+mtext_run_is_plain (const Mtext_Run *r)
+{
+  if (r->newlines_before > 0 || r->denom)
+    return 0;
+  if (r->style.underline || r->style.overline || r->style.strike)
+    return 0;
+  if (r->style.bold || r->style.italic || r->style.font_family)
+    return 0;
+  if (r->style.has_color)
+    return 0;
+  if (r->style.height_scale != 1.0)
+    return 0;
+  return 1;
 }
 
 static void
@@ -811,16 +1605,20 @@ output_MTEXT (Dwg_Object *obj)
 {
   Dwg_Data *dwg = obj->parent;
   Dwg_Entity_MTEXT *mtext = obj->tio.entity->tio.MTEXT;
-  char *plain;
-  char *escaped;
+  Mtext_Runs runs;
   const char *fontfamily;
   double cap_height_ratio;
+  double font_size;
+  double line_dy;        /* em units; sign flipped inside block defs */
   BITCODE_H style_ref;
   Dwg_Object *o;
   Dwg_Object_STYLE *style;
   BITCODE_2DPOINT pt_in, pt;
-  double rotation_rad;
+  double rotation_rad, rotation_deg;
   int horiz, vert;
+  double tx, ty;
+  char *base_color;
+  int base_aci;
 
   if (!mtext->text || entity_invisible (obj))
     return;
@@ -832,14 +1630,7 @@ output_MTEXT (Dwg_Object *obj)
   style = o ? o->tio.object->tio.STYLE : NULL;
   get_font_info (style, o, &fontfamily, &cap_height_ratio);
 
-  plain = mtext_strip_formatting (mtext->text);
-  if (!plain)
-    return;
-  if (dwg->header.version >= R_2007)
-    escaped = htmlwescape ((BITCODE_TU)plain);
-  else
-    escaped = htmlescape (plain, dwg->header.codepage);
-  free (plain);
+  font_size = mtext->text_height / cap_height_ratio;
 
   pt_in.x = mtext->ins_pt.x;
   pt_in.y = mtext->ins_pt.y;
@@ -851,10 +1642,9 @@ output_MTEXT (Dwg_Object *obj)
     rotation_rad = atan2 (mtext->x_axis_dir.y, mtext->x_axis_dir.x);
   else
     rotation_rad = 0.0;
+  rotation_deg = rotation_rad * 180.0 / M_PI;
 
-  /* Attachment is a 1-9 grid: TL, TC, TR, ML, MC, MR, BL, BC, BR.
-     Map to (horiz, vert) values expected by get_text_anchor /
-     get_dominant_baseline. */
+  /* Attachment is a 1-9 grid: TL, TC, TR, ML, MC, MR, BL, BC, BR. */
   switch (mtext->attachment)
     {
     case 2: case 5: case 8: horiz = 1; break; /* centre */
@@ -868,21 +1658,181 @@ output_MTEXT (Dwg_Object *obj)
     default:                vert = 0; break; /* baseline (7,8,9) */
     }
 
+  /* Line-spacing factor (default 1.0) × the SVG 1.2em convention. */
   {
-    char *color = entity_color (obj);
-    output_text_element (obj, transform_X (pt.x), transform_Y (pt.y),
-                         fontfamily, mtext->text_height / cap_height_ratio,
-                         color,
-                         get_text_anchor (horiz),
-                         get_dominant_baseline (vert),
-                         rotation_rad * 180.0 / M_PI, 1.0, escaped,
-                         entity_aci_index (obj));
-    if (*color == '#')
-      free (color);
+    double lsf = mtext->linespace_factor;
+    if (lsf <= 0.0)
+      lsf = 1.0;
+    line_dy = 1.2 * lsf;
+    /* In block definitions the parent transform="scale(1 -1)" flips the
+       y-axis, so dy advances upward in display space.  Negate to keep
+       successive lines visually below each other. */
+    if (in_block_definition)
+      line_dy = -line_dy;
   }
 
-  if (escaped)
-    free (escaped);
+  runs = mtext_parse (mtext->text, mtext->text_height);
+  /* Word-wrap at the MTEXT box width.  Engineering-drawing MTEXT is usually
+     ALL CAPS in Arial-family fonts where the average glyph occupies ~0.6 of
+     the em-square; 0.65 for monospace.  Without real font metrics we err on
+     the early-wrap side so text never overflows the box. */
+  {
+    int monospace = (fontfamily && (strcmp (fontfamily, "Courier") == 0
+                                    || strcmp (fontfamily, "Lucida Console")
+                                           == 0));
+    double cwf = monospace ? 0.65 : 0.6;
+    runs = mtext_runs_wrap (runs, font_size, mtext->rect_width, cwf);
+  }
+  base_color = entity_color (obj);
+  base_aci = entity_aci_index (obj);
+
+  tx = transform_X (pt.x);
+  ty = transform_Y (pt.y);
+
+  /* Fast path: a single run with no style overrides produces byte-equal
+     output to the legacy renderer.  Most simple labels (e.g. NEWCL.dwg's
+     "CL") and ByLayer-only J607 notes hit this path. */
+  if (runs.count <= 1
+      && (runs.count == 0 || mtext_run_is_plain (&runs.runs[0])))
+    {
+      const char *body = runs.count == 1 ? runs.runs[0].text : "";
+      /* Parser output is UTF-8 — escape XML metachars only, leave high
+         bytes untouched.  htmlescape would mis-interpret each byte through
+         the document codepage. */
+      char *escaped = mtext_escape_utf8 (body);
+      output_text_element (obj, tx, ty, fontfamily, font_size, base_color,
+                           get_text_anchor (horiz),
+                           get_dominant_baseline (vert),
+                           rotation_deg, 1.0, escaped, base_aci);
+      if (escaped)
+        free (escaped);
+    }
+  else
+    {
+      double render_y = in_block_definition ? -ty : ty;
+      const char *anchor = get_text_anchor (horiz);
+      const char *baseline = get_dominant_baseline (vert);
+      int has_rotation = fabs (rotation_deg) > 0.001;
+      size_t i;
+
+      printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
+              "font-family=\"%s\" font-size=\"%f\" fill=\"%s\" "
+              "text-anchor=\"%s\" dominant-baseline=\"%s\" "
+              "data-aci=\"%d\" xml:space=\"preserve\"",
+              obj->index, tx, render_y, fontfamily, font_size, base_color,
+              anchor, baseline, base_aci);
+
+      if (has_rotation && in_block_definition)
+        {
+          double rot_rad = rotation_deg * M_PI / 180.0;
+          double c = cos (rot_rad);
+          double s = sin (rot_rad);
+          printf (" transform=\"matrix(%f %f %f %f %f %f)\"",
+                  c, s, s, -c,
+                  tx * (1 - c) + s * ty,
+                  ty * (1 - c) - s * tx);
+        }
+      else if (has_rotation)
+        printf (" transform=\"rotate(%f %f %f)\"",
+                -rotation_deg, tx, render_y);
+      else if (in_block_definition)
+        printf (" transform=\"scale(1 -1)\"");
+
+      printf (">");
+
+      for (i = 0; i < runs.count; i++)
+        {
+          const Mtext_Run *r = &runs.runs[i];
+          char *escaped;
+          int k;
+
+          /* For each \P beyond the one that opens this run's line, emit a
+             placeholder tspan containing &#160; (NBSP) so the browser
+             actually advances dy — empty tspans don't reliably do so. */
+          for (k = 1; k < r->newlines_before; k++)
+            printf ("<tspan x=\"%f\" dy=\"%fem\">&#160;</tspan>",
+                    tx, line_dy);
+
+          printf ("<tspan");
+          if (r->newlines_before > 0)
+            printf (" x=\"%f\" dy=\"%fem\"", tx, line_dy);
+          if (r->style.font_family)
+            {
+              /* The font name comes from the MTEXT \f<face>|...; code in
+                 the source DWG and is therefore caller-controlled.  Run
+                 it through the XML escape so a malicious face name like
+                 `Arial" onload="evil()` can't break out of the attribute
+                 and inject hostile attributes into the SVG. */
+              char *escaped_ff = mtext_escape_utf8 (r->style.font_family);
+              if (escaped_ff)
+                {
+                  printf (" font-family=\"%s\"", escaped_ff);
+                  free (escaped_ff);
+                }
+            }
+          if (r->style.bold)
+            printf (" font-weight=\"bold\"");
+          if (r->style.italic)
+            printf (" font-style=\"italic\"");
+          if (r->style.height_scale > 0.0
+              && r->style.height_scale != 1.0)
+            printf (" font-size=\"%fem\"", r->style.height_scale);
+          {
+            int has_under = r->style.underline;
+            int has_over = r->style.overline;
+            int has_strike = r->style.strike;
+            if (has_under || has_over || has_strike)
+              {
+                printf (" text-decoration=\"");
+                if (has_under)
+                  printf ("underline");
+                if (has_over)
+                  printf ("%soverline", has_under ? " " : "");
+                if (has_strike)
+                  printf ("%sline-through",
+                          (has_under || has_over) ? " " : "");
+                printf ("\"");
+              }
+          }
+          if (r->style.has_color)
+            {
+              char *cc = aci_color ((unsigned int)r->style.aci_color_idx);
+              printf (" fill=\"%s\" data-aci=\"%d\"", cc,
+                      r->style.aci_color_idx);
+              if (cc && *cc == '#')
+                free (cc);
+            }
+          printf (">");
+
+          if (r->denom)
+            {
+              /* Stacked fraction — flat "num/den" for now (matches the
+                 legacy renderer's output). */
+              size_t need = strlen (r->text) + 1 + strlen (r->denom) + 1;
+              char *combined = (char *)malloc (need);
+              snprintf (combined, need, "%s/%s", r->text, r->denom);
+              escaped = mtext_escape_utf8 (combined);
+              free (combined);
+            }
+          else
+            {
+              escaped = mtext_escape_utf8 (r->text);
+            }
+          if (escaped)
+            {
+              printf ("%s", escaped);
+              free (escaped);
+            }
+
+          printf ("</tspan>");
+        }
+
+      printf ("</text>\n");
+    }
+
+  if (base_color && *base_color == '#')
+    free (base_color);
+  mtext_runs_free (&runs);
 }
 
 static void
@@ -2090,8 +3040,8 @@ typedef struct
   char *name;               /* HTML-escaped layer name (heap) */
 } LayerHandleEntry;
 
-static LayerHandleEntry *g_layer_htbl = NULL;
-static unsigned int g_layer_htbl_n = 0;
+static _Thread_local LayerHandleEntry *g_layer_htbl = NULL;
+static _Thread_local unsigned int g_layer_htbl_n = 0;
 
 static void
 build_layer_handle_table (Dwg_Data *dwg)
@@ -3111,7 +4061,9 @@ main (int argc, char *argv[])
   int c;
 #ifdef HAVE_GETOPT_LONG
   int option_index = 0;
-  static struct option long_options[]
+  /* Not static: &opts is no longer a constant expression because `opts` is
+     _Thread_local.  Auto storage allows runtime initializers. */
+  struct option long_options[]
       = { { "verbose", 1, &opts, 1 }, // optional
           { "mspace", 0, 0, 0 },      { "force-free", 0, 0, 0 },
           { "help", 0, 0, 0 },        { "version", 0, 0, 0 },
