@@ -172,6 +172,16 @@ static void compute_block_extents (Extents *ext, Dwg_Object_Ref *ref);
 static void output_bulge_arc (double x1, double y1, double x2, double y2,
                               double bulge);
 static int output_object (Dwg_Object *obj);
+static char *layer_safe_id (const char *attr_name);
+static char *insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
+                                     const char *parent_eff_layer);
+
+/* Thread-local effective-layer state used by output_INSERT and
+   output_BLOCK_HEADER to drive the layer-0-in-block inheritance rule.
+   The BlockCombo machinery below assigns these before each <defs>
+   clone emission and resets them to NULL afterwards. */
+static _Thread_local const char *current_eff_layer = NULL;
+static _Thread_local const char *current_eff_layer_safe = NULL;
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -2796,28 +2806,39 @@ output_INSERT (Dwg_Object *obj)
            rendering there is no parent flip, so INSERT does it. */
         double y_scale = in_block_definition ? insert->scale.y
                                              : -insert->scale.y;
+        Dwg_Data *dwg = obj->parent;
+
+        /* Effective layer of THIS INSERT — used to pick the matching
+           block clone in <defs>.  Own layer wins unless it's "0" and a
+           parent effective layer is in scope (nested INSERT inheritance). */
+        char *eff_layer
+            = insert_effective_layer (obj, dwg, current_eff_layer);
+        char *eff_safe = eff_layer ? layer_safe_id (eff_layer) : NULL;
+        const char *suffix = eff_safe ? eff_safe : "_0";
 
         printf ("\t<!-- insert-%d -->\n", obj->index);
         if (fabs (insert->rotation) < 0.0001)
           {
             printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
-                    "xlink:href=\"#symbol-" FORMAT_HV "\" />"
+                    "xlink:href=\"#symbol-" FORMAT_HV "-%s\" />"
                     "<!-- block_header->handleref: " FORMAT_H " -->\n",
                     obj->index, insert->scale.x, y_scale, tx, ty,
-                    insert->block_header->absolute_ref,
+                    insert->block_header->absolute_ref, suffix,
                     ARGS_H (insert->block_header->handleref));
           }
         else
           {
             printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
                     "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
-                    "\" />"
+                    "-%s\" />"
                     "<!-- block_header->handleref: " FORMAT_H " -->\n",
                     obj->index, tx, ty,
                     rotation_deg, insert->scale.x, y_scale,
-                    insert->block_header->absolute_ref,
+                    insert->block_header->absolute_ref, suffix,
                     ARGS_H (insert->block_header->handleref));
           }
+        free (eff_layer);
+        free (eff_safe);
       }
     }
   else
@@ -2826,23 +2847,38 @@ output_INSERT (Dwg_Object *obj)
               ARGS_H (obj->handle));
     }
 
-  /* Process attached entities (ATTRIBs, and sometimes other entities like
-     LWPOLYLINE revision clouds).  These have entmode=2 and are not part
-     of the block's entity chain, so get_next_owned_entity skips them. */
-  if (insert->has_attribs && insert->num_owned > 0 && insert->attribs)
+  /* Attached entities (ATTRIBs etc.) are NOT emitted here.  They carry
+     their own layer assignment distinct from the INSERT's, so emitting
+     them inline would collapse them into the parent INSERT's layer group.
+     The caller (output_BLOCK_HEADER's per-layer pass, or
+     output_INSERT_attribs for the unnamed-block fallback) is responsible
+     for emitting them in the correct layer group. */
+}
+
+/* Emit ATTRIBs (and other attached entities like LWPOLYLINE revision
+   clouds) of an INSERT.  These have entmode=2 and are not part of the
+   block's entity chain, so get_next_owned_entity skips them.
+
+   Layer-aware callers should iterate insert->attribs themselves and emit
+   only those whose layer matches the current group.  This helper exists
+   for the unnamed-block fallback path that does not group by layer. */
+static void
+output_INSERT_attribs (Dwg_Object *obj)
+{
+  Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+  Dwg_Data *dwg;
+  BITCODE_BL i;
+  if (!insert->has_attribs || insert->num_owned == 0 || !insert->attribs)
+    return;
+  dwg = obj->parent;
+  for (i = 0; i < insert->num_owned; i++)
     {
-      Dwg_Data *dwg = obj->parent;
-      BITCODE_BL i;
-      for (i = 0; i < insert->num_owned; i++)
-        {
-          Dwg_Object *aobj
-              = dwg_ref_object_silent (dwg, insert->attribs[i]);
-          if (!aobj)
-            continue;
-          if (aobj->fixedtype == DWG_TYPE_SEQEND)
-            continue;
-          output_object (aobj);
-        }
+      Dwg_Object *aobj = dwg_ref_object_silent (dwg, insert->attribs[i]);
+      if (!aobj)
+        continue;
+      if (aobj->fixedtype == DWG_TYPE_SEQEND)
+        continue;
+      output_object (aobj);
     }
 }
 
@@ -3203,6 +3239,194 @@ entity_layer_name (Dwg_Object *obj, Dwg_Data *dwg)
   return layer_get_attr_name (lobj, dwg);
 }
 
+/* ── Block-clone state for layer-0-in-block inheritance ───────────────────
+   AutoCAD's "layer 0 inside a block inherits the INSERT's layer" rule means
+   the same block, referenced from INSERTs on different layers, must produce
+   different visibility groupings.  We implement that by emitting a separate
+   <g id="symbol-{handle}-{eff_layer_safe}"> per distinct effective layer
+   the block is referenced from, with each clone's layer-0 entities tagged
+   with the effective layer instead of the literal "0". */
+
+typedef struct
+{
+  BITCODE_RLL block_handle_value; /* BLOCK_HEADER ref->absolute_ref */
+  char *eff_layer;                /* HTML-escaped effective layer name (heap) */
+  char *eff_layer_safe_id;        /* sanitised for use as XML id suffix (heap) */
+} BlockCombo;
+
+static _Thread_local BlockCombo *g_block_combos = NULL;
+static _Thread_local unsigned int g_block_combos_n = 0;
+static _Thread_local unsigned int g_block_combos_cap = 0;
+
+/* current_eff_layer / current_eff_layer_safe are defined at file scope
+   near the forward declarations so output_INSERT can read them — see
+   the top of this file. */
+
+static void
+free_block_combos (void)
+{
+  unsigned int i;
+  for (i = 0; i < g_block_combos_n; i++)
+    {
+      free (g_block_combos[i].eff_layer);
+      free (g_block_combos[i].eff_layer_safe_id);
+    }
+  free (g_block_combos);
+  g_block_combos = NULL;
+  g_block_combos_n = 0;
+  g_block_combos_cap = 0;
+}
+
+/* Add a (handle, eff_layer) combo if not already present.  Takes ownership
+   of eff_layer_dup and eff_layer_safe_dup on insertion; the caller must
+   free them otherwise. */
+static int
+add_block_combo (BITCODE_RLL handle, const char *eff_layer)
+{
+  unsigned int i;
+  char *dup_layer;
+  char *dup_safe;
+  for (i = 0; i < g_block_combos_n; i++)
+    {
+      if (g_block_combos[i].block_handle_value == handle
+          && strcmp (g_block_combos[i].eff_layer, eff_layer) == 0)
+        return 0; /* already present */
+    }
+  if (g_block_combos_n >= g_block_combos_cap)
+    {
+      unsigned int new_cap = g_block_combos_cap == 0
+                                 ? 16
+                                 : g_block_combos_cap * 2;
+      BlockCombo *grow = (BlockCombo *)realloc (
+          g_block_combos, (size_t)new_cap * sizeof (BlockCombo));
+      if (!grow)
+        return 0;
+      g_block_combos = grow;
+      g_block_combos_cap = new_cap;
+    }
+  dup_layer = strdup (eff_layer);
+  dup_safe = layer_safe_id (eff_layer);
+  if (!dup_layer || !dup_safe)
+    {
+      free (dup_layer);
+      free (dup_safe);
+      return 0;
+    }
+  g_block_combos[g_block_combos_n].block_handle_value = handle;
+  g_block_combos[g_block_combos_n].eff_layer = dup_layer;
+  g_block_combos[g_block_combos_n].eff_layer_safe_id = dup_safe;
+  g_block_combos_n++;
+  return 1;
+}
+
+/* Find the BLOCK_HEADER ref in dwg->block_control.entries whose
+   absolute_ref matches the given handle value.  Returns NULL on miss. */
+static Dwg_Object_Ref *
+find_block_ref_by_handle (Dwg_Data *dwg, BITCODE_RLL handle)
+{
+  BITCODE_BL i;
+  if (!dwg->block_control.entries)
+    return NULL;
+  for (i = 0; i < dwg->block_control.num_entries; i++)
+    {
+      Dwg_Object_Ref *ref = dwg->block_control.entries[i];
+      if (ref && ref->absolute_ref == handle)
+        return ref;
+    }
+  return NULL;
+}
+
+/* Returns the data-layer string to use for an entity inside the current
+   emission context.  Honours layer-0 inheritance: when emitting block
+   contents under a non-NULL current_eff_layer, an entity on layer 0 is
+   tagged with the effective layer instead.  Caller must free. */
+static char *
+effective_layer_name (Dwg_Object *obj, Dwg_Data *dwg)
+{
+  char *own = entity_layer_name (obj, dwg);
+  if (current_eff_layer && own && strcmp (own, "0") == 0)
+    {
+      free (own);
+      return strdup (current_eff_layer);
+    }
+  return own;
+}
+
+/* Compute the effective layer of an INSERT given the current emission
+   context.  Caller must free.  The result is used both for routing the
+   <use xlink:href> to the correct block clone AND as the parent_eff_layer
+   when recursively collecting combos for the block's contents.
+
+   - Top-level (current_eff_layer == NULL): the INSERT's own layer.
+   - Inside a block clone (current_eff_layer != NULL): own layer if it is
+     not "0"; otherwise the parent's effective layer. */
+static char *
+insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
+                        const char *parent_eff_layer)
+{
+  char *own = entity_layer_name (obj, dwg);
+  if (parent_eff_layer && own && strcmp (own, "0") == 0)
+    {
+      free (own);
+      return strdup (parent_eff_layer);
+    }
+  return own;
+}
+
+/* Walk the entities of `container_obj` (a BLOCK_HEADER) and gather all
+   (target_block_handle, target_block_effective_layer) combinations needed
+   to satisfy layer-0 inheritance.  Recurses into the target block of each
+   INSERT it finds with the INSERT's effective layer as parent. */
+static void
+collect_block_combos_recursive (Dwg_Data *dwg, Dwg_Object *container_obj,
+                                const char *parent_eff_layer)
+{
+  Dwg_Object *obj;
+  if (!container_obj)
+    return;
+  obj = get_first_owned_entity (container_obj);
+  while (obj)
+    {
+      if (obj->fixedtype == DWG_TYPE_INSERT)
+        {
+          Dwg_Entity_INSERT *ins = obj->tio.entity->tio.INSERT;
+          if (ins->block_header && ins->block_header->obj
+              && ins->block_header->obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+            {
+              Dwg_Object *target = ins->block_header->obj;
+              char *eff = insert_effective_layer (obj, dwg,
+                                                  parent_eff_layer);
+              if (eff)
+                {
+                  BITCODE_RLL target_handle
+                      = ins->block_header->absolute_ref;
+                  int newly_added
+                      = add_block_combo (target_handle, eff);
+                  if (newly_added)
+                    collect_block_combos_recursive (dwg, target, eff);
+                  free (eff);
+                }
+            }
+        }
+      obj = get_next_owned_entity (container_obj, obj);
+    }
+}
+
+/* Build the set of (block_handle, effective_layer) combos that must be
+   emitted in <defs>.  Walks top-level model space and paper space, then
+   recurses into each referenced block. */
+static void
+collect_block_combos (Dwg_Data *dwg)
+{
+  Dwg_Object_Ref *ref;
+  /* Fresh start each invocation. */
+  free_block_combos ();
+  if ((ref = dwg_model_space_ref (dwg)) && ref->obj)
+    collect_block_combos_recursive (dwg, ref->obj, NULL);
+  if ((ref = dwg_paper_space_ref (dwg)) && ref->obj)
+    collect_block_combos_recursive (dwg, ref->obj, NULL);
+}
+
 static int
 output_BLOCK_HEADER (Dwg_Object_Ref *ref)
 {
@@ -3256,13 +3480,15 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
       if (!escaped || (strcasecmp (escaped, "*Model_Space") != 0
                        && strncasecmp_prefix (escaped, "*Paper_Space") != 0))
         {
+          const char *suffix
+              = current_eff_layer_safe ? current_eff_layer_safe : "_0";
           is_g = 1;
           // Set block definition mode with block's base point
           in_block_definition = 1;
           block_base_x = hdr->base_pt.x;
           block_base_y = hdr->base_pt.y;
-          printf ("\t<g id=\"symbol-" FORMAT_HV "\" >\n\t\t<!-- %s -->\n",
-                  ref->absolute_ref, escaped ? escaped : "");
+          printf ("\t<g id=\"symbol-" FORMAT_HV "-%s\" >\n\t\t<!-- %s -->\n",
+                  ref->absolute_ref, suffix, escaped ? escaped : "");
         }
       else
         {
@@ -3287,39 +3513,111 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
       int nlayers = 0, layer_cap = 0;
       int i, li;
 
-      /* Pass 1: collect unique layer names.
-         Uses string comparison so handle resolution failures (->obj == NULL)
-         don't silently collapse every entity onto "layer 0". */
+      /* Pass 1: collect unique data-layer names for non-INSERT entities
+         and INSERT attribs.  INSERTs themselves are emitted outside any
+         data-layer group (transparent containers), so their own layer is
+         not collected here.  ATTRIBs of INSERTs carry their own layer
+         assignment (no layer-0 inheritance — they are attached to the
+         INSERT, not contents of the block definition), so they use
+         entity_layer_name directly.  Non-INSERT block contents use
+         effective_layer_name to apply layer-0 inheritance when we are
+         emitting a block clone (current_eff_layer != NULL). */
       obj = get_first_owned_entity (ref->obj);
       while (obj)
         {
-          char *name = entity_layer_name (obj, dwg);
-          int found = 0;
-          for (i = 0; i < nlayers; i++)
-            if (strcmp (layers[i].attr_name, name) == 0)
-              {
-                found = 1;
-                break;
-              }
-          if (!found)
+          if (obj->fixedtype != DWG_TYPE_INSERT)
             {
-              if (nlayers >= layer_cap)
+              char *name = effective_layer_name (obj, dwg);
+              int found = 0;
+              for (i = 0; i < nlayers; i++)
+                if (strcmp (layers[i].attr_name, name) == 0)
+                  {
+                    found = 1;
+                    break;
+                  }
+              if (!found)
                 {
-                  layer_cap = layer_cap == 0 ? 8 : layer_cap * 2;
-                  layers = (LayerEntry *)realloc (
-                      layers, (size_t)layer_cap * sizeof (LayerEntry));
+                  if (nlayers >= layer_cap)
+                    {
+                      layer_cap = layer_cap == 0 ? 8 : layer_cap * 2;
+                      layers = (LayerEntry *)realloc (
+                          layers,
+                          (size_t)layer_cap * sizeof (LayerEntry));
+                    }
+                  layers[nlayers].attr_name = name;
+                  layers[nlayers].safe_id = layer_safe_id (name);
+                  nlayers++;
+                  name = NULL; /* ownership transferred */
                 }
-              layers[nlayers].attr_name = name;
-              layers[nlayers].safe_id = layer_safe_id (name);
-              nlayers++;
-              name = NULL; /* ownership transferred */
+              if (name)
+                free (name);
             }
-          if (name)
-            free (name);
+          else
+            {
+              Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+              if (insert->has_attribs && insert->num_owned > 0
+                  && insert->attribs)
+                {
+                  BITCODE_BL ai;
+                  for (ai = 0; ai < insert->num_owned; ai++)
+                    {
+                      Dwg_Object *aobj;
+                      char *aname;
+                      int afound = 0;
+                      aobj = dwg_ref_object_silent (dwg,
+                                                    insert->attribs[ai]);
+                      if (!aobj || aobj->fixedtype == DWG_TYPE_SEQEND
+                          || aobj->supertype != DWG_SUPERTYPE_ENTITY)
+                        continue;
+                      aname = entity_layer_name (aobj, dwg);
+                      for (i = 0; i < nlayers; i++)
+                        if (strcmp (layers[i].attr_name, aname) == 0)
+                          {
+                            afound = 1;
+                            break;
+                          }
+                      if (!afound)
+                        {
+                          if (nlayers >= layer_cap)
+                            {
+                              layer_cap
+                                  = layer_cap == 0 ? 8 : layer_cap * 2;
+                              layers = (LayerEntry *)realloc (
+                                  layers,
+                                  (size_t)layer_cap * sizeof (LayerEntry));
+                            }
+                          layers[nlayers].attr_name = aname;
+                          layers[nlayers].safe_id = layer_safe_id (aname);
+                          nlayers++;
+                          aname = NULL; /* ownership transferred */
+                        }
+                      if (aname)
+                        free (aname);
+                    }
+                }
+            }
           obj = get_next_owned_entity (ref->obj, obj);
         }
 
-      /* Pass 2: emit entities grouped into per-layer <g> elements */
+      /* Pass 2a: emit INSERT <use> elements with no data-layer wrapper.
+         INSERTs are transparent placement references — visibility of an
+         INSERT is decided by what its referenced block actually renders,
+         where each block-internal entity sits inside its own
+         <g data-layer="..."> and CSS [data-layer="X"] { display:none }
+         cascades through the <use> shadow tree.  Emitted BEFORE the
+         per-layer groups so they stack visually under direct entities
+         and ATTRIBs (annotations sit on top of symbols). */
+      obj = get_first_owned_entity (ref->obj);
+      while (obj)
+        {
+          if (obj->fixedtype == DWG_TYPE_INSERT)
+            num += output_object (obj);
+          obj = get_next_owned_entity (ref->obj, obj);
+        }
+
+      /* Pass 2b: emit non-INSERT entities and INSERT ATTRIBs grouped by
+         layer.  Each layer's <g data-layer="..."> drives the front-end
+         visibility toggle (CSS rule on the data-layer attribute). */
       for (li = 0; li < nlayers; li++)
         {
           printf ("\t<g data-layer=\"%s\" id=\"layer-%s\">\n",
@@ -3327,10 +3625,38 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
           obj = get_first_owned_entity (ref->obj);
           while (obj)
             {
-              char *name = entity_layer_name (obj, dwg);
-              if (strcmp (name, layers[li].attr_name) == 0)
-                num += output_object (obj);
-              free (name);
+              if (obj->fixedtype != DWG_TYPE_INSERT)
+                {
+                  char *name = effective_layer_name (obj, dwg);
+                  if (strcmp (name, layers[li].attr_name) == 0)
+                    num += output_object (obj);
+                  free (name);
+                }
+              else
+                {
+                  /* INSERT itself was emitted in Pass 2a; its attached
+                     ATTRIBs belong in their own data-layer groups. */
+                  Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+                  if (insert->has_attribs && insert->num_owned > 0
+                      && insert->attribs)
+                    {
+                      BITCODE_BL ai;
+                      for (ai = 0; ai < insert->num_owned; ai++)
+                        {
+                          Dwg_Object *aobj;
+                          char *aname;
+                          aobj = dwg_ref_object_silent (
+                              dwg, insert->attribs[ai]);
+                          if (!aobj || aobj->fixedtype == DWG_TYPE_SEQEND
+                              || aobj->supertype != DWG_SUPERTYPE_ENTITY)
+                            continue;
+                          aname = entity_layer_name (aobj, dwg);
+                          if (strcmp (aname, layers[li].attr_name) == 0)
+                            num += output_object (aobj);
+                          free (aname);
+                        }
+                    }
+                }
               obj = get_next_owned_entity (ref->obj, obj);
             }
           printf ("\t</g>\n");
@@ -3345,11 +3671,16 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
     }
   else
     {
-      /* Unnamed blocks: output entities sequentially */
+      /* Unnamed blocks: output entities sequentially.
+         Attribs are no longer emitted by output_INSERT itself, so we
+         emit them inline here to preserve the legacy behaviour for this
+         path (no layer grouping). */
       obj = get_first_owned_entity (ref->obj);
       while (obj)
         {
           num += output_object (obj);
+          if (obj->fixedtype == DWG_TYPE_INSERT)
+            output_INSERT_attribs (obj);
           obj = get_next_owned_entity (ref->obj, obj);
         }
     }
@@ -3831,6 +4162,13 @@ output_SVG (Dwg_Data *dwg)
   // Build the layer handle→name lookup table (used by entity_layer_name)
   build_layer_handle_table (dwg);
 
+  /* Collect (block_handle, effective_layer) combinations driven by every
+     INSERT (top-level and nested).  We emit one <g id="symbol-{handle}-
+     {eff_layer_safe_id}"> in <defs> per combo, with each clone's
+     layer-0 entities tagged with the effective layer — implementing
+     AutoCAD's layer-0-in-block inheritance rule. */
+  collect_block_combos (dwg);
+
   // Compute actual geometry extents instead of using header values
   compute_modelspace_extents (dwg);
 
@@ -3983,12 +4321,28 @@ output_SVG (Dwg_Data *dwg)
         }
     }
 
+  /* Emit one block clone per (block_handle, effective_layer) combo.
+     The same block may appear multiple times in <defs> — once per
+     distinct effective layer it's referenced from — so its layer-0
+     contents render with the correct inherited layer.  Each clone is
+     identified by its suffixed id "symbol-{handle}-{eff_layer_safe_id}",
+     which output_INSERT references via xlink:href. */
   printf ("\t<defs>\n");
-  for (i = 0; i < dwg->block_control.num_entries; i++)
-    {
-      if (dwg->block_control.entries && (ref = dwg->block_control.entries[i]))
-        output_BLOCK_HEADER (ref);
-    }
+  {
+    unsigned int ci;
+    for (ci = 0; ci < g_block_combos_n; ci++)
+      {
+        Dwg_Object_Ref *blk_ref = find_block_ref_by_handle (
+            dwg, g_block_combos[ci].block_handle_value);
+        if (!blk_ref)
+          continue;
+        current_eff_layer = g_block_combos[ci].eff_layer;
+        current_eff_layer_safe = g_block_combos[ci].eff_layer_safe_id;
+        output_BLOCK_HEADER (blk_ref);
+        current_eff_layer = NULL;
+        current_eff_layer_safe = NULL;
+      }
+  }
   printf ("\t</defs>\n");
 
   /* Diagnostic comment: extents used for coordinate mapping */
@@ -4048,6 +4402,9 @@ output_SVG (Dwg_Data *dwg)
   printf ("</svg>\n");
   fflush (stdout);
   free_layer_handle_table ();
+  free_block_combos ();
+  current_eff_layer = NULL;
+  current_eff_layer_safe = NULL;
   paper_space_bg = 0; // reset for next call when used as a library
 }
 
