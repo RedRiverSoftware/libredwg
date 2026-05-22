@@ -206,14 +206,24 @@ extents_add_rotated_bbox (Extents *ext, double anchor_x, double anchor_y,
 }
 
 /* Character count for a DWG text string.  R_2007+ stores text as UCS-2
-   (BITCODE_TU); older versions are byte strings in the codepage. */
+   (BITCODE_TU = pointer to 16-bit code units, null-terminated); older
+   versions are byte strings in the codepage.  We count manually rather
+   than call bit_wcs2len so the symbol resolution is identical on Linux
+   (where wchar_t is 32-bit and bit_wcs2len is an extern not exported
+   through libredwg-0.so to the program link target) and Windows. */
 static size_t
 text_value_nchars (Dwg_Data *dwg, const void *text_value)
 {
   if (!text_value)
     return 0;
   if (dwg->header.version >= R_2007)
-    return bit_wcs2len ((BITCODE_TU)(uintptr_t)text_value);
+    {
+      const BITCODE_RS *p = (const BITCODE_RS *)text_value;
+      size_t n = 0;
+      while (p[n] != 0)
+        n++;
+      return n;
+    }
   return strlen ((const char *)text_value);
 }
 
@@ -3579,9 +3589,10 @@ output_object (Dwg_Object *obj)
       break;
     default:
       num = 0;
-      if (obj->supertype == DWG_SUPERTYPE_ENTITY)
-        fprintf (stderr, "%s ignored\n", obj->name);
-      // all other non-graphical objects are silently ignored
+      // Unhandled entity types and non-graphical objects are silently
+      // ignored.  The previous stderr "%s ignored" line was noisy when
+      // a drawing contained many such entities (BODY, DIMENSION_LINEAR,
+      // etc.) and offered no actionable information.
       break;
     }
   return num;
