@@ -9,11 +9,24 @@ Run from the **parent directory** (`backend/lib/libredwg/`), not from
 inside `rr-fork/`:
 
 ```sh
-# 1. Native (always)
+# 1. Windows native (always)
 powershell.exe -ExecutionPolicy Bypass -NoProfile -File ./build-windows.ps1
 
-# 2. C# bindings (only when you need the backend to pick up changes;
-#    requires Docker)
+# 2. Linux native via Docker — only required before pushing a PR so CI
+#    checks pass.  CI runs on Linux and uses bin/csharp/libredwg.so,
+#    which is just a copy of bin/linux/libredwg.so produced by this
+#    script.  build-csharp-bindings.ps1 (step 3) only builds the C#
+#    wrapper (libredwg_csharp.so) on top of an existing libredwg.so —
+#    it does NOT rebuild the base lib.  Skipping this step during local
+#    iteration is fine; Windows tests run against libredwg.dll which is
+#    refreshed by steps 1 and 3.  Just remember to run it before push
+#    or CI will fail with renderer-output mismatches.
+powershell.exe -ExecutionPolicy Bypass -NoProfile -File ./build-linux-via-docker.ps1
+
+# 3. C# bindings — builds the C# wrapper on top of the bases produced
+#    by steps 1 (and optionally 2), then copies everything into
+#    bin/csharp/.  Always required after step 1 to refresh
+#    bin/csharp/libredwg.dll.
 powershell.exe -ExecutionPolicy Bypass -NoProfile -File ./build-csharp-bindings.ps1
 ```
 

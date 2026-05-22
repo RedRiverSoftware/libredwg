@@ -2961,6 +2961,22 @@ output_SPLINE (Dwg_Object *obj)
   if (n_samples < 2)
     return;
 
+  /* Pre-scan for drawable (non-NaN) samples.  If NaN filtering would
+     leave fewer than 2 points, skip the whole emission rather than open
+     a <path> element we can't close cleanly with common_entity
+     attributes attached.  Stops counting as soon as the threshold is
+     reached. */
+  {
+    int drawable = 0;
+    for (i = 0; i < n_samples && drawable < 2; i++)
+      {
+        if (!isnan (samples[i].x) && !isnan (samples[i].y))
+          drawable++;
+      }
+    if (drawable < 2)
+      return;
+  }
+
   printf ("\t<!-- spline-%d -->\n", obj->index);
   printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
   for (i = 0; i < n_samples; i++)
@@ -2974,13 +2990,6 @@ output_SPLINE (Dwg_Object *obj)
       else
         printf (" L %f,%f", transform_X (x), transform_Y (y));
       emitted++;
-    }
-  if (emitted < 2)
-    {
-      /* Buffer was effectively empty after NaN filtering — bail without
-         emitting an incomplete path. */
-      printf ("\" />\n");
-      return;
     }
   if (spline->closed_b)
     printf (" Z");
@@ -3293,11 +3302,45 @@ output_INSERT (Dwg_Object *obj)
 
         /* Effective layer of THIS INSERT — used to pick the matching
            block clone in <defs>.  Own layer wins unless it's "0" and a
-           parent effective layer is in scope (nested INSERT inheritance). */
+           parent effective layer is in scope (nested INSERT inheritance).
+
+           When the combo lookup below hits, we reuse the combo's
+           eff_layer_safe_id instead of allocating our own copy via
+           layer_safe_id() — saves a malloc/free per INSERT, and is the
+           common case for every INSERT whose target block actually has
+           a definition emitted in <defs>. */
         char *eff_layer
             = insert_effective_layer (obj, dwg, current_eff_layer);
-        char *eff_safe = eff_layer ? layer_safe_id (eff_layer) : NULL;
-        const char *suffix = eff_safe ? eff_safe : "_0";
+        char *eff_safe_owned = NULL;
+        const char *eff_safe = NULL;
+        const char *suffix;
+        double off_x = 0.0, off_y = 0.0;
+        if (eff_layer)
+          {
+            unsigned int ci;
+            BITCODE_RLL h = insert->block_header->absolute_ref;
+            for (ci = 0; ci < g_block_combos_n; ci++)
+              {
+                if (g_block_combos[ci].block_handle_value == h
+                    && strcmp (g_block_combos[ci].eff_layer, eff_layer) == 0)
+                  {
+                    off_x = g_block_combos[ci].offset_x;
+                    off_y = g_block_combos[ci].offset_y;
+                    eff_safe = g_block_combos[ci].eff_layer_safe_id;
+                    break;
+                  }
+              }
+            if (!eff_safe)
+              {
+                /* No matching combo — fall back to computing our own
+                   safe id.  This path also means the <use> below will
+                   reference a symbol that doesn't exist; the NULL-eff
+                   guard before emission catches that case. */
+                eff_safe_owned = layer_safe_id (eff_layer);
+                eff_safe = eff_safe_owned;
+              }
+          }
+        suffix = eff_safe ? eff_safe : "_0";
 
         /* If the referenced block carries an origin shift (used to keep its
            path coords in a precision-safe range — see current_block_offset_*
@@ -3306,48 +3349,45 @@ output_INSERT (Dwg_Object *obj)
            transform applied to a path point is T(tx,ty) · R(rot) · S(sx,
            y_scale), so the compensation is the same transform applied to
            (offset_x, offset_y). */
-        {
-          unsigned int ci;
-          double off_x = 0.0, off_y = 0.0;
-          BITCODE_RLL h = insert->block_header->absolute_ref;
-          for (ci = 0; ci < g_block_combos_n; ci++)
-            {
-              if (g_block_combos[ci].block_handle_value == h
-                  && eff_layer
-                  && strcmp (g_block_combos[ci].eff_layer, eff_layer) == 0)
-                {
-                  off_x = g_block_combos[ci].offset_x;
-                  off_y = g_block_combos[ci].offset_y;
-                  break;
-                }
-            }
-          if (off_x != 0.0 || off_y != 0.0)
-            {
-              double sxo = insert->scale.x * off_x;
-              double syo = y_scale * off_y;
-              if (fabs (insert->rotation) < 0.0001)
-                {
-                  tx += sxo;
-                  ty += syo;
-                }
-              else
-                {
-                  /* SVG rotate uses rotation_deg (computed above as
-                     -(180/pi)*insert->rotation).  Matrix is
-                       [cos -sin]
-                       [sin  cos]
-                     applied to (sxo, syo). */
-                  double rad = rotation_deg * M_PI / 180.0;
-                  double c = cos (rad);
-                  double s = sin (rad);
-                  tx += c * sxo - s * syo;
-                  ty += s * sxo + c * syo;
-                }
-            }
-        }
+        if (off_x != 0.0 || off_y != 0.0)
+          {
+            double sxo = insert->scale.x * off_x;
+            double syo = y_scale * off_y;
+            if (fabs (insert->rotation) < 0.0001)
+              {
+                tx += sxo;
+                ty += syo;
+              }
+            else
+              {
+                /* SVG rotate uses rotation_deg (computed above as
+                   -(180/pi)*insert->rotation).  Matrix is
+                     [cos -sin]
+                     [sin  cos]
+                   applied to (sxo, syo). */
+                double rad = rotation_deg * M_PI / 180.0;
+                double c = cos (rad);
+                double s = sin (rad);
+                tx += c * sxo - s * syo;
+                ty += s * sxo + c * syo;
+              }
+          }
 
         printf ("\t<!-- insert-%d -->\n", obj->index);
-        if (fabs (insert->rotation) < 0.0001)
+        /* If we couldn't resolve an effective layer (entity_layer_name
+           returned NULL for both this INSERT and the parent context),
+           the matching block clone was never emitted to <defs> either
+           — collect_block_combos_recursive uses the same function and
+           bails on NULL.  Emitting a <use xlink:href> here would point
+           at a non-existent symbol.  Skip the reference and emit a
+           diagnostic comment instead so the entity is still tracked. */
+        if (!eff_layer)
+          {
+            printf ("\t<!-- insert-%d skipped: no effective layer "
+                    "(block_handle=" FORMAT_HV ") -->\n",
+                    obj->index, insert->block_header->absolute_ref);
+          }
+        else if (fabs (insert->rotation) < 0.0001)
           {
             printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
                     "xlink:href=\"#symbol-" FORMAT_HV "-%s\" />"
@@ -3368,7 +3408,9 @@ output_INSERT (Dwg_Object *obj)
                     ARGS_H (insert->block_header->handleref));
           }
         free (eff_layer);
-        free (eff_safe);
+        /* Only free if we allocated; combo-owned safe_id must not be
+           freed here — it's owned by g_block_combos. */
+        free (eff_safe_owned);
       }
     }
   else
@@ -4130,18 +4172,48 @@ collect_block_combos_recursive (Dwg_Data *dwg, Dwg_Object *container_obj,
                       = ins->block_header->absolute_ref;
                   double off_x = 0.0, off_y = 0.0;
                   int newly_added;
+                  int offset_known = 0;
+                  /* Memoise: if another combo with the same target handle
+                     was already collected (any effective layer), the
+                     representative offset is identical — it depends only
+                     on the block's contents, not on the layer
+                     inheritance.  Reuse it instead of re-running
+                     block_representative_point, which walks up to 64
+                     owned entities and does two qsort calls per
+                     invocation. */
+                  {
+                    unsigned int pi;
+                    for (pi = 0; pi < g_block_combos_n; pi++)
+                      {
+                        if (g_block_combos[pi].block_handle_value
+                            == target_handle)
+                          {
+                            off_x = g_block_combos[pi].offset_x;
+                            off_y = g_block_combos[pi].offset_y;
+                            offset_known = 1;
+                            break;
+                          }
+                      }
+                  }
                   /* Pick a representative block-local point as origin shift.
-                     Only apply if the magnitude is large enough to actually
-                     matter for browser SVG precision; small-coord blocks
-                     stay byte-identical to the previous renderer output. */
-                  if (block_representative_point (target, &off_x, &off_y))
+                     The threshold is applied to max(|off_x|, |off_y|) so the
+                     offset is applied or suppressed as a whole — never split
+                     so that, say, X is normalised but Y is left in 1e5+
+                     territory.  Small-coord blocks stay byte-identical to
+                     the previous renderer output. */
+                  if (!offset_known
+                      && block_representative_point (target, &off_x, &off_y))
                     {
-                      if (fabs (off_x) < 1e5)
-                        off_x = 0.0;
-                      if (fabs (off_y) < 1e5)
-                        off_y = 0.0;
+                      double mag = fabs (off_x);
+                      if (fabs (off_y) > mag)
+                        mag = fabs (off_y);
+                      if (mag < 1e5)
+                        {
+                          off_x = 0.0;
+                          off_y = 0.0;
+                        }
                     }
-                  else
+                  else if (!offset_known)
                     {
                       off_x = 0.0;
                       off_y = 0.0;
