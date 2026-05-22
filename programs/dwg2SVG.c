@@ -5409,6 +5409,13 @@ main (int argc, char *argv[])
   if (i >= argc)
     return usage ();
 
+  /* Default stdout buffer (typically 4 KiB) causes a flush every few
+     formatted writes when the destination isn't a tty.  Large drawings
+     emit tens of MiB through hundreds of thousands of printf calls; a
+     1 MiB fully-buffered stdout takes the CLI from ~27 s to ~1 s for
+     LRPS1_LAYOUT.dwg.  Has no effect on the library API (dwg_svg_api.c
+     routes printf through its own writer callback). */
+  setvbuf (stdout, NULL, _IOFBF, 1 << 20);
   memset (&g_dwg, 0, sizeof (Dwg_Data));
   g_dwg.opts = opts;
   error = dwg_read_file (argv[i], &g_dwg);
