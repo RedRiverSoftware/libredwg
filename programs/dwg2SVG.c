@@ -119,6 +119,16 @@ strcasestr_compat (const char *haystack, const char *needle)
 #endif
 }
 static _Thread_local double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
+/* Block-local origin shift applied while emitting a block's symbol contents,
+   so that path coords stay in a precision-safe range (≲ 1e6) even when the
+   block's entities live in million-scale block-local coords (a common DWG
+   authoring pattern: blocks of contents pre-positioned at world coords with
+   the INSERT compensating).  When in_block_definition is set, transform_X/Y
+   subtract these.  output_INSERT adds R·S·offset to its <use> translate so
+   the final on-canvas position is unchanged.  Zero by default ⇒ no-op for
+   normal small-coord blocks. */
+static _Thread_local double current_block_offset_x = 0.0;
+static _Thread_local double current_block_offset_y = 0.0;
 _Thread_local Dwg_Data g_dwg;
 _Thread_local double model_xmin, model_ymin, model_xmax, model_ymax;
 _Thread_local double page_width, page_height, scale;
@@ -165,6 +175,145 @@ extents_add_circle (Extents *ext, double cx, double cy, double radius)
   extents_add_point (ext, cx + radius, cy + radius);
 }
 
+/* Add the four corners of an axis-aligned offset box (relative to an
+   anchor point) to ext, optionally rotated about the anchor. */
+static void
+extents_add_rotated_bbox (Extents *ext, double anchor_x, double anchor_y,
+                          double xmin_off, double xmax_off,
+                          double ymin_off, double ymax_off, double rot_rad)
+{
+  if (isnan (anchor_x) || isnan (anchor_y))
+    return;
+  if (fabs (rot_rad) > 1e-4)
+    {
+      double cs = cos (rot_rad);
+      double sn = sin (rot_rad);
+      double cx[4] = { xmin_off, xmax_off, xmax_off, xmin_off };
+      double cy[4] = { ymin_off, ymin_off, ymax_off, ymax_off };
+      int i;
+      for (i = 0; i < 4; i++)
+        {
+          double rx = cx[i] * cs - cy[i] * sn;
+          double ry = cx[i] * sn + cy[i] * cs;
+          extents_add_point (ext, anchor_x + rx, anchor_y + ry);
+        }
+    }
+  else
+    {
+      extents_add_point (ext, anchor_x + xmin_off, anchor_y + ymin_off);
+      extents_add_point (ext, anchor_x + xmax_off, anchor_y + ymax_off);
+    }
+}
+
+/* Character count for a DWG text string.  R_2007+ stores text as UCS-2
+   (BITCODE_TU = pointer to 16-bit code units, null-terminated); older
+   versions are byte strings in the codepage.  We count manually rather
+   than call bit_wcs2len so the symbol resolution is identical on Linux
+   (where wchar_t is 32-bit and bit_wcs2len is an extern not exported
+   through libredwg-0.so to the program link target) and Windows. */
+static size_t
+text_value_nchars (Dwg_Data *dwg, const void *text_value)
+{
+  if (!text_value)
+    return 0;
+  if (dwg->header.version >= R_2007)
+    {
+      const BITCODE_RS *p = (const BITCODE_RS *)text_value;
+      size_t n = 0;
+      while (p[n] != 0)
+        n++;
+      return n;
+    }
+  return strlen ((const char *)text_value);
+}
+
+/* Add the bounding box of a TEXT/ATTRIB/ATTDEF entity to ext.
+
+   Estimates rendered width from the entity height and character count.
+   The DWG `height` field is the cap-height; the SVG renderer uses an
+   em-box of roughly height / 0.7, so width per character is set to
+   1.2 × height — which works out to ≈ 0.85 × em-box — slightly above
+   the typical Arial-family caps average so engineering-style all-caps
+   labels do not clip.  Width is further scaled by width_factor.
+
+   Vertical extent for the baseline case covers ascender + descender,
+   ≈ 1.55 × height; for top/middle/bottom anchors the full em-box height
+   (≈ 1.5 × height) is used.
+
+   anchor_x / anchor_y    DWG-space anchor point (alignment_pt for
+                          non-default alignment, ins_pt otherwise — match
+                          what output_TEXT does).
+   nchars                 character count (used for width estimate).
+   height                 DWG height field (cap-height in DWG terms).
+   wf                     width_factor (default 1.0).
+   rot_rad                rotation in radians.
+   horiz / vert           DWG horiz_alignment / vert_alignment codes. */
+static void
+extents_add_text_bbox (Extents *ext, double anchor_x, double anchor_y,
+                       size_t nchars, double height, double wf,
+                       double rot_rad,
+                       BITCODE_BS horiz, BITCODE_BS vert)
+{
+  double width;
+  double full_h;
+  double xmin_off, xmax_off, ymin_off, ymax_off;
+
+  if (isnan (anchor_x) || isnan (anchor_y) || isnan (height) || height <= 0.0)
+    return;
+  /* A 0-char text still occupies a single character slot in our bound so
+     the anchor itself ends up inside the viewBox. */
+  if (nchars == 0)
+    nchars = 1;
+  if (wf <= 0.0 || isnan (wf))
+    wf = 1.0;
+
+  width = (double)nchars * 1.2 * height * wf;
+  full_h = height * 1.5;
+
+  switch (horiz)
+    {
+    case 1:
+    case 4:
+      xmin_off = -width / 2.0;
+      xmax_off = width / 2.0;
+      break;
+    case 2:
+      xmin_off = -width;
+      xmax_off = 0.0;
+      break;
+    default:
+      xmin_off = 0.0;
+      xmax_off = width;
+      break;
+    }
+  switch (vert)
+    {
+    case 1:
+      ymin_off = 0.0;
+      ymax_off = full_h;
+      break;
+    case 2:
+      ymin_off = -full_h / 2.0;
+      ymax_off = full_h / 2.0;
+      break;
+    case 3:
+      ymin_off = -full_h;
+      ymax_off = 0.0;
+      break;
+    default:
+      /* baseline: anchor sits on the baseline; descender below
+         (≈ 0.4 × height ≈ 0.3 × em-box) and ascender + cap above
+         (≈ 1.15 × height ≈ 0.8 × em-box). */
+      ymin_off = -height * 0.4;
+      ymax_off = height * 1.15;
+      break;
+    }
+
+  extents_add_rotated_bbox (ext, anchor_x, anchor_y,
+                            xmin_off, xmax_off, ymin_off, ymax_off,
+                            isnan (rot_rad) ? 0.0 : rot_rad);
+}
+
 // Forward declarations
 static void output_SVG (Dwg_Data *dwg);
 static void compute_entity_extents (Extents *ext, Dwg_Object *obj);
@@ -172,6 +321,38 @@ static void compute_block_extents (Extents *ext, Dwg_Object_Ref *ref);
 static void output_bulge_arc (double x1, double y1, double x2, double y2,
                               double bulge);
 static int output_object (Dwg_Object *obj);
+static char *layer_safe_id (const char *attr_name);
+static char *insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
+                                     const char *parent_eff_layer);
+
+/* Thread-local effective-layer state used by output_INSERT and
+   output_BLOCK_HEADER to drive the layer-0-in-block inheritance rule.
+   The BlockCombo machinery below assigns these before each <defs>
+   clone emission and resets them to NULL afterwards. */
+static _Thread_local const char *current_eff_layer = NULL;
+static _Thread_local const char *current_eff_layer_safe = NULL;
+
+/* ── Block-clone table ────────────────────────────────────────────────────
+   Defined here (rather than later in the file) so output_INSERT, which is
+   defined earlier, can read it to look up the per-block origin shift it
+   needs to compensate in its <use> translate.  Population and lifecycle
+   helpers (add_block_combo, free_block_combos, collect_block_combos*)
+   appear later in the file. */
+typedef struct
+{
+  BITCODE_RLL block_handle_value; /* BLOCK_HEADER ref->absolute_ref */
+  char *eff_layer;                /* HTML-escaped effective layer name (heap) */
+  char *eff_layer_safe_id;        /* sanitised for use as XML id suffix (heap) */
+  double offset_x;                /* origin shift baked into the symbol's path
+                                     coords; output_INSERT adds R·S·offset to
+                                     its <use> translate so the final on-canvas
+                                     position is unchanged. 0 ⇒ no shift. */
+  double offset_y;
+} BlockCombo;
+
+static _Thread_local BlockCombo *g_block_combos = NULL;
+static _Thread_local unsigned int g_block_combos_n = 0;
+static _Thread_local unsigned int g_block_combos_cap = 0;
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -222,7 +403,7 @@ static double
 transform_X (double x)
 {
   if (in_block_definition)
-    return x; // raw DWG coords, INSERT handles positioning
+    return x - current_block_offset_x; // shifted block-local; INSERT translate compensates
   return x - model_xmin;
 }
 
@@ -230,7 +411,7 @@ static double
 transform_Y (double y)
 {
   if (in_block_definition)
-    return y; // raw DWG coords, INSERT handles positioning and Y flip
+    return y - current_block_offset_y; // shifted block-local; INSERT translate compensates and Y-flips
   return page_height - (y - model_ymin);
 }
 
@@ -2159,74 +2340,170 @@ static void
 output_ARC (Dwg_Object *obj)
 {
   Dwg_Entity_ARC *arc = obj->tio.entity->tio.ARC;
-  BITCODE_3DPOINT center;
-  double x_start, y_start, x_end, y_end;
-  int large_arc;
+  double span;
+  int n_samples, i;
 
   if (isnan_3BD (arc->center) || isnan_3BD (arc->extrusion)
       || isnan (arc->radius) || isnan (arc->start_angle)
       || isnan (arc->end_angle) || entity_invisible (obj))
     return;
-  transform_OCS (&center, arc->center, arc->extrusion);
 
-  x_start = center.x + arc->radius * cos (arc->start_angle);
-  y_start = center.y + arc->radius * sin (arc->start_angle);
-  x_end = center.x + arc->radius * cos (arc->end_angle);
-  y_end = center.y + arc->radius * sin (arc->end_angle);
-  // Assuming clockwise arcs.
-  large_arc = (arc->end_angle - arc->start_angle < M_PI) ? 0 : 1;
+  /* arc->center is in OCS (DXF 10); start_angle/end_angle are measured
+     CCW around the extrusion vector from the OCS X-axis.  For mirrored
+     entities (extrusion.z < 0) the Arbitrary Axis Algorithm puts OCS-X
+     in -WCS-X, so the naive (transform_OCS(center)) + (r*cos(angle))
+     pattern puts endpoints on the wrong side of the centre.  Sample
+     the curve in OCS and transform each sample to WCS individually —
+     this is direction-agnostic and also dodges SVG A-command sweep/
+     large-arc-flag pitfalls (the previous code mis-classified arcs
+     that crossed 0/360 degrees). */
+  span = arc->end_angle - arc->start_angle;
+  while (span < 0.0)
+    span += 2.0 * M_PI;
+
+  n_samples = (int) ceil (span * 32.0 / M_PI);
+  if (n_samples < 16)
+    n_samples = 16;
 
   printf ("\t<!-- arc-%d -->\n", obj->index);
-  printf (
-      "\t<path id=\"dwg-object-%d\" d=\"M %f,%f A %f,%f 0 %d,0 %f,%f\"\n\t",
-      obj->index, transform_X (x_start), transform_Y (y_start), arc->radius,
-      arc->radius, large_arc, transform_X (x_end), transform_Y (y_end));
+  printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+  for (i = 0; i < n_samples; i++)
+    {
+      double t = arc->start_angle
+                 + span * (double) i / (double) (n_samples - 1);
+      BITCODE_3DPOINT p_ocs, p_wcs;
+      p_ocs.x = arc->center.x + arc->radius * cos (t);
+      p_ocs.y = arc->center.y + arc->radius * sin (t);
+      p_ocs.z = arc->center.z;
+      transform_OCS (&p_wcs, p_ocs, arc->extrusion);
+      if (i == 0)
+        printf ("M %f,%f", transform_X (p_wcs.x), transform_Y (p_wcs.y));
+      else
+        printf (" L %f,%f", transform_X (p_wcs.x), transform_Y (p_wcs.y));
+    }
+  printf ("\"\n\t");
   common_entity (obj);
 }
 
-// FIXME
 static void
 output_ELLIPSE (Dwg_Object *obj)
 {
   Dwg_Entity_ELLIPSE *ell = obj->tio.entity->tio.ELLIPSE;
+  BITCODE_3DPOINT center, sm_axis;
   BITCODE_2DPOINT radius;
   double angle_rad, angle_dec;
-  // BITCODE_3DPOINT center, sm_axis;
-  // double x_start, y_start, x_end, y_end;
+  double svg_cx, svg_cy;
 
   if (isnan_3BD (ell->center) || isnan_3BD (ell->extrusion)
       || isnan_3BD (ell->sm_axis) || isnan (ell->axis_ratio)
       || isnan (ell->start_angle) || isnan (ell->end_angle)
       || entity_invisible (obj))
     return;
-  /* The 2 points are already WCS */
-  // transform_OCS (&center, ell->center, ell->extrusion);
-  // transform_OCS (&sm_axis, ell->sm_axis, ell->extrusion);
-  radius.x = sqrt (ell->sm_axis.x * ell->sm_axis.x + ell->sm_axis.y * ell->sm_axis.y);
+  /* ELLIPSE.center (DXF 10) and ELLIPSE.sm_axis (DXF 11) are stored in WCS
+     per the AutoCAD DXF reference — unlike LINE/ARC/CIRCLE whose center
+     fields are OCS.  We mustn't apply transform_OCS here; for entities
+     with extrusion=(0,0,-1) it would X-flip values that are already in
+     WCS, moving the ellipse to the mirror-opposite side of the page.
+     The local copies exist so the parametric tessellation has stable
+     struct-typed values without dereferencing ell->* in the inner loop. */
+  center = ell->center;
+  sm_axis = ell->sm_axis;
+
+  radius.x = sqrt (sm_axis.x * sm_axis.x + sm_axis.y * sm_axis.y);
   radius.y = radius.x * ell->axis_ratio;
 
-  /*
-  x_start = ell->center.x + radius.x * cos (ell->start_angle);
-  y_start = ell->center.y + radius.y * sin (ell->start_angle);
-  x_end = ell->center.x + radius.x * cos (ell->end_angle);
-  y_end = ell->center.y + radius.y * sin (ell->end_angle);
-  */
-
-  angle_rad = atan2(ell->sm_axis.y, ell->sm_axis.x);
+  angle_rad = atan2 (sm_axis.y, sm_axis.x);
   angle_dec = angle_rad * 180.0 / M_PI;
 
-  // TODO: start,end_angle => pathLength
-  printf ("\t<!-- ellipse-%d -->\n", obj->index);
-  printf ("\t<!-- sm_axis=(%f,%f,%f) axis_ratio=%f start_angle=%f "
-          "end_angle=%f-->\n",
-          ell->sm_axis.x, ell->sm_axis.y, ell->sm_axis.z, ell->axis_ratio,
-          ell->start_angle, ell->end_angle);
-  printf ("\t<ellipse id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" rx=\"%f\" "
-          "ry=\"%f\" transform=\"rotate(%f %f %f)\"\n\t",
-          obj->index, transform_X (ell->center.x), transform_Y (ell->center.y),
-          radius.x, radius.y,
-          transform_ANGLE (angle_dec), transform_X (ell->center.x), transform_Y (ell->center.y));
-  common_entity (obj);
+  svg_cx = transform_X (center.x);
+  svg_cy = transform_Y (center.y);
+
+  /* DWG ELLIPSE carries start_angle / end_angle for partial elliptical
+     arcs.  Without honouring them, full-ellipse emission produces big
+     concentric stray ovals where the source DWG actually authored a tiny
+     construction-helper arc (start≈end) — TrueView draws nothing visible
+     for those; we used to draw the full ellipse.  Three cases:
+       • arc_span ≈ 0    → degenerate, emit nothing (matches TrueView)
+       • arc_span ≈ 2π   → full ellipse, keep the existing <ellipse> emit
+       • else            → partial arc, emit <path> with elliptical-arc
+                           A-command using the same large_arc/sweep/rotation
+                           conventions as output_ARC. */
+  {
+    double arc_span = ell->end_angle - ell->start_angle;
+    while (arc_span < 0.0)         arc_span += 2.0 * M_PI;
+    while (arc_span > 2.0 * M_PI)  arc_span -= 2.0 * M_PI;
+
+    printf ("\t<!-- ellipse-%d -->\n", obj->index);
+    printf ("\t<!-- sm_axis=(%f,%f,%f) axis_ratio=%f start_angle=%f "
+            "end_angle=%f-->\n",
+            ell->sm_axis.x, ell->sm_axis.y, ell->sm_axis.z, ell->axis_ratio,
+            ell->start_angle, ell->end_angle);
+
+    if (arc_span < 1e-6)
+      {
+        /* Degenerate: AutoCAD draws nothing.  Emit a self-closing path
+           placeholder so the entity index slot is still occupied
+           (matches the comment line above so downstream tooling that
+           scans for id="dwg-object-N" stays consistent). */
+        printf ("\t<path id=\"dwg-object-%d\" d=\"\" />\n", obj->index);
+      }
+    else if (arc_span > 2.0 * M_PI - 1e-6)
+      {
+        /* Full ellipse — same emit as before this fix. */
+        printf ("\t<ellipse id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" rx=\"%f\" "
+                "ry=\"%f\" transform=\"rotate(%f %f %f)\"\n\t",
+                obj->index, svg_cx, svg_cy,
+                radius.x, radius.y,
+                transform_ANGLE (angle_dec), svg_cx, svg_cy);
+        common_entity (obj);
+      }
+    else
+      {
+        /* Partial elliptical arc.  We tessellate into a polyline rather
+           than emit SVG's <path A> elliptical-arc command — the rotation
+           offset we apply (180°, point-symmetric for full ellipses) makes
+           SVG's sweep/large-arc selection give wrong results that aren't
+           straightforward to derive analytically, so we compute every
+           sample point ourselves in C and emit them directly.  Same
+           approach as output_SPLINE.  N is chosen to give ~32 samples per
+           half-revolution (smooth at engineering-print zoom), with a
+           floor of 16 for small arcs. */
+        double ca = cos (angle_rad);
+        double sa = sin (angle_rad);
+        /* For mirrored entities (extrusion.z < 0) the OCS→WCS transform is
+           a reflection, which reverses orientation.  DWG stores the
+           parameter in OCS-CCW direction, but the perp_CCW(sm_axis)
+           direction we compute by rotating (0, ry) by angle_rad is the
+           WCS-CCW direction — opposite of what we need.  Negate the
+           sin(t) component to put the minor-axis direction back where it
+           belongs.  No-op for the default extrusion=(0,0,1) case. */
+        double sin_sign = (ell->extrusion.z < 0.0) ? -1.0 : 1.0;
+        /* DWG ellipse arcs go CCW from start_angle to end_angle.  Use the
+           normalised CCW span (already in arc_span, in [0, 2π)) so that
+           sampling walks the CCW direction even when end < start (arc
+           crosses the 0/2π boundary). */
+        int n_samples = (int)ceil (arc_span * 32.0 / M_PI);
+        int i;
+        if (n_samples < 16)
+          n_samples = 16;
+
+        printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+        for (i = 0; i < n_samples; i++)
+          {
+            double t = ell->start_angle + arc_span * (double)i / (double)(n_samples - 1);
+            double local_x = radius.x * cos (t);
+            double local_y = sin_sign * radius.y * sin (t);
+            double wcs_x = center.x + ca * local_x - sa * local_y;
+            double wcs_y = center.y + sa * local_x + ca * local_y;
+            if (i == 0)
+              printf ("M %f,%f", transform_X (wcs_x), transform_Y (wcs_y));
+            else
+              printf (" L %f,%f", transform_X (wcs_x), transform_Y (wcs_y));
+          }
+        printf ("\"\n\t");
+        common_entity (obj);
+      }
+  }
 }
 
 // untested
@@ -2493,6 +2770,231 @@ output_bulge_arc (double x1, double y1, double x2, double y2, double bulge)
                                    : (bulge > 0 ? 0 : 1);
   printf (" A %f,%f 0 %d,%d %f,%f", radius, radius, large_arc, sweep,
           transform_X (x2), transform_Y (y2));
+}
+
+/* Tessellate a SPLINE entity into 3D sample points in OCS, written to `out`
+   up to `max` entries.  Returns the number written.
+
+   - scenario 2 ("fit points"): polyline through the recorded fit points.
+     Engineering splines drawn through known points come back as scenario 2
+     and their visible curve is essentially the polyline at typical
+     viewport scales — TrueView falls back to the same thing.
+   - scenario 1 (control points + knots): de Boor's algorithm sampled at
+     `max(16, 8 × num_ctrl_pts)` parameters across the valid range.
+     Handles rational / NURBS splines by promoting (x,y,z) to homogeneous
+     coords (w·x, w·y, w·z, w) before the recursion and dividing back at
+     the end.  Closed and periodic splines work because their knot vectors
+     already encode the wrap.
+   - degenerate inputs (knot/ctrl-point count mismatch, missing arrays,
+     degree<1) fall back to the control polygon so a stroke still appears. */
+#define SPLINE_MAX_DEGREE 16
+static int
+spline_sample_curve (Dwg_Entity_SPLINE *s, BITCODE_3DPOINT *out, int max)
+{
+  int n = 0;
+  int valid_bspline;
+  int degree;
+  BITCODE_BL nc;
+  BITCODE_BL i;
+
+  if (max < 2)
+    return 0;
+
+  /* Fit-point scenario: just the polyline through the fit points. */
+  if (s->scenario == 2 && s->fit_pts && s->num_fit_pts > 0)
+    {
+      BITCODE_BS fi;
+      for (fi = 0; fi < s->num_fit_pts && n < max; fi++)
+        {
+          BITCODE_3DPOINT p = s->fit_pts[fi];
+          if (isnan_3BD (p))
+            continue;
+          out[n++] = p;
+        }
+      return n;
+    }
+
+  if (!s->ctrl_pts || s->num_ctrl_pts == 0)
+    return 0;
+
+  degree = (int)s->degree;
+  nc = s->num_ctrl_pts;
+  valid_bspline = (s->knots
+                   && s->num_knots == nc + (BITCODE_BL)degree + 1
+                   && degree >= 1
+                   && degree <= SPLINE_MAX_DEGREE - 1
+                   && nc >= (BITCODE_BL)(degree + 1));
+
+  if (!valid_bspline)
+    {
+      for (i = 0; i < nc && n < max; i++)
+        {
+          BITCODE_3DPOINT p;
+          p.x = s->ctrl_pts[i].x;
+          p.y = s->ctrl_pts[i].y;
+          p.z = s->ctrl_pts[i].z;
+          if (isnan_3BD (p))
+            continue;
+          out[n++] = p;
+        }
+      return n;
+    }
+
+  /* De Boor evaluation across [knots[degree], knots[num_knots-degree-1]]. */
+  {
+    double u_lo = s->knots[degree];
+    double u_hi = s->knots[s->num_knots - degree - 1];
+    int target = (int)nc * 8;
+    int steps;
+    int si;
+    int r;
+    int j;
+    double dx[SPLINE_MAX_DEGREE], dy[SPLINE_MAX_DEGREE];
+    double dz[SPLINE_MAX_DEGREE], dw[SPLINE_MAX_DEGREE];
+
+    if (!(u_hi > u_lo))
+      return 0;
+    if (target < 16)
+      target = 16;
+    if (target > max - 1)
+      target = max - 1;
+    steps = target;
+
+    for (si = 0; si <= steps && n < max; si++)
+      {
+        double t = (double)si / (double)steps;
+        double u = u_lo + (u_hi - u_lo) * t;
+        int lo, hi, mid, k;
+
+        /* Pull u just inside the upper bound so the knot-span lookup picks
+           the last valid span instead of falling off the end. */
+        if (u >= u_hi)
+          u = u_hi - 1e-12 * (u_hi - u_lo + 1.0);
+
+        /* Find knot span k: knots[k] <= u < knots[k+1], with
+           degree <= k <= num_knots - degree - 2. */
+        lo = degree;
+        hi = (int)s->num_knots - degree - 2;
+        while (lo < hi)
+          {
+            mid = (lo + hi + 1) / 2;
+            if (s->knots[mid] <= u)
+              lo = mid;
+            else
+              hi = mid - 1;
+          }
+        k = lo;
+
+        /* Working set d[0..degree] from ctrl_pts[k-degree..k]. */
+        for (j = 0; j <= degree; j++)
+          {
+            BITCODE_BL ci = (BITCODE_BL)(k - degree + j);
+            double w = s->rational ? s->ctrl_pts[ci].w : 1.0;
+            if (!isfinite (w) || w == 0.0)
+              w = 1.0;
+            dx[j] = s->ctrl_pts[ci].x * w;
+            dy[j] = s->ctrl_pts[ci].y * w;
+            dz[j] = s->ctrl_pts[ci].z * w;
+            dw[j] = w;
+          }
+
+        for (r = 1; r <= degree; r++)
+          {
+            for (j = degree; j >= r; j--)
+              {
+                int kl = k + j - degree;
+                int kr = k + j - r + 1;
+                double denom = s->knots[kr] - s->knots[kl];
+                double alpha = denom > 0.0
+                                   ? (u - s->knots[kl]) / denom
+                                   : 0.0;
+                dx[j] = (1.0 - alpha) * dx[j - 1] + alpha * dx[j];
+                dy[j] = (1.0 - alpha) * dy[j - 1] + alpha * dy[j];
+                dz[j] = (1.0 - alpha) * dz[j - 1] + alpha * dz[j];
+                dw[j] = (1.0 - alpha) * dw[j - 1] + alpha * dw[j];
+              }
+          }
+
+        if (!isfinite (dx[degree]) || !isfinite (dy[degree])
+            || !isfinite (dz[degree]))
+          continue;
+        if (dw[degree] != 0.0)
+          {
+            out[n].x = dx[degree] / dw[degree];
+            out[n].y = dy[degree] / dw[degree];
+            out[n].z = dz[degree] / dw[degree];
+          }
+        else
+          {
+            out[n].x = dx[degree];
+            out[n].y = dy[degree];
+            out[n].z = dz[degree];
+          }
+        n++;
+      }
+  }
+
+  return n;
+}
+
+#define SPLINE_SAMPLE_CAP 4096
+static void
+output_SPLINE (Dwg_Object *obj)
+{
+  Dwg_Entity_SPLINE *spline = obj->tio.entity->tio.SPLINE;
+  /* The DWG model space in LRPS1_LAYOUT carries 4961 splines, most of
+     which need at most ~50 samples; this static buffer is comfortably
+     larger than any reasonable control polygon and avoids a per-call
+     malloc.  Thread-local because dwg2SVG can be linked into a library
+     used by multiple threads (the C# bindings do this). */
+  static _Thread_local BITCODE_3DPOINT samples[SPLINE_SAMPLE_CAP];
+  int n_samples;
+  int i;
+  int emitted = 0;
+
+  if (entity_invisible (obj))
+    return;
+
+  /* SPLINE control / fit points are in WCS — no OCS extrusion vector on
+     the entity, so we use coordinates directly without transform_OCS. */
+  n_samples = spline_sample_curve (spline, samples, SPLINE_SAMPLE_CAP);
+  if (n_samples < 2)
+    return;
+
+  /* Pre-scan for drawable (non-NaN) samples.  If NaN filtering would
+     leave fewer than 2 points, skip the whole emission rather than open
+     a <path> element we can't close cleanly with common_entity
+     attributes attached.  Stops counting as soon as the threshold is
+     reached. */
+  {
+    int drawable = 0;
+    for (i = 0; i < n_samples && drawable < 2; i++)
+      {
+        if (!isnan (samples[i].x) && !isnan (samples[i].y))
+          drawable++;
+      }
+    if (drawable < 2)
+      return;
+  }
+
+  printf ("\t<!-- spline-%d -->\n", obj->index);
+  printf ("\t<path id=\"dwg-object-%d\" d=\"", obj->index);
+  for (i = 0; i < n_samples; i++)
+    {
+      double x = samples[i].x;
+      double y = samples[i].y;
+      if (isnan (x) || isnan (y))
+        continue;
+      if (!emitted)
+        printf ("M %f,%f", transform_X (x), transform_Y (y));
+      else
+        printf (" L %f,%f", transform_X (x), transform_Y (y));
+      emitted++;
+    }
+  if (spline->closed_b)
+    printf (" Z");
+  printf ("\"\n\t");
+  common_entity (obj);
 }
 
 // Output SVG path data for a single hatch path (polyline or segments)
@@ -2779,9 +3281,15 @@ output_INSERT (Dwg_Object *obj)
         if (in_block_definition)
           {
             /* Raw DWG coords — the parent transform (viewport matrix or
-               enclosing INSERT's <use>) handles the final mapping. */
-            tx = ins_pt.x - sx * base_x;
-            ty = ins_pt.y - sy * base_y;
+               enclosing INSERT's <use>) handles the final mapping.  When the
+               enclosing block carries an origin shift, its direct geometry is
+               emitted in the shifted frame (transform_X/Y subtract
+               current_block_offset_*), so this nested INSERT's placement must
+               be shifted by the same amount to stay aligned with it.  The
+               child block's own offset, if any, is compensated separately
+               below. */
+            tx = ins_pt.x - sx * base_x - current_block_offset_x;
+            ty = ins_pt.y - sy * base_y - current_block_offset_y;
           }
         else
           {
@@ -2796,28 +3304,119 @@ output_INSERT (Dwg_Object *obj)
            rendering there is no parent flip, so INSERT does it. */
         double y_scale = in_block_definition ? insert->scale.y
                                              : -insert->scale.y;
+        Dwg_Data *dwg = obj->parent;
+
+        /* Effective layer of THIS INSERT — used to pick the matching
+           block clone in <defs>.  Own layer wins unless it's "0" and a
+           parent effective layer is in scope (nested INSERT inheritance).
+
+           When the combo lookup below hits, we reuse the combo's
+           eff_layer_safe_id instead of allocating our own copy via
+           layer_safe_id() — saves a malloc/free per INSERT, and is the
+           common case for every INSERT whose target block actually has
+           a definition emitted in <defs>. */
+        char *eff_layer
+            = insert_effective_layer (obj, dwg, current_eff_layer);
+        char *eff_safe_owned = NULL;
+        const char *eff_safe = NULL;
+        const char *suffix;
+        double off_x = 0.0, off_y = 0.0;
+        if (eff_layer)
+          {
+            unsigned int ci;
+            BITCODE_RLL h = insert->block_header->absolute_ref;
+            for (ci = 0; ci < g_block_combos_n; ci++)
+              {
+                if (g_block_combos[ci].block_handle_value == h
+                    && strcmp (g_block_combos[ci].eff_layer, eff_layer) == 0)
+                  {
+                    off_x = g_block_combos[ci].offset_x;
+                    off_y = g_block_combos[ci].offset_y;
+                    eff_safe = g_block_combos[ci].eff_layer_safe_id;
+                    break;
+                  }
+              }
+            if (!eff_safe)
+              {
+                /* No matching combo — fall back to computing our own
+                   safe id.  This path also means the <use> below will
+                   reference a symbol that doesn't exist; the NULL-eff
+                   guard before emission catches that case. */
+                eff_safe_owned = layer_safe_id (eff_layer);
+                eff_safe = eff_safe_owned;
+              }
+          }
+        suffix = eff_safe ? eff_safe : "_0";
+
+        /* If the referenced block carries an origin shift (used to keep its
+           path coords in a precision-safe range — see current_block_offset_*
+           and BlockCombo.offset_*), add R·S·offset to (tx, ty) so the final
+           on-canvas position is identical to the un-shifted rendering.  The
+           transform applied to a path point is T(tx,ty) · R(rot) · S(sx,
+           y_scale), so the compensation is the same transform applied to
+           (offset_x, offset_y). */
+        if (off_x != 0.0 || off_y != 0.0)
+          {
+            double sxo = insert->scale.x * off_x;
+            double syo = y_scale * off_y;
+            if (fabs (insert->rotation) < 0.0001)
+              {
+                tx += sxo;
+                ty += syo;
+              }
+            else
+              {
+                /* SVG rotate uses rotation_deg (computed above as
+                   -(180/pi)*insert->rotation).  Matrix is
+                     [cos -sin]
+                     [sin  cos]
+                   applied to (sxo, syo). */
+                double rad = rotation_deg * M_PI / 180.0;
+                double c = cos (rad);
+                double s = sin (rad);
+                tx += c * sxo - s * syo;
+                ty += s * sxo + c * syo;
+              }
+          }
 
         printf ("\t<!-- insert-%d -->\n", obj->index);
-        if (fabs (insert->rotation) < 0.0001)
+        /* If we couldn't resolve an effective layer (entity_layer_name
+           returned NULL for both this INSERT and the parent context),
+           the matching block clone was never emitted to <defs> either
+           — collect_block_combos_recursive uses the same function and
+           bails on NULL.  Emitting a <use xlink:href> here would point
+           at a non-existent symbol.  Skip the reference and emit a
+           diagnostic comment instead so the entity is still tracked. */
+        if (!eff_layer)
+          {
+            printf ("\t<!-- insert-%d skipped: no effective layer "
+                    "(block_handle=" FORMAT_HV ") -->\n",
+                    obj->index, insert->block_header->absolute_ref);
+          }
+        else if (fabs (insert->rotation) < 0.0001)
           {
             printf ("\t<use id=\"dwg-object-%d\" transform=\"matrix(%f 0 0 %f %f %f)\" "
-                    "xlink:href=\"#symbol-" FORMAT_HV "\" />"
+                    "xlink:href=\"#symbol-" FORMAT_HV "-%s\" />"
                     "<!-- block_header->handleref: " FORMAT_H " -->\n",
                     obj->index, insert->scale.x, y_scale, tx, ty,
-                    insert->block_header->absolute_ref,
+                    insert->block_header->absolute_ref, suffix,
                     ARGS_H (insert->block_header->handleref));
           }
         else
           {
             printf ("\t<use id=\"dwg-object-%d\" transform=\"translate(%f %f) "
                     "rotate(%f) scale(%f %f)\" xlink:href=\"#symbol-" FORMAT_HV
-                    "\" />"
+                    "-%s\" />"
                     "<!-- block_header->handleref: " FORMAT_H " -->\n",
                     obj->index, tx, ty,
                     rotation_deg, insert->scale.x, y_scale,
-                    insert->block_header->absolute_ref,
+                    insert->block_header->absolute_ref, suffix,
                     ARGS_H (insert->block_header->handleref));
           }
+        free (eff_layer);
+        /* Only free if we allocated; combo-owned safe_id must not be
+           freed here — it's owned by g_block_combos. */
+        free (eff_safe_owned);
       }
     }
   else
@@ -2826,23 +3425,38 @@ output_INSERT (Dwg_Object *obj)
               ARGS_H (obj->handle));
     }
 
-  /* Process attached entities (ATTRIBs, and sometimes other entities like
-     LWPOLYLINE revision clouds).  These have entmode=2 and are not part
-     of the block's entity chain, so get_next_owned_entity skips them. */
-  if (insert->has_attribs && insert->num_owned > 0 && insert->attribs)
+  /* Attached entities (ATTRIBs etc.) are NOT emitted here.  They carry
+     their own layer assignment distinct from the INSERT's, so emitting
+     them inline would collapse them into the parent INSERT's layer group.
+     The caller (output_BLOCK_HEADER's per-layer pass, or
+     output_INSERT_attribs for the unnamed-block fallback) is responsible
+     for emitting them in the correct layer group. */
+}
+
+/* Emit ATTRIBs (and other attached entities like LWPOLYLINE revision
+   clouds) of an INSERT.  These have entmode=2 and are not part of the
+   block's entity chain, so get_next_owned_entity skips them.
+
+   Layer-aware callers should iterate insert->attribs themselves and emit
+   only those whose layer matches the current group.  This helper exists
+   for the unnamed-block fallback path that does not group by layer. */
+static void
+output_INSERT_attribs (Dwg_Object *obj)
+{
+  Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+  Dwg_Data *dwg;
+  BITCODE_BL i;
+  if (!insert->has_attribs || insert->num_owned == 0 || !insert->attribs)
+    return;
+  dwg = obj->parent;
+  for (i = 0; i < insert->num_owned; i++)
     {
-      Dwg_Data *dwg = obj->parent;
-      BITCODE_BL i;
-      for (i = 0; i < insert->num_owned; i++)
-        {
-          Dwg_Object *aobj
-              = dwg_ref_object_silent (dwg, insert->attribs[i]);
-          if (!aobj)
-            continue;
-          if (aobj->fixedtype == DWG_TYPE_SEQEND)
-            continue;
-          output_object (aobj);
-        }
+      Dwg_Object *aobj = dwg_ref_object_silent (dwg, insert->attribs[i]);
+      if (!aobj)
+        continue;
+      if (aobj->fixedtype == DWG_TYPE_SEQEND)
+        continue;
+      output_object (aobj);
     }
 }
 
@@ -3014,15 +3628,19 @@ output_object (Dwg_Object *obj)
     case DWG_TYPE_HATCH:
       output_HATCH (obj);
       break;
+    case DWG_TYPE_SPLINE:
+      output_SPLINE (obj);
+      break;
     case DWG_TYPE_SEQEND:
     case DWG_TYPE_VIEWPORT:
       num = 0; // These don't produce geometry
       break;
     default:
       num = 0;
-      if (obj->supertype == DWG_SUPERTYPE_ENTITY)
-        fprintf (stderr, "%s ignored\n", obj->name);
-      // all other non-graphical objects are silently ignored
+      // Unhandled entity types and non-graphical objects are silently
+      // ignored.  The previous stderr "%s ignored" line was noisy when
+      // a drawing contained many such entities (BODY, DIMENSION_LINEAR,
+      // etc.) and offered no actionable information.
       break;
     }
   return num;
@@ -3203,6 +3821,436 @@ entity_layer_name (Dwg_Object *obj, Dwg_Data *dwg)
   return layer_get_attr_name (lobj, dwg);
 }
 
+/* The BlockCombo struct, g_block_combos table, and current_eff_layer /
+   current_eff_layer_safe globals are defined near the top of this file so
+   output_INSERT (which appears earlier) can read them.  AutoCAD's "layer 0
+   inside a block inherits the INSERT's layer" rule means the same block,
+   referenced from INSERTs on different layers, must produce different
+   visibility groupings — we implement that by emitting a separate
+   <g id="symbol-{handle}-{eff_layer_safe}"> per distinct effective layer
+   the block is referenced from, with each clone's layer-0 entities tagged
+   with the effective layer instead of the literal "0".  Each combo also
+   carries an origin shift (offset_x/y) that keeps emitted path coords in
+   a precision-safe range. */
+
+static void
+free_block_combos (void)
+{
+  unsigned int i;
+  for (i = 0; i < g_block_combos_n; i++)
+    {
+      free (g_block_combos[i].eff_layer);
+      free (g_block_combos[i].eff_layer_safe_id);
+    }
+  free (g_block_combos);
+  g_block_combos = NULL;
+  g_block_combos_n = 0;
+  g_block_combos_cap = 0;
+}
+
+/* Compare two doubles for qsort. */
+static int
+cmp_double (const void *a, const void *b)
+{
+  double da = *(const double *)a;
+  double db = *(const double *)b;
+  if (da < db) return -1;
+  if (da > db) return 1;
+  return 0;
+}
+
+/* Walk a block's entities to find a representative WCS point (used as an
+   origin shift so the symbol's emitted path coords stay in a precision-safe
+   range).  Returns coordinates in the SAME frame the renderer emits — i.e.,
+   after transform_OCS — so the offset matches the values that actually land
+   in `<path d=...>`.  Entities authored with extrusion=-1 (a common
+   mirroring trick) store OCS coords with the X axis flipped from WCS, so
+   the OCS-aware variant is what we need.
+
+   Uses the median across the block's entities rather than the first one:
+   blocks occasionally contain a single mirrored entity that sits on the
+   opposite side of WCS origin from the rest of the content, and picking
+   the first entity's coord as offset would leave the *majority* of the
+   block's content at huge path coords.  The median is robust to up to ~50%
+   outliers, which covers all realistic cases.  Returns 1 if a point was
+   found, 0 if the block has no renderable entity. */
+#define BLK_REP_MAX_SAMPLES 64
+static int
+block_representative_point (Dwg_Object *blk_obj, double *out_x, double *out_y)
+{
+  Dwg_Object *e;
+  double xs[BLK_REP_MAX_SAMPLES];
+  double ys[BLK_REP_MAX_SAMPLES];
+  int n = 0;
+  if (!blk_obj)
+    return 0;
+  e = get_first_owned_entity (blk_obj);
+  while (e && n < BLK_REP_MAX_SAMPLES)
+    {
+      BITCODE_3BD ocs_pt = { NAN, NAN, NAN };
+      BITCODE_3BD extrusion = { 0.0, 0.0, 1.0 };
+      BITCODE_3BD wcs_pt;
+      int got = 0;
+      switch (e->fixedtype)
+        {
+        case DWG_TYPE_LINE:
+          {
+            Dwg_Entity_LINE *o = e->tio.entity->tio.LINE;
+            ocs_pt = o->start;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_ARC:
+          {
+            Dwg_Entity_ARC *o = e->tio.entity->tio.ARC;
+            ocs_pt = o->center;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_CIRCLE:
+          {
+            Dwg_Entity_CIRCLE *o = e->tio.entity->tio.CIRCLE;
+            ocs_pt = o->center;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_ELLIPSE:
+          {
+            /* ELLIPSE.center is stored in WCS (DXF 10) — skip the
+               transform_OCS path at the bottom of the loop.  Match the
+               SPLINE pattern: write the sample directly. */
+            Dwg_Entity_ELLIPSE *o = e->tio.entity->tio.ELLIPSE;
+            if (isfinite (o->center.x) && isfinite (o->center.y))
+              {
+                xs[n] = o->center.x;
+                ys[n] = o->center.y;
+                n++;
+              }
+          }
+          break;
+        case DWG_TYPE_SPLINE:
+          {
+            Dwg_Entity_SPLINE *s = e->tio.entity->tio.SPLINE;
+            /* SPLINE has no extrusion field — ctrl_pts/fit_pts are already
+               in WCS, so no transform_OCS step is needed. */
+            double sx = NAN, sy = NAN;
+            if (s->scenario == 2 && s->fit_pts && s->num_fit_pts > 0)
+              {
+                sx = s->fit_pts[0].x;
+                sy = s->fit_pts[0].y;
+              }
+            else if (s->ctrl_pts && s->num_ctrl_pts > 0)
+              {
+                sx = s->ctrl_pts[0].x;
+                sy = s->ctrl_pts[0].y;
+              }
+            if (isfinite (sx) && isfinite (sy))
+              {
+                xs[n] = sx;
+                ys[n] = sy;
+                n++;
+              }
+          }
+          break;
+        case DWG_TYPE_LWPOLYLINE:
+          {
+            Dwg_Entity_LWPOLYLINE *o = e->tio.entity->tio.LWPOLYLINE;
+            if (o->points && o->num_points > 0)
+              {
+                ocs_pt.x = o->points[0].x;
+                ocs_pt.y = o->points[0].y;
+                ocs_pt.z = 0.0;
+                extrusion = o->extrusion;
+                got = 1;
+              }
+          }
+          break;
+        case DWG_TYPE_TEXT:
+          {
+            Dwg_Entity_TEXT *o = e->tio.entity->tio.TEXT;
+            ocs_pt.x = o->ins_pt.x;
+            ocs_pt.y = o->ins_pt.y;
+            ocs_pt.z = 0.0;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_ATTRIB:
+          {
+            Dwg_Entity_ATTRIB *o = e->tio.entity->tio.ATTRIB;
+            ocs_pt.x = o->ins_pt.x;
+            ocs_pt.y = o->ins_pt.y;
+            ocs_pt.z = 0.0;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_ATTDEF:
+          {
+            Dwg_Entity_ATTDEF *o = e->tio.entity->tio.ATTDEF;
+            ocs_pt.x = o->ins_pt.x;
+            ocs_pt.y = o->ins_pt.y;
+            ocs_pt.z = 0.0;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_MTEXT:
+          {
+            /* MTEXT.ins_pt is 3D — use directly without z-truncation. */
+            Dwg_Entity_MTEXT *o = e->tio.entity->tio.MTEXT;
+            ocs_pt = o->ins_pt;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        case DWG_TYPE_INSERT:
+          {
+            Dwg_Entity_INSERT *o = e->tio.entity->tio.INSERT;
+            ocs_pt = o->ins_pt;
+            extrusion = o->extrusion;
+            got = 1;
+          }
+          break;
+        default:
+          break;
+        }
+      if (got && isfinite (ocs_pt.x) && isfinite (ocs_pt.y))
+        {
+          transform_OCS (&wcs_pt, ocs_pt, extrusion);
+          if (isfinite (wcs_pt.x) && isfinite (wcs_pt.y))
+            {
+              xs[n] = wcs_pt.x;
+              ys[n] = wcs_pt.y;
+              n++;
+            }
+        }
+      e = get_next_owned_entity (blk_obj, e);
+    }
+  if (n == 0)
+    return 0;
+  qsort (xs, (size_t)n, sizeof (xs[0]), cmp_double);
+  qsort (ys, (size_t)n, sizeof (ys[0]), cmp_double);
+  /* Median (mid index for odd n, average of two middles for even n) keeps
+     the offset on the side where most of the block's content lives, even
+     when a single entity sits on the opposite side of WCS origin. */
+  if (n % 2 == 1)
+    {
+      *out_x = xs[n / 2];
+      *out_y = ys[n / 2];
+    }
+  else
+    {
+      *out_x = (xs[n / 2 - 1] + xs[n / 2]) / 2.0;
+      *out_y = (ys[n / 2 - 1] + ys[n / 2]) / 2.0;
+    }
+  return 1;
+}
+
+/* Add a (handle, eff_layer) combo if not already present.  Takes ownership
+   of eff_layer_dup and eff_layer_safe_dup on insertion; the caller must
+   free them otherwise. */
+static int
+add_block_combo (BITCODE_RLL handle, const char *eff_layer,
+                 double offset_x, double offset_y)
+{
+  unsigned int i;
+  char *dup_layer;
+  char *dup_safe;
+  for (i = 0; i < g_block_combos_n; i++)
+    {
+      if (g_block_combos[i].block_handle_value == handle
+          && strcmp (g_block_combos[i].eff_layer, eff_layer) == 0)
+        return 0; /* already present */
+    }
+  if (g_block_combos_n >= g_block_combos_cap)
+    {
+      unsigned int new_cap = g_block_combos_cap == 0
+                                 ? 16
+                                 : g_block_combos_cap * 2;
+      BlockCombo *grow = (BlockCombo *)realloc (
+          g_block_combos, (size_t)new_cap * sizeof (BlockCombo));
+      if (!grow)
+        return 0;
+      g_block_combos = grow;
+      g_block_combos_cap = new_cap;
+    }
+  dup_layer = strdup (eff_layer);
+  dup_safe = layer_safe_id (eff_layer);
+  if (!dup_layer || !dup_safe)
+    {
+      free (dup_layer);
+      free (dup_safe);
+      return 0;
+    }
+  g_block_combos[g_block_combos_n].block_handle_value = handle;
+  g_block_combos[g_block_combos_n].eff_layer = dup_layer;
+  g_block_combos[g_block_combos_n].eff_layer_safe_id = dup_safe;
+  g_block_combos[g_block_combos_n].offset_x = offset_x;
+  g_block_combos[g_block_combos_n].offset_y = offset_y;
+  g_block_combos_n++;
+  return 1;
+}
+
+/* Find the BLOCK_HEADER ref in dwg->block_control.entries whose
+   absolute_ref matches the given handle value.  Returns NULL on miss. */
+static Dwg_Object_Ref *
+find_block_ref_by_handle (Dwg_Data *dwg, BITCODE_RLL handle)
+{
+  BITCODE_BL i;
+  if (!dwg->block_control.entries)
+    return NULL;
+  for (i = 0; i < dwg->block_control.num_entries; i++)
+    {
+      Dwg_Object_Ref *ref = dwg->block_control.entries[i];
+      if (ref && ref->absolute_ref == handle)
+        return ref;
+    }
+  return NULL;
+}
+
+/* Returns the data-layer string to use for an entity inside the current
+   emission context.  Honours layer-0 inheritance: when emitting block
+   contents under a non-NULL current_eff_layer, an entity on layer 0 is
+   tagged with the effective layer instead.  Caller must free. */
+static char *
+effective_layer_name (Dwg_Object *obj, Dwg_Data *dwg)
+{
+  char *own = entity_layer_name (obj, dwg);
+  if (current_eff_layer && own && strcmp (own, "0") == 0)
+    {
+      free (own);
+      return strdup (current_eff_layer);
+    }
+  return own;
+}
+
+/* Compute the effective layer of an INSERT given the current emission
+   context.  Caller must free.  The result is used both for routing the
+   <use xlink:href> to the correct block clone AND as the parent_eff_layer
+   when recursively collecting combos for the block's contents.
+
+   - Top-level (current_eff_layer == NULL): the INSERT's own layer.
+   - Inside a block clone (current_eff_layer != NULL): own layer if it is
+     not "0"; otherwise the parent's effective layer. */
+static char *
+insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
+                        const char *parent_eff_layer)
+{
+  char *own = entity_layer_name (obj, dwg);
+  if (parent_eff_layer && own && strcmp (own, "0") == 0)
+    {
+      free (own);
+      return strdup (parent_eff_layer);
+    }
+  return own;
+}
+
+/* Walk the entities of `container_obj` (a BLOCK_HEADER) and gather all
+   (target_block_handle, target_block_effective_layer) combinations needed
+   to satisfy layer-0 inheritance.  Recurses into the target block of each
+   INSERT it finds with the INSERT's effective layer as parent. */
+static void
+collect_block_combos_recursive (Dwg_Data *dwg, Dwg_Object *container_obj,
+                                const char *parent_eff_layer)
+{
+  Dwg_Object *obj;
+  if (!container_obj)
+    return;
+  obj = get_first_owned_entity (container_obj);
+  while (obj)
+    {
+      if (obj->fixedtype == DWG_TYPE_INSERT)
+        {
+          Dwg_Entity_INSERT *ins = obj->tio.entity->tio.INSERT;
+          if (ins->block_header && ins->block_header->obj
+              && ins->block_header->obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+            {
+              Dwg_Object *target = ins->block_header->obj;
+              char *eff = insert_effective_layer (obj, dwg,
+                                                  parent_eff_layer);
+              if (eff)
+                {
+                  BITCODE_RLL target_handle
+                      = ins->block_header->absolute_ref;
+                  double off_x = 0.0, off_y = 0.0;
+                  int newly_added;
+                  int offset_known = 0;
+                  /* Memoise: if another combo with the same target handle
+                     was already collected (any effective layer), the
+                     representative offset is identical — it depends only
+                     on the block's contents, not on the layer
+                     inheritance.  Reuse it instead of re-running
+                     block_representative_point, which walks up to 64
+                     owned entities and does two qsort calls per
+                     invocation. */
+                  {
+                    unsigned int pi;
+                    for (pi = 0; pi < g_block_combos_n; pi++)
+                      {
+                        if (g_block_combos[pi].block_handle_value
+                            == target_handle)
+                          {
+                            off_x = g_block_combos[pi].offset_x;
+                            off_y = g_block_combos[pi].offset_y;
+                            offset_known = 1;
+                            break;
+                          }
+                      }
+                  }
+                  /* Pick a representative block-local point as origin shift.
+                     The threshold is applied to max(|off_x|, |off_y|) so the
+                     offset is applied or suppressed as a whole — never split
+                     so that, say, X is normalised but Y is left in 1e5+
+                     territory.  Small-coord blocks stay byte-identical to
+                     the previous renderer output. */
+                  if (!offset_known
+                      && block_representative_point (target, &off_x, &off_y))
+                    {
+                      double mag = fabs (off_x);
+                      if (fabs (off_y) > mag)
+                        mag = fabs (off_y);
+                      if (mag < 1e5)
+                        {
+                          off_x = 0.0;
+                          off_y = 0.0;
+                        }
+                    }
+                  else if (!offset_known)
+                    {
+                      off_x = 0.0;
+                      off_y = 0.0;
+                    }
+                  newly_added = add_block_combo (target_handle, eff,
+                                                 off_x, off_y);
+                  if (newly_added)
+                    collect_block_combos_recursive (dwg, target, eff);
+                  free (eff);
+                }
+            }
+        }
+      obj = get_next_owned_entity (container_obj, obj);
+    }
+}
+
+/* Build the set of (block_handle, effective_layer) combos that must be
+   emitted in <defs>.  Walks top-level model space and paper space, then
+   recurses into each referenced block. */
+static void
+collect_block_combos (Dwg_Data *dwg)
+{
+  Dwg_Object_Ref *ref;
+  /* Fresh start each invocation. */
+  free_block_combos ();
+  if ((ref = dwg_model_space_ref (dwg)) && ref->obj)
+    collect_block_combos_recursive (dwg, ref->obj, NULL);
+  if ((ref = dwg_paper_space_ref (dwg)) && ref->obj)
+    collect_block_combos_recursive (dwg, ref->obj, NULL);
+}
+
 static int
 output_BLOCK_HEADER (Dwg_Object_Ref *ref)
 {
@@ -3256,13 +4304,15 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
       if (!escaped || (strcasecmp (escaped, "*Model_Space") != 0
                        && strncasecmp_prefix (escaped, "*Paper_Space") != 0))
         {
+          const char *suffix
+              = current_eff_layer_safe ? current_eff_layer_safe : "_0";
           is_g = 1;
           // Set block definition mode with block's base point
           in_block_definition = 1;
           block_base_x = hdr->base_pt.x;
           block_base_y = hdr->base_pt.y;
-          printf ("\t<g id=\"symbol-" FORMAT_HV "\" >\n\t\t<!-- %s -->\n",
-                  ref->absolute_ref, escaped ? escaped : "");
+          printf ("\t<g id=\"symbol-" FORMAT_HV "-%s\" >\n\t\t<!-- %s -->\n",
+                  ref->absolute_ref, suffix, escaped ? escaped : "");
         }
       else
         {
@@ -3287,39 +4337,111 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
       int nlayers = 0, layer_cap = 0;
       int i, li;
 
-      /* Pass 1: collect unique layer names.
-         Uses string comparison so handle resolution failures (->obj == NULL)
-         don't silently collapse every entity onto "layer 0". */
+      /* Pass 1: collect unique data-layer names for non-INSERT entities
+         and INSERT attribs.  INSERTs themselves are emitted outside any
+         data-layer group (transparent containers), so their own layer is
+         not collected here.  ATTRIBs of INSERTs carry their own layer
+         assignment (no layer-0 inheritance — they are attached to the
+         INSERT, not contents of the block definition), so they use
+         entity_layer_name directly.  Non-INSERT block contents use
+         effective_layer_name to apply layer-0 inheritance when we are
+         emitting a block clone (current_eff_layer != NULL). */
       obj = get_first_owned_entity (ref->obj);
       while (obj)
         {
-          char *name = entity_layer_name (obj, dwg);
-          int found = 0;
-          for (i = 0; i < nlayers; i++)
-            if (strcmp (layers[i].attr_name, name) == 0)
-              {
-                found = 1;
-                break;
-              }
-          if (!found)
+          if (obj->fixedtype != DWG_TYPE_INSERT)
             {
-              if (nlayers >= layer_cap)
+              char *name = effective_layer_name (obj, dwg);
+              int found = 0;
+              for (i = 0; i < nlayers; i++)
+                if (strcmp (layers[i].attr_name, name) == 0)
+                  {
+                    found = 1;
+                    break;
+                  }
+              if (!found)
                 {
-                  layer_cap = layer_cap == 0 ? 8 : layer_cap * 2;
-                  layers = (LayerEntry *)realloc (
-                      layers, (size_t)layer_cap * sizeof (LayerEntry));
+                  if (nlayers >= layer_cap)
+                    {
+                      layer_cap = layer_cap == 0 ? 8 : layer_cap * 2;
+                      layers = (LayerEntry *)realloc (
+                          layers,
+                          (size_t)layer_cap * sizeof (LayerEntry));
+                    }
+                  layers[nlayers].attr_name = name;
+                  layers[nlayers].safe_id = layer_safe_id (name);
+                  nlayers++;
+                  name = NULL; /* ownership transferred */
                 }
-              layers[nlayers].attr_name = name;
-              layers[nlayers].safe_id = layer_safe_id (name);
-              nlayers++;
-              name = NULL; /* ownership transferred */
+              if (name)
+                free (name);
             }
-          if (name)
-            free (name);
+          else
+            {
+              Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+              if (insert->has_attribs && insert->num_owned > 0
+                  && insert->attribs)
+                {
+                  BITCODE_BL ai;
+                  for (ai = 0; ai < insert->num_owned; ai++)
+                    {
+                      Dwg_Object *aobj;
+                      char *aname;
+                      int afound = 0;
+                      aobj = dwg_ref_object_silent (dwg,
+                                                    insert->attribs[ai]);
+                      if (!aobj || aobj->fixedtype == DWG_TYPE_SEQEND
+                          || aobj->supertype != DWG_SUPERTYPE_ENTITY)
+                        continue;
+                      aname = entity_layer_name (aobj, dwg);
+                      for (i = 0; i < nlayers; i++)
+                        if (strcmp (layers[i].attr_name, aname) == 0)
+                          {
+                            afound = 1;
+                            break;
+                          }
+                      if (!afound)
+                        {
+                          if (nlayers >= layer_cap)
+                            {
+                              layer_cap
+                                  = layer_cap == 0 ? 8 : layer_cap * 2;
+                              layers = (LayerEntry *)realloc (
+                                  layers,
+                                  (size_t)layer_cap * sizeof (LayerEntry));
+                            }
+                          layers[nlayers].attr_name = aname;
+                          layers[nlayers].safe_id = layer_safe_id (aname);
+                          nlayers++;
+                          aname = NULL; /* ownership transferred */
+                        }
+                      if (aname)
+                        free (aname);
+                    }
+                }
+            }
           obj = get_next_owned_entity (ref->obj, obj);
         }
 
-      /* Pass 2: emit entities grouped into per-layer <g> elements */
+      /* Pass 2a: emit INSERT <use> elements with no data-layer wrapper.
+         INSERTs are transparent placement references — visibility of an
+         INSERT is decided by what its referenced block actually renders,
+         where each block-internal entity sits inside its own
+         <g data-layer="..."> and CSS [data-layer="X"] { display:none }
+         cascades through the <use> shadow tree.  Emitted BEFORE the
+         per-layer groups so they stack visually under direct entities
+         and ATTRIBs (annotations sit on top of symbols). */
+      obj = get_first_owned_entity (ref->obj);
+      while (obj)
+        {
+          if (obj->fixedtype == DWG_TYPE_INSERT)
+            num += output_object (obj);
+          obj = get_next_owned_entity (ref->obj, obj);
+        }
+
+      /* Pass 2b: emit non-INSERT entities and INSERT ATTRIBs grouped by
+         layer.  Each layer's <g data-layer="..."> drives the front-end
+         visibility toggle (CSS rule on the data-layer attribute). */
       for (li = 0; li < nlayers; li++)
         {
           printf ("\t<g data-layer=\"%s\" id=\"layer-%s\">\n",
@@ -3327,10 +4449,38 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
           obj = get_first_owned_entity (ref->obj);
           while (obj)
             {
-              char *name = entity_layer_name (obj, dwg);
-              if (strcmp (name, layers[li].attr_name) == 0)
-                num += output_object (obj);
-              free (name);
+              if (obj->fixedtype != DWG_TYPE_INSERT)
+                {
+                  char *name = effective_layer_name (obj, dwg);
+                  if (strcmp (name, layers[li].attr_name) == 0)
+                    num += output_object (obj);
+                  free (name);
+                }
+              else
+                {
+                  /* INSERT itself was emitted in Pass 2a; its attached
+                     ATTRIBs belong in their own data-layer groups. */
+                  Dwg_Entity_INSERT *insert = obj->tio.entity->tio.INSERT;
+                  if (insert->has_attribs && insert->num_owned > 0
+                      && insert->attribs)
+                    {
+                      BITCODE_BL ai;
+                      for (ai = 0; ai < insert->num_owned; ai++)
+                        {
+                          Dwg_Object *aobj;
+                          char *aname;
+                          aobj = dwg_ref_object_silent (
+                              dwg, insert->attribs[ai]);
+                          if (!aobj || aobj->fixedtype == DWG_TYPE_SEQEND
+                              || aobj->supertype != DWG_SUPERTYPE_ENTITY)
+                            continue;
+                          aname = entity_layer_name (aobj, dwg);
+                          if (strcmp (aname, layers[li].attr_name) == 0)
+                            num += output_object (aobj);
+                          free (aname);
+                        }
+                    }
+                }
               obj = get_next_owned_entity (ref->obj, obj);
             }
           printf ("\t</g>\n");
@@ -3345,11 +4495,16 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
     }
   else
     {
-      /* Unnamed blocks: output entities sequentially */
+      /* Unnamed blocks: output entities sequentially.
+         Attribs are no longer emitted by output_INSERT itself, so we
+         emit them inline here to preserve the legacy behaviour for this
+         path (no layer grouping). */
       obj = get_first_owned_entity (ref->obj);
       while (obj)
         {
           num += output_object (obj);
+          if (obj->fixedtype == DWG_TYPE_INSERT)
+            output_INSERT_attribs (obj);
           obj = get_next_owned_entity (ref->obj, obj);
         }
     }
@@ -3446,28 +4601,126 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
     case DWG_TYPE_TEXT:
       {
         Dwg_Entity_TEXT *text = obj->tio.entity->tio.TEXT;
+        Dwg_Data *dwg = obj->parent;
         BITCODE_2DPOINT pt;
         if (!text->text_value || isnan_2BD (text->ins_pt)
             || isnan_3BD (text->extrusion))
           break;
-        transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
-        extents_add_point (ext, pt.x, pt.y);
-        // Approximate text extent (height-based)
-        extents_add_point (ext, pt.x + text->height * 5, pt.y + text->height);
+        if (text->horiz_alignment != 0 || text->vert_alignment != 0)
+          transform_OCS_2d (&pt, text->alignment_pt, text->extrusion);
+        else
+          transform_OCS_2d (&pt, text->ins_pt, text->extrusion);
+        extents_add_text_bbox (ext, pt.x, pt.y,
+                               text_value_nchars (dwg, text->text_value),
+                               text->height, text->width_factor,
+                               text->rotation,
+                               text->horiz_alignment, text->vert_alignment);
       }
       break;
 
     case DWG_TYPE_ATTDEF:
       {
         Dwg_Entity_ATTDEF *attdef = obj->tio.entity->tio.ATTDEF;
+        Dwg_Data *dwg = obj->parent;
         BITCODE_2DPOINT pt;
         if (!attdef->tag || isnan_2BD (attdef->ins_pt)
             || isnan_3BD (attdef->extrusion))
           break;
-        transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
-        extents_add_point (ext, pt.x, pt.y);
-        // Approximate text extent (height-based)
-        extents_add_point (ext, pt.x + attdef->height * 5, pt.y + attdef->height);
+        if (attdef->horiz_alignment != 0 || attdef->vert_alignment != 0)
+          transform_OCS_2d (&pt, attdef->alignment_pt, attdef->extrusion);
+        else
+          transform_OCS_2d (&pt, attdef->ins_pt, attdef->extrusion);
+        extents_add_text_bbox (ext, pt.x, pt.y,
+                               text_value_nchars (dwg, attdef->tag),
+                               attdef->height, attdef->width_factor,
+                               attdef->rotation,
+                               attdef->horiz_alignment,
+                               attdef->vert_alignment);
+      }
+      break;
+
+    case DWG_TYPE_ATTRIB:
+      {
+        Dwg_Entity_ATTRIB *attrib = obj->tio.entity->tio.ATTRIB;
+        Dwg_Data *dwg = obj->parent;
+        BITCODE_2DPOINT pt;
+        if (!attrib->text_value || isnan_2BD (attrib->ins_pt)
+            || isnan_3BD (attrib->extrusion))
+          break;
+        if (attrib->horiz_alignment != 0 || attrib->vert_alignment != 0)
+          transform_OCS_2d (&pt, attrib->alignment_pt, attrib->extrusion);
+        else
+          transform_OCS_2d (&pt, attrib->ins_pt, attrib->extrusion);
+        extents_add_text_bbox (ext, pt.x, pt.y,
+                               text_value_nchars (dwg, attrib->text_value),
+                               attrib->height, attrib->width_factor,
+                               attrib->rotation,
+                               attrib->horiz_alignment,
+                               attrib->vert_alignment);
+      }
+      break;
+
+    case DWG_TYPE_MTEXT:
+      {
+        Dwg_Entity_MTEXT *mtext = obj->tio.entity->tio.MTEXT;
+        BITCODE_2DPOINT pt_in, pt;
+        double width, height_;
+        double rot_rad = 0.0;
+        double xmin_off, xmax_off, ymin_off, ymax_off;
+        BITCODE_BS horiz, vert;
+        if (isnan_3BD (mtext->ins_pt) || isnan_3BD (mtext->extrusion))
+          break;
+        pt_in.x = mtext->ins_pt.x;
+        pt_in.y = mtext->ins_pt.y;
+        transform_OCS_2d (&pt, pt_in, mtext->extrusion);
+
+        if (!isnan (mtext->x_axis_dir.x) && !isnan (mtext->x_axis_dir.y)
+            && (mtext->x_axis_dir.x != 0.0 || mtext->x_axis_dir.y != 0.0))
+          rot_rad
+              = atan2 (mtext->x_axis_dir.y, mtext->x_axis_dir.x);
+
+        /* Prefer the actual rendered extents reported by the DWG; fall
+           back to the wrap rectangle, and finally a text_height-based
+           estimate when neither is populated. */
+        width = (mtext->extents_width > 0.0) ? mtext->extents_width
+                                             : mtext->rect_width;
+        height_ = (mtext->extents_height > 0.0) ? mtext->extents_height
+                                                : mtext->rect_height;
+        if (!(width > 0.0))
+          width = mtext->text_height * 10.0;
+        if (!(height_ > 0.0))
+          height_ = mtext->text_height * 1.3;
+
+        /* MTEXT attachment is a 3×3 grid (TL TC TR ML MC MR BL BC BR). */
+        switch (mtext->attachment)
+          {
+          case 2: case 5: case 8: horiz = 1; break;
+          case 3: case 6: case 9: horiz = 2; break;
+          default: horiz = 0; break;
+          }
+        switch (mtext->attachment)
+          {
+          case 1: case 2: case 3: vert = 3; break; /* top */
+          case 4: case 5: case 6: vert = 2; break; /* middle */
+          default: vert = 1; break;                /* bottom (7,8,9) */
+          }
+
+        switch (horiz)
+          {
+          case 1: xmin_off = -width / 2.0; xmax_off = width / 2.0; break;
+          case 2: xmin_off = -width;       xmax_off = 0.0;         break;
+          default: xmin_off = 0.0;          xmax_off = width;      break;
+          }
+        switch (vert)
+          {
+          case 3: ymin_off = -height_;       ymax_off = 0.0;         break;
+          case 2: ymin_off = -height_ / 2.0; ymax_off = height_ / 2.0; break;
+          default: ymin_off = 0.0;           ymax_off = height_;     break;
+          }
+
+        extents_add_rotated_bbox (ext, pt.x, pt.y,
+                                  xmin_off, xmax_off, ymin_off, ymax_off,
+                                  rot_rad);
       }
       break;
 
@@ -3591,39 +4844,104 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
         extents_init (&block_ext);
         compute_block_extents (&block_ext, insert->block_header);
 
-        if (!block_ext.initialized)
+        if (block_ext.initialized)
           {
-            // Fallback: just add insertion point if block is empty
+            // Transform block extents by INSERT's scale, rotation, and position
+            sx = insert->scale.x;
+            sy = insert->scale.y;
+            base_x = hdr->base_pt.x;
+            base_y = hdr->base_pt.y;
+            cos_r = cos (insert->rotation);
+            sin_r = sin (insert->rotation);
+
+            // Four corners of block bounding box (relative to base point)
+            corners[0][0] = block_ext.xmin - base_x;
+            corners[0][1] = block_ext.ymin - base_y;
+            corners[1][0] = block_ext.xmax - base_x;
+            corners[1][1] = block_ext.ymin - base_y;
+            corners[2][0] = block_ext.xmax - base_x;
+            corners[2][1] = block_ext.ymax - base_y;
+            corners[3][0] = block_ext.xmin - base_x;
+            corners[3][1] = block_ext.ymax - base_y;
+
+            // Transform each corner: scale, rotate, translate to insertion point
+            for (i = 0; i < 4; i++)
+              {
+                double lx = corners[i][0] * sx;
+                double ly = corners[i][1] * sy;
+                double rx = lx * cos_r - ly * sin_r;
+                double ry = lx * sin_r + ly * cos_r;
+                extents_add_point (ext, ins_pt.x + rx, ins_pt.y + ry);
+              }
+          }
+        else
+          {
+            /* Block definition has no renderable geometry (e.g. an
+               annotation block whose definition is empty or holds only
+               ATTDEFs).  Seed the extents with the insertion point; the
+               ATTRIB pass below still runs so the INSERT's own world-space
+               ATTRIB labels are covered rather than clipped. */
             extents_add_point (ext, ins_pt.x, ins_pt.y);
-            break;
           }
 
-        // Transform block extents by INSERT's scale, rotation, and position
-        sx = insert->scale.x;
-        sy = insert->scale.y;
-        base_x = hdr->base_pt.x;
-        base_y = hdr->base_pt.y;
-        cos_r = cos (insert->rotation);
-        sin_r = sin (insert->rotation);
-
-        // Four corners of block bounding box (relative to base point)
-        corners[0][0] = block_ext.xmin - base_x;
-        corners[0][1] = block_ext.ymin - base_y;
-        corners[1][0] = block_ext.xmax - base_x;
-        corners[1][1] = block_ext.ymin - base_y;
-        corners[2][0] = block_ext.xmax - base_x;
-        corners[2][1] = block_ext.ymax - base_y;
-        corners[3][0] = block_ext.xmin - base_x;
-        corners[3][1] = block_ext.ymax - base_y;
-
-        // Transform each corner: scale, rotate, translate to insertion point
-        for (i = 0; i < 4; i++)
+        /* ATTRIBs attached to this INSERT live in world-space (their
+           ins_pt is already in the parent's coordinate system), not in
+           the block-local frame, so they aren't covered by the block
+           bounding box above and must be added separately.  Without this
+           pass, long or rotated ATTRIB labels (e.g. vertical "ESTOP",
+           "LIQUOR RETURN PUMP" tags) get clipped by the viewBox. */
+        if (insert->has_attribs && insert->num_owned > 0
+            && insert->attribs)
           {
-            double lx = corners[i][0] * sx;
-            double ly = corners[i][1] * sy;
-            double rx = lx * cos_r - ly * sin_r;
-            double ry = lx * sin_r + ly * cos_r;
-            extents_add_point (ext, ins_pt.x + rx, ins_pt.y + ry);
+            Dwg_Data *dwg = obj->parent;
+            BITCODE_BL ai;
+            for (ai = 0; ai < insert->num_owned; ai++)
+              {
+                Dwg_Object *aobj = dwg_ref_object_silent (
+                    dwg, insert->attribs[ai]);
+                if (!aobj)
+                  continue;
+                if (aobj->fixedtype == DWG_TYPE_SEQEND)
+                  continue;
+                if (aobj->supertype != DWG_SUPERTYPE_ENTITY)
+                  continue;
+                compute_entity_extents (ext, aobj);
+              }
+          }
+      }
+      break;
+
+    case DWG_TYPE_SPLINE:
+      {
+        /* SPLINE control / fit points are already in WCS — the entity
+           has no OCS extrusion vector unlike ARC/CIRCLE/etc.  B-splines
+           lie entirely within the convex hull of their control polygon,
+           so adding the control points (or fit points) over-approximates
+           the curve's bbox without needing to tessellate. */
+        Dwg_Entity_SPLINE *spline = obj->tio.entity->tio.SPLINE;
+        if (spline->scenario == 2 && spline->fit_pts
+            && spline->num_fit_pts > 0)
+          {
+            BITCODE_BS fi;
+            for (fi = 0; fi < spline->num_fit_pts; fi++)
+              {
+                BITCODE_3DPOINT p = spline->fit_pts[fi];
+                if (isnan_3BD (p))
+                  continue;
+                extents_add_point (ext, p.x, p.y);
+              }
+          }
+        else if (spline->ctrl_pts && spline->num_ctrl_pts > 0)
+          {
+            BITCODE_BL ci;
+            for (ci = 0; ci < spline->num_ctrl_pts; ci++)
+              {
+                double x = spline->ctrl_pts[ci].x;
+                double y = spline->ctrl_pts[ci].y;
+                if (isnan (x) || isnan (y))
+                  continue;
+                extents_add_point (ext, x, y);
+              }
           }
       }
       break;
@@ -3831,6 +5149,13 @@ output_SVG (Dwg_Data *dwg)
   // Build the layer handle→name lookup table (used by entity_layer_name)
   build_layer_handle_table (dwg);
 
+  /* Collect (block_handle, effective_layer) combinations driven by every
+     INSERT (top-level and nested).  We emit one <g id="symbol-{handle}-
+     {eff_layer_safe_id}"> in <defs> per combo, with each clone's
+     layer-0 entities tagged with the effective layer — implementing
+     AutoCAD's layer-0-in-block inheritance rule. */
+  collect_block_combos (dwg);
+
   // Compute actual geometry extents instead of using header values
   compute_modelspace_extents (dwg);
 
@@ -3983,12 +5308,32 @@ output_SVG (Dwg_Data *dwg)
         }
     }
 
+  /* Emit one block clone per (block_handle, effective_layer) combo.
+     The same block may appear multiple times in <defs> — once per
+     distinct effective layer it's referenced from — so its layer-0
+     contents render with the correct inherited layer.  Each clone is
+     identified by its suffixed id "symbol-{handle}-{eff_layer_safe_id}",
+     which output_INSERT references via xlink:href. */
   printf ("\t<defs>\n");
-  for (i = 0; i < dwg->block_control.num_entries; i++)
-    {
-      if (dwg->block_control.entries && (ref = dwg->block_control.entries[i]))
-        output_BLOCK_HEADER (ref);
-    }
+  {
+    unsigned int ci;
+    for (ci = 0; ci < g_block_combos_n; ci++)
+      {
+        Dwg_Object_Ref *blk_ref = find_block_ref_by_handle (
+            dwg, g_block_combos[ci].block_handle_value);
+        if (!blk_ref)
+          continue;
+        current_eff_layer = g_block_combos[ci].eff_layer;
+        current_eff_layer_safe = g_block_combos[ci].eff_layer_safe_id;
+        current_block_offset_x = g_block_combos[ci].offset_x;
+        current_block_offset_y = g_block_combos[ci].offset_y;
+        output_BLOCK_HEADER (blk_ref);
+        current_eff_layer = NULL;
+        current_eff_layer_safe = NULL;
+        current_block_offset_x = 0.0;
+        current_block_offset_y = 0.0;
+      }
+  }
   printf ("\t</defs>\n");
 
   /* Diagnostic comment: extents used for coordinate mapping */
@@ -4048,6 +5393,9 @@ output_SVG (Dwg_Data *dwg)
   printf ("</svg>\n");
   fflush (stdout);
   free_layer_handle_table ();
+  free_block_combos ();
+  current_eff_layer = NULL;
+  current_eff_layer_safe = NULL;
   paper_space_bg = 0; // reset for next call when used as a library
 }
 
@@ -4155,6 +5503,13 @@ main (int argc, char *argv[])
   if (i >= argc)
     return usage ();
 
+  /* Default stdout buffer (typically 4 KiB) causes a flush every few
+     formatted writes when the destination isn't a tty.  Large drawings
+     emit tens of MiB through hundreds of thousands of printf calls; a
+     1 MiB fully-buffered stdout takes the CLI from ~27 s to ~1 s for
+     LRPS1_LAYOUT.dwg.  Has no effect on the library API (dwg_svg_api.c
+     routes printf through its own writer callback). */
+  setvbuf (stdout, NULL, _IOFBF, 1 << 20);
   memset (&g_dwg, 0, sizeof (Dwg_Data));
   g_dwg.opts = opts;
   error = dwg_read_file (argv[i], &g_dwg);
