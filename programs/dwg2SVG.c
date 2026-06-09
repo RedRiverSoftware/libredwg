@@ -3281,9 +3281,15 @@ output_INSERT (Dwg_Object *obj)
         if (in_block_definition)
           {
             /* Raw DWG coords — the parent transform (viewport matrix or
-               enclosing INSERT's <use>) handles the final mapping. */
-            tx = ins_pt.x - sx * base_x;
-            ty = ins_pt.y - sy * base_y;
+               enclosing INSERT's <use>) handles the final mapping.  When the
+               enclosing block carries an origin shift, its direct geometry is
+               emitted in the shifted frame (transform_X/Y subtract
+               current_block_offset_*), so this nested INSERT's placement must
+               be shifted by the same amount to stay aligned with it.  The
+               child block's own offset, if any, is compensated separately
+               below. */
+            tx = ins_pt.x - sx * base_x - current_block_offset_x;
+            ty = ins_pt.y - sy * base_y - current_block_offset_y;
           }
         else
           {
@@ -4838,39 +4844,44 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
         extents_init (&block_ext);
         compute_block_extents (&block_ext, insert->block_header);
 
-        if (!block_ext.initialized)
+        if (block_ext.initialized)
           {
-            // Fallback: just add insertion point if block is empty
-            extents_add_point (ext, ins_pt.x, ins_pt.y);
-            break;
+            // Transform block extents by INSERT's scale, rotation, and position
+            sx = insert->scale.x;
+            sy = insert->scale.y;
+            base_x = hdr->base_pt.x;
+            base_y = hdr->base_pt.y;
+            cos_r = cos (insert->rotation);
+            sin_r = sin (insert->rotation);
+
+            // Four corners of block bounding box (relative to base point)
+            corners[0][0] = block_ext.xmin - base_x;
+            corners[0][1] = block_ext.ymin - base_y;
+            corners[1][0] = block_ext.xmax - base_x;
+            corners[1][1] = block_ext.ymin - base_y;
+            corners[2][0] = block_ext.xmax - base_x;
+            corners[2][1] = block_ext.ymax - base_y;
+            corners[3][0] = block_ext.xmin - base_x;
+            corners[3][1] = block_ext.ymax - base_y;
+
+            // Transform each corner: scale, rotate, translate to insertion point
+            for (i = 0; i < 4; i++)
+              {
+                double lx = corners[i][0] * sx;
+                double ly = corners[i][1] * sy;
+                double rx = lx * cos_r - ly * sin_r;
+                double ry = lx * sin_r + ly * cos_r;
+                extents_add_point (ext, ins_pt.x + rx, ins_pt.y + ry);
+              }
           }
-
-        // Transform block extents by INSERT's scale, rotation, and position
-        sx = insert->scale.x;
-        sy = insert->scale.y;
-        base_x = hdr->base_pt.x;
-        base_y = hdr->base_pt.y;
-        cos_r = cos (insert->rotation);
-        sin_r = sin (insert->rotation);
-
-        // Four corners of block bounding box (relative to base point)
-        corners[0][0] = block_ext.xmin - base_x;
-        corners[0][1] = block_ext.ymin - base_y;
-        corners[1][0] = block_ext.xmax - base_x;
-        corners[1][1] = block_ext.ymin - base_y;
-        corners[2][0] = block_ext.xmax - base_x;
-        corners[2][1] = block_ext.ymax - base_y;
-        corners[3][0] = block_ext.xmin - base_x;
-        corners[3][1] = block_ext.ymax - base_y;
-
-        // Transform each corner: scale, rotate, translate to insertion point
-        for (i = 0; i < 4; i++)
+        else
           {
-            double lx = corners[i][0] * sx;
-            double ly = corners[i][1] * sy;
-            double rx = lx * cos_r - ly * sin_r;
-            double ry = lx * sin_r + ly * cos_r;
-            extents_add_point (ext, ins_pt.x + rx, ins_pt.y + ry);
+            /* Block definition has no renderable geometry (e.g. an
+               annotation block whose definition is empty or holds only
+               ATTDEFs).  Seed the extents with the insertion point; the
+               ATTRIB pass below still runs so the INSERT's own world-space
+               ATTRIB labels are covered rather than clipped. */
+            extents_add_point (ext, ins_pt.x, ins_pt.y);
           }
 
         /* ATTRIBs attached to this INSERT live in world-space (their
