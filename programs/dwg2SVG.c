@@ -714,10 +714,19 @@ entity_dasharray (Dwg_Object *obj)
   for (i = 0; i < lt->numdashes && pos < (int)sizeof (buf) - 20; i++)
     {
       double len = lt->dashes[i].length * lt_scale;
+      if (isnan (len))
+        len = 0.01;
       if (len < 0.0)
         len = -len; /* gaps are stored as negative */
       if (len < 0.01)
         len = 0.01; /* SVG needs non-zero for dots */
+      /* Clamp so "%.2f" stays within the 20 bytes the loop guard reserves:
+         dash lengths and scales come straight from the (untrusted) file, and
+         an absurd LTSCALE like 1e300 would otherwise sprintf ~300 chars per
+         dash and overflow buf.  1e9 prints 13 chars and is already far
+         beyond any drawable pattern length. */
+      if (len > 1.0e9)
+        len = 1.0e9;
       if (pos > 0)
         pos += sprintf (buf + pos, " ");
       pos += sprintf (buf + pos, "%.2f", len);
@@ -5230,7 +5239,10 @@ static _Thread_local int used_vport_view = 0;
    than VPORT_RESCUE_RATIO in either dimension (or the extents are not
    finite), adopt the saved view as the model window instead.  Normally
    authored drawings stay on fit-to-content extents framing. */
-#define VPORT_RESCUE_RATIO 100.0
+/* 1000: an author plausibly saves zoomed ~100x into a detail of a large
+   drawing, but nobody works at 1000x — beyond that the extents are junk
+   (the motivating file breaches by ~11,500x). */
+#define VPORT_RESCUE_RATIO 1000.0
 
 static void
 apply_vport_view_rescue (Dwg_Data *dwg)
@@ -5249,6 +5261,15 @@ apply_vport_view_rescue (Dwg_Data *dwg)
       if (!vp || !table_name_is (dwg, vp->name, "*Active"))
         continue;
       if (isnan (vp->VIEWSIZE) || vp->VIEWSIZE <= 0.0)
+        continue;
+      /* VIEWCTR/VIEWSIZE are display coordinates; they only equal WCS x/y
+         for a straight plan view.  Skip twisted or non-plan (isometric)
+         saved views — adopting their window would frame the wrong region.
+         Comparisons are written so NaN values also skip. */
+      if (!(fabs (vp->view_twist) <= 1e-6))
+        continue;
+      if (!(fabs (vp->VIEWDIR.x) <= 1e-6) || !(fabs (vp->VIEWDIR.y) <= 1e-6)
+          || !(vp->VIEWDIR.z > 0.0))
         continue;
       /* Multiple "*Active" entries mean a split-screen viewport
          configuration; take the tallest as the author's main view. */
