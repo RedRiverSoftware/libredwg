@@ -2342,6 +2342,16 @@ output_CIRCLE (Dwg_Object *obj)
   common_entity (obj);
 }
 
+/* PDMODE base symbol 1 means points are not displayed at all (unless a
+   circle/square frame bit adds one).  Shared by output_POINT and the
+   extents pass, so a hidden point can't determine the viewBox. */
+static int
+point_style_visible (const Dwg_Data *dwg)
+{
+  int pdmode = dwg ? (int)dwg->header_vars.PDMODE : 0;
+  return (pdmode & 7) != 1 || (pdmode & (32 | 64));
+}
+
 /* Render a POINT according to the PDMODE / PDSIZE header variables,
    approximating AutoCAD's point-style glyphs.
    PDMODE base symbol (value & 7): 0 = dot, 1 = nothing, 2 = plus, 3 = X,
@@ -2374,7 +2384,7 @@ output_POINT (Dwg_Object *obj)
   has_square = pdmode & 64;
   if (base > 4)
     base = 0; /* 5-7 are undefined; treat like the default dot */
-  if (base == 1 && !has_circle && !has_square)
+  if (!point_style_visible (dwg))
     return; /* PDMODE 1 = point not displayed */
 
   pdsize = dwg ? dwg->header_vars.PDSIZE : 0.0;
@@ -4675,6 +4685,10 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
       {
         Dwg_Entity_POINT *point = obj->tio.entity->tio.POINT;
         BITCODE_3DPOINT pt, pt1;
+        /* Same visibility rule as output_POINT: a PDMODE-hidden point must
+           not determine the viewBox. */
+        if (!point_style_visible (obj->parent))
+          break;
         pt.x = point->x;
         pt.y = point->y;
         pt.z = point->z;
