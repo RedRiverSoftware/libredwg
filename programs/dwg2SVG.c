@@ -69,6 +69,10 @@ static _Thread_local int opts = 0;
 static _Thread_local int mspace = 0; // only mspace, even when pspace is defined
 static _Thread_local int in_block_definition = 0; // 1 when outputting block symbol entities
 static _Thread_local int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
+/* > 0 while re-rendering Model_Space content through a Paper_Space VIEWPORT;
+   holds that viewport's model→paper scale factor.  Used by entity_dasharray
+   to implement PSLTSCALE=1 (dash lengths uniform in paper units). */
+static _Thread_local double viewport_ltype_scale = 0.0;
 
 // Case-insensitive prefix match
 static int
@@ -471,6 +475,11 @@ entity_invisible (Dwg_Object *obj)
    drawing regardless of block transforms. */
 #define DEFAULT_STROKE_WIDTH_PX 1.0
 
+/* Screen-constant stroke width for a PDMODE "dot" point glyph.  AutoCAD
+   draws dot points a few pixels wide regardless of zoom or PDSIZE, so the
+   dot is a round-capped stroke with non-scaling-stroke at this width. */
+#define POINT_DOT_STROKE_PX 3.0
+
 /* Resolved lineweight in paper-space millimetres, or 0.0 when the entity
    uses default / ByBlock / unset lineweight.  Resolves ByLayer. */
 static double
@@ -682,17 +691,24 @@ entity_dasharray (Dwg_Object *obj)
     return NULL;
 
   ent = obj->tio.entity;
-  /* Effective scale = entity ltype_scale * global LTSCALE
-     When PSLTSCALE=1 (the default in modern DWGs) linetypes in paper
-     space render at their defined paper-space length regardless of the
-     global LTSCALE, so we skip the LTSCALE multiplier in that case. */
+  /* Effective scale = entity ltype_scale (CELTSCALE) * global LTSCALE.
+     LTSCALE applies everywhere — model space, paper space and viewports.
+     PSLTSCALE is a separate switch: it only controls whether model-space
+     dashes seen *through a paper-space viewport* are measured in paper
+     units (1) or model units (0); it has no effect on the model tab.
+     Viewport-rendered model content sits inside a <g> scaled by the
+     viewport zoom, which stretches dash lengths with it — that is
+     PSLTSCALE=0 behaviour.  For PSLTSCALE=1 we divide the pattern by
+     the viewport zoom so dashes stay constant in paper units.  (Entities
+     inside shared block <defs> can't get this per-viewport compensation.) */
   lt_scale = ent->ltype_scale > 0.0 ? ent->ltype_scale : 1.0;
   {
     Dwg_Data *dwg = obj->parent;
     double global_ltscale = dwg->header_vars.LTSCALE;
-    int psltscale = dwg->header_vars.PSLTSCALE;
-    if (!psltscale && global_ltscale > 0.0)
+    if (global_ltscale > 0.0)
       lt_scale *= global_ltscale;
+    if (dwg->header_vars.PSLTSCALE && viewport_ltype_scale > 0.0)
+      lt_scale /= viewport_ltype_scale;
   }
 
   for (i = 0; i < lt->numdashes && pos < (int)sizeof (buf) - 20; i++)
@@ -2317,23 +2333,102 @@ output_CIRCLE (Dwg_Object *obj)
   common_entity (obj);
 }
 
-// CIRCLE with radius 0.1
+/* Render a POINT according to the PDMODE / PDSIZE header variables,
+   approximating AutoCAD's point-style glyphs.
+   PDMODE base symbol (value & 7): 0 = dot, 1 = nothing, 2 = plus, 3 = X,
+   4 = short vertical tick upward from the point.  Bit 32 adds a circle
+   around the base symbol, bit 64 a square.
+   PDSIZE: 0 = 5% of the rendered view height, > 0 absolute drawing units,
+   < 0 = percentage of the view height. */
 static void
 output_POINT (Dwg_Object *obj)
 {
   Dwg_Entity_POINT *point = obj->tio.entity->tio.POINT;
+  Dwg_Data *dwg = obj->parent;
   BITCODE_3DPOINT pt, pt1;
+  int pdmode, base, has_circle, has_square;
+  double pdsize, size, half, cx, cy, up;
+  double lweight;
+  char *color;
+  int aci;
+  const char *ve_attr;
 
   pt.x = point->x;
   pt.y = point->y;
   pt.z = point->z;
   if (isnan_3BD (pt) || isnan_3BD (point->extrusion) || entity_invisible (obj))
     return;
+
+  pdmode = dwg ? (int)dwg->header_vars.PDMODE : 0;
+  base = pdmode & 7;
+  has_circle = pdmode & 32;
+  has_square = pdmode & 64;
+  if (base > 4)
+    base = 0; /* 5-7 are undefined; treat like the default dot */
+  if (base == 1 && !has_circle && !has_square)
+    return; /* PDMODE 1 = point not displayed */
+
+  pdsize = dwg ? dwg->header_vars.PDSIZE : 0.0;
+  if (pdsize > 0.0)
+    size = pdsize;
+  else if (pdsize < 0.0)
+    size = (-pdsize / 100.0) * page_height;
+  else
+    size = 0.05 * page_height;
+  half = size / 2.0;
+
   transform_OCS (&pt1, pt, point->extrusion);
-  printf ("\t<!-- point-%d -->\n", obj->index);
-  printf ("\t<circle id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" r=\"0.1\"\n\t",
-          obj->index, transform_X (pt1.x), transform_Y (pt1.y));
-  common_entity (obj);
+  cx = transform_X (pt1.x);
+  cy = transform_Y (pt1.y);
+  /* "Up" for the tick glyph: -y in root SVG space; +y inside block
+     definitions, whose parent transform applies the Y flip. */
+  up = in_block_definition ? half : -half;
+
+  lweight = entity_lweight (obj->tio.entity);
+  color = entity_color (obj);
+  aci = entity_aci_index (obj);
+  ve_attr = entity_lweight_is_explicit (obj->tio.entity)
+                ? ""
+                : " vector-effect=\"non-scaling-stroke\"";
+
+  printf ("\t<!-- point-%d pdmode=%d -->\n", obj->index, pdmode);
+  printf ("\t<g id=\"dwg-object-%d\" data-aci=\"%d\""
+          " style=\"fill:none;stroke:%s;stroke-width:%.2fpx\">\n",
+          obj->index, aci, color, lweight);
+
+  if (base == 0)
+    /* Dot: a near-zero-length round-capped stroke renders as a filled
+       dot that stays a fixed few pixels on screen at any zoom. */
+    printf ("\t\t<path d=\"M %f,%f l 0.0001,0\""
+            " vector-effect=\"non-scaling-stroke\""
+            " style=\"stroke-width:%.2fpx;stroke-linecap:round\" />\n",
+            cx, cy, POINT_DOT_STROKE_PX);
+  else if (base == 2)
+    printf ("\t\t<path d=\"M %f,%f L %f,%f M %f,%f L %f,%f\"%s />\n",
+            cx - half, cy, cx + half, cy, cx, cy - half, cx, cy + half,
+            ve_attr);
+  else if (base == 3)
+    printf ("\t\t<path d=\"M %f,%f L %f,%f M %f,%f L %f,%f\"%s />\n",
+            cx - half, cy - half, cx + half, cy + half,
+            cx - half, cy + half, cx + half, cy - half, ve_attr);
+  else if (base == 4)
+    printf ("\t\t<path d=\"M %f,%f L %f,%f\"%s />\n",
+            cx, cy, cx, cy + up, ve_attr);
+
+  /* Frame glyphs sit at half the base-symbol extent, matching the
+     proportions of AutoCAD's point-style pictures (the plus/X arms
+     poke out past the circle/square). */
+  if (has_circle)
+    printf ("\t\t<circle cx=\"%f\" cy=\"%f\" r=\"%f\"%s />\n",
+            cx, cy, half / 2.0, ve_attr);
+  if (has_square)
+    printf ("\t\t<rect x=\"%f\" y=\"%f\" width=\"%f\" height=\"%f\"%s />\n",
+            cx - half / 2.0, cy - half / 2.0, half, half, ve_attr);
+
+  printf ("\t</g>\n");
+
+  if (*color == '#')
+    free (color);
 }
 
 static void
@@ -5098,21 +5193,117 @@ compute_block_extents (Extents *ext, Dwg_Object_Ref *ref)
     }
 }
 
+/* Case-insensitive comparison of a table-entry name against an ASCII
+   literal, handling both narrow (pre-R2007) and TU wide (R2007+) storage. */
+static int
+table_name_is (const Dwg_Data *dwg, char *name, const char *want)
+{
+  size_t i;
+  if (!name)
+    return 0;
+  if (dwg->header.version >= R_2007)
+    {
+      BITCODE_TU wname = (BITCODE_TU)name;
+      for (i = 0; want[i]; i++)
+        {
+          unsigned int wc = wname[i];
+          if (wc > 127
+              || tolower ((int)wc) != tolower ((unsigned char)want[i]))
+            return 0;
+        }
+      return wname[i] == 0;
+    }
+  return strcasecmp (name, want) == 0;
+}
+
+/* Set when the model-space viewBox was taken from the saved VPORT view
+   rather than computed geometry extents (see below). */
+static _Thread_local int used_vport_view = 0;
+
+/* Zoom-extents framing breaks down when a drawing scatters geometry
+   absurdly far apart — e.g. a GA drawn at Ordnance-Survey millimetre
+   coordinates (~5.5e8) plus a leftover title block near the origin.  The
+   viewBox then spans hundreds of kilometres and every entity shrinks to a
+   sub-pixel speck.  AutoCAD and TrueView look fine on such files only
+   because they open the drawing's saved model view: the "*Active" VPORT
+   table entry.  When the computed extents dwarf that saved view by more
+   than VPORT_RESCUE_RATIO in either dimension (or the extents are not
+   finite), adopt the saved view as the model window instead.  Normally
+   authored drawings stay on fit-to-content extents framing. */
+#define VPORT_RESCUE_RATIO 100.0
+
+static void
+apply_vport_view_rescue (Dwg_Data *dwg)
+{
+  BITCODE_BL i;
+  Dwg_Object_VPORT *best = NULL;
+  double view_w, view_h, dx, dy;
+
+  for (i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *o = &dwg->object[i];
+      Dwg_Object_VPORT *vp;
+      if (o->fixedtype != DWG_TYPE_VPORT || !o->tio.object)
+        continue;
+      vp = o->tio.object->tio.VPORT;
+      if (!vp || !table_name_is (dwg, vp->name, "*Active"))
+        continue;
+      if (isnan (vp->VIEWSIZE) || vp->VIEWSIZE <= 0.0)
+        continue;
+      /* Multiple "*Active" entries mean a split-screen viewport
+         configuration; take the tallest as the author's main view. */
+      if (!best || vp->VIEWSIZE > best->VIEWSIZE)
+        best = vp;
+    }
+  if (!best)
+    return;
+
+  view_h = best->VIEWSIZE;
+  /* aspect_ratio (DXF 41) = view_width / VIEWSIZE; older writers only
+     store view_width. */
+  if (best->aspect_ratio > 0.0)
+    view_w = view_h * best->aspect_ratio;
+  else if (best->view_width > 0.0)
+    view_w = best->view_width;
+  else
+    view_w = view_h * 1.5;
+  if (isnan (view_w) || view_w <= 0.0 || isnan (best->VIEWCTR.x)
+      || isnan (best->VIEWCTR.y))
+    return;
+
+  dx = model_xmax - model_xmin;
+  dy = model_ymax - model_ymin;
+  /* NaN extents fail both comparisons and fall through to the rescue. */
+  if (dx <= view_w * VPORT_RESCUE_RATIO && dy <= view_h * VPORT_RESCUE_RATIO)
+    return; /* extents framing is sane — keep fit-to-content */
+
+  model_xmin = best->VIEWCTR.x - view_w / 2.0;
+  model_xmax = best->VIEWCTR.x + view_w / 2.0;
+  model_ymin = best->VIEWCTR.y - view_h / 2.0;
+  model_ymax = best->VIEWCTR.y + view_h / 2.0;
+  used_vport_view = 1;
+}
+
 // Compute actual geometry extents for the drawing
 static void
 compute_modelspace_extents (Dwg_Data *dwg)
 {
   Extents ext;
   Dwg_Object_Ref *ref;
+  int paper_rendered = 0;
 
   extents_init (&ext);
+  used_vport_view = 0;
 
   /* Compute extents only from the space that will actually be rendered.
      Never mix paper-space and model-space extents: their coordinate systems
      are typically unrelated, so combining them produces a wrong page_height
      and causes the Y-flip to map content to the wrong region (upside-down). */
   if (!mspace && (ref = dwg_paper_space_ref (dwg)))
-    compute_block_extents (&ext, ref);
+    {
+      compute_block_extents (&ext, ref);
+      paper_rendered = ext.initialized;
+    }
 
   /* Fall back to model space only when paper space contributed nothing. */
   if (!ext.initialized && (ref = dwg_model_space_ref (dwg)))
@@ -5134,6 +5325,11 @@ compute_modelspace_extents (Dwg_Data *dwg)
       model_xmax = dwg_model_x_max (dwg);
       model_ymax = dwg_model_y_max (dwg);
     }
+
+  /* Saved-view rescue applies only when model space is the rendered space —
+     paper-space layouts frame a physical sheet, whose extents are sane. */
+  if (!paper_rendered)
+    apply_vport_view_rescue (dwg);
 }
 
 static void
@@ -5295,7 +5491,9 @@ output_SVG (Dwg_Data *dwg)
                       {
                         int save_ibd = in_block_definition;
                         in_block_definition = 1;
+                        viewport_ltype_scale = s;
                         output_BLOCK_HEADER (ms_ref);
+                        viewport_ltype_scale = 0.0;
                         in_block_definition = save_ibd;
                       }
 
@@ -5338,10 +5536,11 @@ output_SVG (Dwg_Data *dwg)
 
   /* Diagnostic comment: extents used for coordinate mapping */
   printf ("\t<!-- dwg-extents: xmin=%f ymin=%f xmax=%f ymax=%f "
-          "page=%fx%f space=%s htbl_layers=%u -->\n",
+          "page=%fx%f space=%s view=%s htbl_layers=%u -->\n",
           model_xmin, model_ymin, model_xmax, model_ymax,
           page_width, page_height,
           num ? "paper" : "model",
+          used_vport_view ? "vport" : "extents",
           g_layer_htbl_n);
 
   /* Emit the CTB stylesheet from the layout of the space actually rendered.
