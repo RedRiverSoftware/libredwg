@@ -8,17 +8,12 @@ BUILD_DIR="$(mktemp -d /tmp/csharp-build.XXXXXX)"
 trap "rm -rf '$BUILD_DIR'" EXIT
 
 # Copy generated source to temp location (to avoid Windows path issues)
-# The wrapper includes "../src/config.h" relative to its location
-# So we create: $BUILD_DIR/generated/libredwg_wrap.c
-#               $BUILD_DIR/src/config.h
+# The wrapper includes "config.h", found via -I/buildsrc below
 mkdir -p "$BUILD_DIR/generated"
-mkdir -p "$BUILD_DIR/src"
 cp /generated/libredwg_wrap.c "$BUILD_DIR/generated/"
-cp /buildsrc/config.h "$BUILD_DIR/src/"
 
 # Fix CRLF if needed
 sed -i 's/\r$//' "$BUILD_DIR/generated/libredwg_wrap.c"
-sed -i 's/\r$//' "$BUILD_DIR/src/config.h"
 
 cd "$BUILD_DIR/generated"
 

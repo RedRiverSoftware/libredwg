@@ -102,14 +102,8 @@ Write-Host "  Include: $includeDir"
 Write-Host "  Lib:     $libDir"
 Write-Host "  Output:  $outputDir"
 
-# The wrapper includes "../src/config.h" - relative to the generated folder
-# Create a src folder as sibling to generated and copy config.h there
-$localSrcDir = Join-Path $scriptDir "src"
-if (-not (Test-Path $localSrcDir)) {
-    New-Item -ItemType Directory -Path $localSrcDir | Out-Null
-}
-Copy-Item $configH $localSrcDir -Force
-Write-Host "  Config:  $localSrcDir\config.h (copied from build)"
+# The wrapper includes "config.h", found via -I$buildSrcDir below
+Write-Host "  Config:  $configH"
 
 # Convert paths to MSYS2 format
 function ConvertTo-MsysPath($winPath) {
