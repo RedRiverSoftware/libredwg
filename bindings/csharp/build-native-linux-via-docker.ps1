@@ -76,6 +76,10 @@ $buildScript = Join-Path $scriptDir "docker-build-csharp.sh"
 
 # Run Docker
 # Use Debian Bullseye (glibc 2.31) for compatibility with dotnet/sdk:8.0 runtime
+# Bullseye is past EOL (Aug 2026): deb.debian.org no longer serves its
+# packages, so apt sources are pinned to the final bullseye state on
+# snapshot.debian.org (same pin as build-linux-via-docker.ps1).
+$AptSetup = "printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z bullseye main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260831T000000Z bullseye-updates main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20260831T000000Z bullseye-security main\n' > /etc/apt/sources.list"
 docker run --rm `
     -v "${generatedDir}:/generated:ro" `
     -v "${includeDir}:/include:ro" `
@@ -85,7 +89,7 @@ docker run --rm `
     -v "${outputDir}:/output" `
     -v "${buildScript}:/build.sh:ro" `
     debian:bullseye `
-    /bin/bash -c "apt-get update && apt-get install -y build-essential && /bin/bash /build.sh"
+    /bin/bash -c "$AptSetup && apt-get update && apt-get install -y build-essential && /bin/bash /build.sh"
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Docker build failed" -ForegroundColor Red
