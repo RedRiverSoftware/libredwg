@@ -8,7 +8,7 @@
     
     <AssemblyName>LibreDWG.Net</AssemblyName>
     <RootNamespace>LibreDWGInterop</RootNamespace>
-    <Version>0.13.0</Version>
+    <Version>0.14.0</Version>
     <Description>C# bindings for LibreDWG - free implementation of the DWG file format</Description>
     <Authors>LibreDWG Contributors</Authors>
     <PackageLicenseExpression>GPL-3.0-or-later</PackageLicenseExpression>
