@@ -17,6 +17,7 @@ top_builddir="@top_builddir@"
 EXEEXT="@EXEEXT@"
 DEBUG_CLASSES="@DEBUG_CLASSES@"
 TESTS_ENVIRONMENT="@AM_TESTS_ENVIRONMENT@"
+# shellcheck disable=2157
 if [ -n "$VALGRIND" ] && [ -n "$LOG_COMPILER" ]; then
     TESTPROG="$LOG_COMPILER $LOG_FLAGS"
 elif [ -n "@WINE@" ]; then
@@ -38,6 +39,11 @@ ODAFileConverter="@ODAFILECONVERTER@"
 if [ -n "$HAVE_ODA" ]; then
     baseFileConverter="$(basename "$ODAFileConverter")"
 fi
+XVFB_RUN="@XVFB_RUN@"
+if [ -n "$XVFB_RUN" ]; then
+    ODAFileConverter="$XVFB_RUN $ODAFileConverter"
+    baseFileConverter="$XVFB_RUN $baseFileConverter"
+fi
 
 i=0
 rm -f ./*dxf.log
@@ -51,7 +57,7 @@ convert_year_dwg() {
         2013) r=2013 ;;
         2010) r=2010 ;;
         2007) r=2007 ;;
-        2003) r=2003 ;;
+        2004) r=2004 ;;
         2000) r=2000 ;;
         r14) r=14 ;;
         r13) r=13 ;;
@@ -70,7 +76,7 @@ convert_year_dxf() {
         2013) r=2013 ;;
         2010) r=2010 ;;
         2007) r=2007 ;;
-        2003) r=2003 ;;
+        2004) r=2004 ;;
         2000) r=2000 ;;
         r14) r=14 ;;
         r13) r=13 ;;
@@ -105,8 +111,8 @@ check_subentity() {
             # shellcheck disable=SC2086,SC2154
             if [ -n "$r" ]; then
                 echo timeout 30 "$baseFileConverter" .. . "ACAD$r" DWG 0 1 "$base.dxf"
-                timeout 30 "$ODAFileConverter" .. . "ACAD$r" DWG 0 1 "$base.dxf" \
-                        $ODAFileConverter_geometry >/dev/null 2>/dev/null
+                timeout 30 $ODAFileConverter .. . "ACAD$r" DWG 0 1 "$base.dxf" \
+                        $ODAFileConverter_geometry >/dev/null 2>/dev/null </dev/null
                 if test -f "$base.dwg.err"; then
                     cat "$base.dwg.err"
                     echo FAIL "$baseFileConverter" "$tgt" "$year"
@@ -265,8 +271,8 @@ check_roundtrip() {
             # shellcheck disable=SC2086,SC2154
             if [ -n "$r" ]; then
                 echo timeout 30 "$baseFileConverter" . .. "ACAD$r" DXF 0 1 "$tgt"
-                timeout 30 "$ODAFileConverter" . .. "ACAD$r" DXF 0 1 "$tgt" \
-                        $ODAFileConverter_geometry >/dev/null 2>/dev/null
+                timeout 30 $ODAFileConverter . .. "ACAD$r" DXF 0 1 "$tgt" \
+                        $ODAFileConverter_geometry >/dev/null 2>/dev/null </dev/null
                 if test -f "$dxf.err"; then
                     cat "$dxf.err"
                     rm -- "$dxf.err"

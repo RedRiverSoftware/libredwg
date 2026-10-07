@@ -85,6 +85,20 @@
   }
   FREE {
     FIELD_TV (unit1_name, 0);
+    FIELD_TV (unit2_name, 0);
+    FIELD_TV (unit3_name, 0);
+    FIELD_TV (unit4_name, 0);
+    FIELD_TV (MENU, 1);
+    FIELD_TV (DIMPOST, 1);
+    FIELD_TV (DIMAPOST, 1);
+    FIELD_TV (DIMBLK_T, 1);
+    FIELD_TV (DIMBLK1_T, 1);
+    FIELD_TV (DIMBLK2_T, 1);
+    FIELD_TV (HYPERLINKBASE, 1);
+    FIELD_TV (STYLESHEET, 1);
+    FIELD_TV (FINGERPRINTGUID, 2);
+    FIELD_TV (VERSIONGUID, 2);
+    FIELD_TV (PROJECTNAME, 1);
   }
   SINCE (R_13b1)
     {
@@ -575,21 +589,21 @@
       FIELD_BLx (FLAGS, 70);
       DECODER {
           FIELD_VALUE (CELWEIGHT) = dxf_cvt_lweight (FIELD_VALUE (FLAGS) & 0x1f);
-          FIELD_G_TRACE (CELWEIGHT, BSd, 370) // default: -1 ByLayer
+          FIELD_G_TRACE (CELWEIGHT, BSd, 370); // default: -1 ByLayer
           FIELD_VALUE (ENDCAPS)   = FIELD_VALUE (FLAGS) & 0x60 ? 1 : 0;
-          FIELD_G_TRACE (ENDCAPS, RC, 280)
+          FIELD_G_TRACE (ENDCAPS, RC, 280);
           FIELD_VALUE (JOINSTYLE) = FIELD_VALUE (FLAGS) & 0x180 ? 1 : 0;
-          FIELD_G_TRACE (JOINSTYLE, RC, 280)
+          FIELD_G_TRACE (JOINSTYLE, RC, 280);
           FIELD_VALUE (LWDISPLAY) = FIELD_VALUE (FLAGS) & 0x200 ? 0 : 1;
-          FIELD_G_TRACE (LWDISPLAY, B, 290)
+          FIELD_G_TRACE (LWDISPLAY, B, 290);
           FIELD_VALUE (XEDIT)     = FIELD_VALUE (FLAGS) & 0x400 ? 0 : 1;
-          FIELD_G_TRACE (XEDIT, B, 290)
+          FIELD_G_TRACE (XEDIT, B, 290);
           FIELD_VALUE (EXTNAMES)  = FIELD_VALUE (FLAGS) & 0x800 ? 1 : 0;
-          FIELD_G_TRACE (EXTNAMES, B, 290)
+          FIELD_G_TRACE (EXTNAMES, B, 290);
           FIELD_VALUE (PSTYLEMODE) = FIELD_VALUE (FLAGS) & 0x2000 ? 1 : 0;
-          FIELD_G_TRACE (PSTYLEMODE, B, 290)
+          FIELD_G_TRACE (PSTYLEMODE, B, 290);
           FIELD_VALUE (OLESTARTUP) = FIELD_VALUE (FLAGS) & 0x4000 ? 1 : 0;
-          FIELD_G_TRACE (OLESTARTUP, B, 290)
+          FIELD_G_TRACE (OLESTARTUP, B, 290);
       }
       FIELD_BS (INSUNITS, 70); // 0-20. default: 1 with imperial, 4 with metric
       FIELD_BS (CEPSNTYPE, 70);

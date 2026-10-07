@@ -23,6 +23,9 @@ compile_commands.json
 /.analysis/
 /.build-*/
 /.build/
+/.build32/
+/.claude
+/.agents
 /.ccls-cache/
 /.fuzz-*/
 .vscode/
@@ -44,11 +47,16 @@ compile_commands.json
 /test/test-data-r*/
 /test/test-data/
 /test/test-old/
+/test/test-data-big/
+/test/test-oda-data/
+/test/test-old-oda/
 /test/ossfuzz/
 # test-data symlinks
 /test-data
 /td
 /to
+/ti
+/tz
 
 # globs, in specific dirs
 /00*.patch
@@ -81,6 +89,8 @@ compile_commands.json
 /doc/ACAD_R11.html
 /doc/R13DXF.html
 /doc/inc-*
+/doc/*.md
+/doc/autocad*
 /examples/*.log
 /examples/*.pi
 /examples/*.qi
@@ -172,6 +182,7 @@ compile_commands.json
 /cover_db
 /cscope.files
 /jsondump
+/.pre-commit-config-*.yaml
 /doc/Doxyfile
 /doc/LibreDWG.aux
 /doc/LibreDWG.cp
@@ -222,3 +233,5 @@ compile_commands.json
 /include/dwg.h.bak
 /include/dwg_api.h.bak
 /minisign.pub
+# temp patches
+/*.p

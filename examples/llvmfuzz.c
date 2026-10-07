@@ -38,6 +38,18 @@
 #  include "in_dxf.h"
 #endif
 
+// Number of output converters selectable via out: 0 encode, 1 dxf, 2 dxfb, 3
+// json, 4 geojson
+#ifdef DISABLE_DXF
+#  define LLVMFUZZ_NUM_OUTPUTS 1
+#else
+#  ifdef DISABLE_JSON
+#    define LLVMFUZZ_NUM_OUTPUTS 3
+#  else
+#    define LLVMFUZZ_NUM_OUTPUTS 5
+#  endif
+#endif
+
 int out;
 int ver;
 
@@ -78,10 +90,31 @@ LLVMFuzzerTestOneInput (const unsigned char *data, size_t size)
   struct ly_ctx *ctx = NULL;
 
   static char tmp_file[256];
+
+#ifndef STANDALONE
+  /* The libfuzzer path otherwise leaves out/ver at 0, so only dwg_encode runs.
+     Derive them from the input (without consuming it, so the existing corpus
+     keeps decoding) to also drive the out_dxf/out_dxfb/out_json encoders. */
+  out = 0;
+  ver = 0;
+  if (size)
+    {
+      unsigned int h = 2166136261u;
+      const size_t n = size > 4096 ? 4096 : size;
+      for (size_t i = 0; i < n; i++)
+        h = (h ^ data[i]) * 16777619u;
+      out = (int)(h % LLVMFUZZ_NUM_OUTPUTS);
+      ver = (int)((h >> 8) % 20);
+    }
+#endif
+
   dat.chain = (unsigned char *)data;
   dat.size = size;
   memset (&dwg, 0, sizeof (dwg));
 
+  /* Cap input size to prevent OOM/timeout in fuzzing */
+  if (size > 10 * 1024 * 1024)
+    return 0;
   // Detect the input format: DWG, DXF or JSON
   if (dat.size > 2 && dat.chain[0] == 'A' && dat.chain[1] == 'C')
     {
@@ -185,7 +218,19 @@ LLVMFuzzerTestOneInput (const unsigned char *data, size_t size)
             out_dat.version = dwg.header.version = R_14;
             break;
           case 13:
+            out_dat.version = dwg.header.version = R_2000;
+            break;
+          case 14:
             out_dat.version = dwg.header.version = R_2004;
+            break;
+          case 15:
+            out_dat.version = dwg.header.version = R_2010;
+            break;
+          case 16:
+            out_dat.version = dwg.header.version = R_2013;
+            break;
+          case 17:
+            out_dat.version = dwg.header.version = R_2018;
             break;
           default: // favor this one
             out_dat.version = dwg.header.version = R_2000;
@@ -231,7 +276,9 @@ extern int LLVMFuzzerInitialize(int *argc, char ***argv);
 static int
 usage (void)
 {
-  printf ("\nUsage: OUT=0 VER=3 llvmfuzz_standalone INPUT...");
+  printf ("\nUsage: OUT=0 VER=3 llvmfuzz_standalone INPUT...\n");
+  printf ("VER: 0=r1.4, 1=r2.0, 2=r2.10, 3=r2.10, 4=r2.4, 5=r2.6, 6=r9, 7=r10, 8=r11,\n"          "     9=r12, 10=r13, 11=r13c3, 12=r14, 13=r2000, 14=r2004, 15=r2010, 16=r2013, 17=r2018. default r2000\n");
+  printf ("OUT: 0=encode to dwg, 1=dxf, 2=json, 3=dxfb\n");
   return 1;
 }
 // llvmfuzz_standalone reproducer, see OUT and VER env vars
@@ -239,16 +286,7 @@ int
 main (int argc, char *argv[])
 {
   unsigned seed;
-  const unsigned int possible_outputformats =
-#  ifdef DISABLE_DXF
-#    ifdef DISABLE_JSON
-      1;
-#    else
-      3;
-#    endif
-#  else
-      5;
-#  endif
+  const unsigned int possible_outputformats = LLVMFUZZ_NUM_OUTPUTS;
 
   if (argc <= 1 || !*argv[1])
     return usage ();
@@ -313,7 +351,7 @@ main (int argc, char *argv[])
         fprintf (stderr, "SEED=%04u ", seed);
       fprintf (stderr, "OUT=%d ", out);
 #  endif
-      if (out == 0)
+      if (1)
         {
           ver = rand () % 20;
 #  ifdef STANDALONE

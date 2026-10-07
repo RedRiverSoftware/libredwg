@@ -359,7 +359,7 @@ static const char *const _dwg_type_names_variable[] = {
   "LINEARGRIPENTITY",                                         /* 737 */
   "ROTATIONGRIPENTITY",                                       /* 738 */
   "XYGRIPENTITY",                                             /* 739 */
-  "_3DLINE",                                                  /* 740 */
+  "3DLINE",                                                   /* 740 */
   "REPEAT",                                                   /* 741 */
   "ENDREP",                                                   /* 742 */
   "JUMP",                                                     /* 743 */
@@ -1357,11 +1357,10 @@ is_dxf_class_importable (const char *name)
     {
       if (stability == DWG_CLASS_UNSTABLE)
         {
-          return !strEQc (name, "MATERIAL") &&      // 72 missing
-                 !strEQc (name, "ARC_DIMENSION") && // 2 missing
-                 !strEQc (name, "SUN") &&           // 421 missing
-                 !strEQc (name, "PROXY_ENTITY") &&  // 90 missing
-                 !strEQc (name, "PROXY_OBJECT");    // 90 missing
+          return !strEQc (name, "MATERIAL") &&     // 72 missing
+                 !strEQc (name, "SUN") &&          // 421 missing
+                 !strEQc (name, "PROXY_ENTITY") && // 90 missing
+                 !strEQc (name, "PROXY_OBJECT");   // 90 missing
         }
       else
         return stability == DWG_CLASS_STABLE;
@@ -2551,7 +2550,7 @@ dwg_type_dxfname (const Dwg_Object_Type type)
     return NULL;
   else
     {
-      // LOG_ERROR ("Unknown object type %d", type)
+      // LOG_ERROR ("Unknown object type %d", type);
       return NULL;
     }
 }

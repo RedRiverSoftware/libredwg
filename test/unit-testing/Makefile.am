@@ -32,20 +32,21 @@ bits_test_LDADD = $(LDADD) \
 common_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo
 decode_test_LDADD = $(LDADD) \
-	$(top_builddir)/src/dwg.lo \
-	$(top_builddir)/src/common.lo \
-	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo \
-	$(top_builddir)/src/hash.lo \
-	$(top_builddir)/src/decode_r2007.lo
+	$(top_builddir)/src/codepages.lo \
+	$(top_builddir)/src/decode2.lo \
+	$(top_builddir)/src/decode_r2007.lo \
+	$(top_builddir)/src/dwg.lo \
+	$(top_builddir)/src/hash.lo
 encode_test_LDADD = $(LDADD) \
-	$(top_builddir)/src/dwg.lo \
-	$(top_builddir)/src/common.lo \
-	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo \
-	$(top_builddir)/src/hash.lo \
+	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/decode.lo \
-	$(top_builddir)/src/decode_r2007.lo
+	$(top_builddir)/src/decode2.lo \
+	$(top_builddir)/src/decode_r2007.lo \
+	$(top_builddir)/src/dwg.lo \
+	$(top_builddir)/src/encode2.lo \
+	$(top_builddir)/src/hash.lo
 hash_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo \
@@ -54,7 +55,6 @@ dynapi_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo
 dxf_test_LDADD = $(LDADD) \
-	$(top_builddir)/src/common.lo \
 	$(top_builddir)/src/dynapi.lo
 
 testobjects = \
@@ -385,18 +385,18 @@ testobjects += $(testdebug)
 endif
 
 check_minimal = \
-	bits_test \
-	common_test \
-	hash_test \
-	dynapi_test \
-	dxf_test
+	bits_test$(EXEEXT) \
+	common_test$(EXEEXT) \
+	hash_test$(EXEEXT) \
+	dynapi_test$(EXEEXT) \
+	dxf_test$(EXEEXT)
 if USE_WRITE
-check_minimal += add_test
+check_minimal += add_test$(EXEEXT)
 endif
 if !HAVE_MINGW
-check_minimal += decode_test
+check_minimal += decode_test$(EXEEXT)
 if USE_WRITE
-check_minimal += encode_test
+check_minimal += encode_test$(EXEEXT)
 endif
 endif
 
@@ -452,7 +452,7 @@ update-ignorance:
 
 EXTRA_DIST = \
 	tests_common.h \
-	common.c \
+	tests_common.c \
 	dynapi_test.c.in \
 	dynapi_test.c \
 	check-objects.pl

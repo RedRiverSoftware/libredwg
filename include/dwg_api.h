@@ -548,6 +548,7 @@ extern "C"
   /* Start auto-generated content. Do not touch. */
   // clang-format: off
   typedef struct _dwg_entity__3DFACE		dwg_ent__3dface;
+  typedef struct _dwg_entity_3DLINE		dwg_ent__3dline;
   typedef struct _dwg_entity__3DSOLID		dwg_ent__3dsolid;
   typedef struct _dwg_entity_ARC		dwg_ent_arc;
   typedef struct _dwg_entity_ATTDEF		dwg_ent_attdef;
@@ -591,7 +592,7 @@ extern "C"
   typedef struct _dwg_entity_VERTEX_PFACE_FACE		dwg_ent_vert_pface_face;
   typedef struct _dwg_entity_VIEWPORT		dwg_ent_viewport;
   /* untyped > 500 */
-  typedef struct _dwg_entity_3DLINE		dwg_ent__3dline;
+  typedef struct _dwg_entity_ARC_DIMENSION		dwg_ent_arc_dimension;
   typedef struct _dwg_entity_CAMERA		dwg_ent_camera;
   typedef struct _dwg_entity_DGNUNDERLAY		dwg_ent_dgnunderlay;
   typedef struct _dwg_entity_DWFUNDERLAY		dwg_ent_dwfunderlay;
@@ -609,7 +610,6 @@ extern "C"
   typedef struct _dwg_entity_SECTIONOBJECT		dwg_ent_sectionobject;
   typedef struct _dwg_entity_WIPEOUT		dwg_ent_wipeout;
   /* unstable */
-  typedef struct _dwg_entity_ARC_DIMENSION		dwg_ent_arc_dimension;
   typedef struct _dwg_entity_HELIX		dwg_ent_helix;
   typedef struct _dwg_entity_LARGE_RADIAL_DIMENSION		dwg_ent_large_radial_dimension;
   typedef struct _dwg_entity_LAYOUTPRINTCONFIG		dwg_ent_layoutprintconfig;
@@ -709,6 +709,7 @@ extern "C"
   typedef struct _dwg_object_LAYERFILTER		dwg_obj_layerfilter;
   typedef struct _dwg_object_LAYER_INDEX		dwg_obj_layer_index;
   typedef struct _dwg_object_LAYOUT		dwg_obj_layout;
+  typedef struct _dwg_object_MLEADERSTYLE		dwg_obj_mleaderstyle;
   typedef struct _dwg_object_PLACEHOLDER		dwg_obj_placeholder;
   typedef struct _dwg_object_PLOTSETTINGS		dwg_obj_plotsettings;
   typedef struct _dwg_object_RASTERVARIABLES		dwg_obj_rastervariables;
@@ -785,6 +786,7 @@ extern "C"
   typedef struct _dwg_object_BLOCKXYPARAMETER		dwg_obj_blockxyparameter;
   typedef struct _dwg_object_DATALINK		dwg_obj_datalink;
   typedef struct _dwg_object_DBCOLOR		dwg_obj_dbcolor;
+  typedef struct _dwg_object_DIMASSOC		dwg_obj_dimassoc;
   typedef struct _dwg_object_EVALUATION_GRAPH		dwg_obj_evaluation_graph;
   typedef struct _dwg_object_FCFOBJECTCONTEXTDATA		dwg_obj_fcfobjectcontextdata;
   typedef struct _dwg_object_GRADIENT_BACKGROUND		dwg_obj_gradient_background;
@@ -795,7 +797,6 @@ extern "C"
   typedef struct _dwg_object_LIGHTLIST		dwg_obj_lightlist;
   typedef struct _dwg_object_MATERIAL		dwg_obj_material;
   typedef struct _dwg_object_MENTALRAYRENDERSETTINGS		dwg_obj_mentalrayrendersettings;
-  typedef struct _dwg_object_MLEADERSTYLE		dwg_obj_mleaderstyle;
   typedef struct _dwg_object_MTEXTOBJECTCONTEXTDATA		dwg_obj_mtextobjectcontextdata;
   typedef struct _dwg_object_OBJECT_PTR		dwg_obj_object_ptr;
   typedef struct _dwg_object_PARTIAL_VIEWING_INDEX		dwg_obj_partial_viewing_index;
@@ -849,7 +850,6 @@ extern "C"
   typedef struct _dwg_object_CSACDOCUMENTOPTIONS		dwg_obj_csacdocumentoptions;
   typedef struct _dwg_object_CURVEPATH		dwg_obj_curvepath;
   typedef struct _dwg_object_DATATABLE		dwg_obj_datatable;
-  typedef struct _dwg_object_DIMASSOC		dwg_obj_dimassoc;
   typedef struct _dwg_object_DMDIMOBJECTCONTEXTDATA		dwg_obj_dmdimobjectcontextdata;
   typedef struct _dwg_object_DYNAMICBLOCKPROXYNODE		dwg_obj_dynamicblockproxynode;
   typedef struct _dwg_object_GEOMAPIMAGE		dwg_obj_geomapimage;
@@ -1672,6 +1672,7 @@ extern "C"
 
 
   dwg_get_OBJECT_DECL (ent__3dface, _3DFACE);
+  dwg_get_OBJECT_DECL (ent__3dline, _3DLINE);
   dwg_get_OBJECT_DECL (ent__3dsolid, _3DSOLID);
   dwg_get_OBJECT_DECL (ent_arc, ARC);
   dwg_get_OBJECT_DECL (ent_attdef, ATTDEF);
@@ -1715,7 +1716,7 @@ extern "C"
   dwg_get_OBJECT_DECL (ent_vert_pface_face, VERTEX_PFACE_FACE);
   dwg_get_OBJECT_DECL (ent_viewport, VIEWPORT);
   /* untyped > 500 */
-  dwg_get_OBJECT_DECL (ent__3dline, _3DLINE);
+  dwg_get_OBJECT_DECL (ent_arc_dimension, ARC_DIMENSION);
   dwg_get_OBJECT_DECL (ent_camera, CAMERA);
   dwg_get_OBJECT_DECL (ent_dgnunderlay, DGNUNDERLAY);
   dwg_get_OBJECT_DECL (ent_dwfunderlay, DWFUNDERLAY);
@@ -1733,7 +1734,6 @@ extern "C"
   dwg_get_OBJECT_DECL (ent_sectionobject, SECTIONOBJECT);
   dwg_get_OBJECT_DECL (ent_wipeout, WIPEOUT);
   /* unstable */
-  dwg_get_OBJECT_DECL (ent_arc_dimension, ARC_DIMENSION);
   dwg_get_OBJECT_DECL (ent_helix, HELIX);
   dwg_get_OBJECT_DECL (ent_large_radial_dimension, LARGE_RADIAL_DIMENSION);
   dwg_get_OBJECT_DECL (ent_layoutprintconfig, LAYOUTPRINTCONFIG);
@@ -1835,6 +1835,7 @@ extern "C"
   dwg_get_OBJECT_DECL (obj_layerfilter, LAYERFILTER);
   dwg_get_OBJECT_DECL (obj_layer_index, LAYER_INDEX);
   dwg_get_OBJECT_DECL (obj_layout, LAYOUT);
+  dwg_get_OBJECT_DECL (obj_mleaderstyle, MLEADERSTYLE);
   dwg_get_OBJECT_DECL (obj_placeholder, PLACEHOLDER);
   dwg_get_OBJECT_DECL (obj_plotsettings, PLOTSETTINGS);
   dwg_get_OBJECT_DECL (obj_rastervariables, RASTERVARIABLES);
@@ -1911,6 +1912,7 @@ extern "C"
   dwg_get_OBJECT_DECL (obj_blockxyparameter, BLOCKXYPARAMETER);
   dwg_get_OBJECT_DECL (obj_datalink, DATALINK);
   dwg_get_OBJECT_DECL (obj_dbcolor, DBCOLOR);
+  dwg_get_OBJECT_DECL (obj_dimassoc, DIMASSOC);
   dwg_get_OBJECT_DECL (obj_evaluation_graph, EVALUATION_GRAPH);
   dwg_get_OBJECT_DECL (obj_fcfobjectcontextdata, FCFOBJECTCONTEXTDATA);
   dwg_get_OBJECT_DECL (obj_gradient_background, GRADIENT_BACKGROUND);
@@ -1921,7 +1923,6 @@ extern "C"
   dwg_get_OBJECT_DECL (obj_lightlist, LIGHTLIST);
   dwg_get_OBJECT_DECL (obj_material, MATERIAL);
   dwg_get_OBJECT_DECL (obj_mentalrayrendersettings, MENTALRAYRENDERSETTINGS);
-  dwg_get_OBJECT_DECL (obj_mleaderstyle, MLEADERSTYLE);
   dwg_get_OBJECT_DECL (obj_mtextobjectcontextdata, MTEXTOBJECTCONTEXTDATA);
   dwg_get_OBJECT_DECL (obj_object_ptr, OBJECT_PTR);
   dwg_get_OBJECT_DECL (obj_partial_viewing_index, PARTIAL_VIEWING_INDEX);
@@ -1975,7 +1976,6 @@ extern "C"
     dwg_get_OBJECT_DECL (obj_csacdocumentoptions, CSACDOCUMENTOPTIONS);
     dwg_get_OBJECT_DECL (obj_curvepath, CURVEPATH);
     dwg_get_OBJECT_DECL (obj_datatable, DATATABLE);
-    dwg_get_OBJECT_DECL (obj_dimassoc, DIMASSOC);
     dwg_get_OBJECT_DECL (obj_dmdimobjectcontextdata, DMDIMOBJECTCONTEXTDATA);
     dwg_get_OBJECT_DECL (obj_dynamicblockproxynode, DYNAMICBLOCKPROXYNODE);
     dwg_get_OBJECT_DECL (obj_geomapimage, GEOMAPIMAGE);
@@ -2803,6 +2803,7 @@ extern "C"
 
 /// extract all owned entities from a block header (mspace or pspace)
   DWG_GETALL_ENTITY_DECL (_3DFACE);
+  DWG_GETALL_ENTITY_DECL (_3DLINE);
   DWG_GETALL_ENTITY_DECL (_3DSOLID);
   DWG_GETALL_ENTITY_DECL (ARC);
   DWG_GETALL_ENTITY_DECL (ATTDEF);
@@ -2851,7 +2852,7 @@ extern "C"
   DWG_GETALL_ENTITY_DECL (VIEWPORT);
   DWG_GETALL_ENTITY_DECL (XLINE);
   /* untyped > 500 */
-  DWG_GETALL_ENTITY_DECL (_3DLINE);
+  DWG_GETALL_ENTITY_DECL (ARC_DIMENSION);
   DWG_GETALL_ENTITY_DECL (CAMERA);
   DWG_GETALL_ENTITY_DECL (DGNUNDERLAY);
   DWG_GETALL_ENTITY_DECL (DWFUNDERLAY);
@@ -2869,7 +2870,6 @@ extern "C"
   DWG_GETALL_ENTITY_DECL (SECTIONOBJECT);
   DWG_GETALL_ENTITY_DECL (WIPEOUT);
   /* unstable */
-  DWG_GETALL_ENTITY_DECL (ARC_DIMENSION);
   DWG_GETALL_ENTITY_DECL (HELIX);
   DWG_GETALL_ENTITY_DECL (LARGE_RADIAL_DIMENSION);
   DWG_GETALL_ENTITY_DECL (LAYOUTPRINTCONFIG);
@@ -2980,6 +2980,7 @@ extern "C"
   DWG_GETALL_OBJECT_DECL (LAYERFILTER);
   DWG_GETALL_OBJECT_DECL (LAYER_INDEX);
   DWG_GETALL_OBJECT_DECL (LAYOUT);
+  DWG_GETALL_OBJECT_DECL (MLEADERSTYLE);
   DWG_GETALL_OBJECT_DECL (PLACEHOLDER);
   DWG_GETALL_OBJECT_DECL (PLOTSETTINGS);
   DWG_GETALL_OBJECT_DECL (RASTERVARIABLES);
@@ -3056,6 +3057,7 @@ extern "C"
   DWG_GETALL_OBJECT_DECL (BLOCKXYPARAMETER);
   DWG_GETALL_OBJECT_DECL (DATALINK);
   DWG_GETALL_OBJECT_DECL (DBCOLOR);
+  DWG_GETALL_OBJECT_DECL (DIMASSOC);
   DWG_GETALL_OBJECT_DECL (EVALUATION_GRAPH);
   DWG_GETALL_OBJECT_DECL (FCFOBJECTCONTEXTDATA);
   DWG_GETALL_OBJECT_DECL (GRADIENT_BACKGROUND);
@@ -3066,7 +3068,6 @@ extern "C"
   DWG_GETALL_OBJECT_DECL (LIGHTLIST);
   DWG_GETALL_OBJECT_DECL (MATERIAL);
   DWG_GETALL_OBJECT_DECL (MENTALRAYRENDERSETTINGS);
-  DWG_GETALL_OBJECT_DECL (MLEADERSTYLE);
   DWG_GETALL_OBJECT_DECL (MTEXTOBJECTCONTEXTDATA);
   DWG_GETALL_OBJECT_DECL (OBJECT_PTR);
   DWG_GETALL_OBJECT_DECL (PARTIAL_VIEWING_INDEX);
@@ -3120,7 +3121,6 @@ extern "C"
     DWG_GETALL_OBJECT_DECL (CSACDOCUMENTOPTIONS);
     DWG_GETALL_OBJECT_DECL (CURVEPATH);
     DWG_GETALL_OBJECT_DECL (DATATABLE);
-    DWG_GETALL_OBJECT_DECL (DIMASSOC);
     DWG_GETALL_OBJECT_DECL (DMDIMOBJECTCONTEXTDATA);
     DWG_GETALL_OBJECT_DECL (DYNAMICBLOCKPROXYNODE);
     DWG_GETALL_OBJECT_DECL (GEOMAPIMAGE);
@@ -3954,6 +3954,7 @@ extern "C"
  */
 /* fixed <500 */
   CAST_DWG_OBJECT_TO_ENTITY_DECL (_3DFACE);
+  CAST_DWG_OBJECT_TO_ENTITY_DECL (_3DLINE);
   CAST_DWG_OBJECT_TO_ENTITY_DECL (_3DSOLID);
   CAST_DWG_OBJECT_TO_ENTITY_DECL (ARC);
   CAST_DWG_OBJECT_TO_ENTITY_DECL (ATTDEF);
@@ -4002,7 +4003,7 @@ extern "C"
   CAST_DWG_OBJECT_TO_ENTITY_DECL (VIEWPORT);
   CAST_DWG_OBJECT_TO_ENTITY_DECL (XLINE);
   /* untyped > 500 */
-  CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (_3DLINE);
+  CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (ARC_DIMENSION);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (CAMERA);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (DGNUNDERLAY);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (DWFUNDERLAY);
@@ -4020,7 +4021,6 @@ extern "C"
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (SECTIONOBJECT);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (WIPEOUT);
   /* unstable */
-  CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (ARC_DIMENSION);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (HELIX);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (LARGE_RADIAL_DIMENSION);
   CAST_DWG_OBJECT_TO_ENTITY_BYNAME_DECL (LAYOUTPRINTCONFIG);
@@ -4131,6 +4131,7 @@ extern "C"
   CAST_DWG_OBJECT_TO_OBJECT_DECL (LAYERFILTER);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (LAYER_INDEX);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (LAYOUT);
+  CAST_DWG_OBJECT_TO_OBJECT_DECL (MLEADERSTYLE);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (PLACEHOLDER);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (PLOTSETTINGS);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (RASTERVARIABLES);
@@ -4207,6 +4208,7 @@ extern "C"
   CAST_DWG_OBJECT_TO_OBJECT_DECL (BLOCKXYPARAMETER);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (DATALINK);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (DBCOLOR);
+  CAST_DWG_OBJECT_TO_OBJECT_DECL (DIMASSOC);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (EVALUATION_GRAPH);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (FCFOBJECTCONTEXTDATA);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (GRADIENT_BACKGROUND);
@@ -4217,7 +4219,6 @@ extern "C"
   CAST_DWG_OBJECT_TO_OBJECT_DECL (LIGHTLIST);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (MATERIAL);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (MENTALRAYRENDERSETTINGS);
-  CAST_DWG_OBJECT_TO_OBJECT_DECL (MLEADERSTYLE);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (MTEXTOBJECTCONTEXTDATA);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (OBJECT_PTR);
   CAST_DWG_OBJECT_TO_OBJECT_DECL (PARTIAL_VIEWING_INDEX);
@@ -4271,7 +4272,6 @@ extern "C"
     CAST_DWG_OBJECT_TO_OBJECT_DECL (CSACDOCUMENTOPTIONS);
     CAST_DWG_OBJECT_TO_OBJECT_DECL (CURVEPATH);
     CAST_DWG_OBJECT_TO_OBJECT_DECL (DATATABLE);
-    CAST_DWG_OBJECT_TO_OBJECT_DECL (DIMASSOC);
     CAST_DWG_OBJECT_TO_OBJECT_DECL (DMDIMOBJECTCONTEXTDATA);
     CAST_DWG_OBJECT_TO_OBJECT_DECL (DYNAMICBLOCKPROXYNODE);
     CAST_DWG_OBJECT_TO_OBJECT_DECL (GEOMAPIMAGE);
@@ -7608,28 +7608,28 @@ extern "C"
                                  int *restrict error)
       __nonnull ((2)) _deprecated_dynapi_getter;
 
-  EXPORT void dwg_ent_viewport_set_lens_length (dwg_ent_viewport *restrict vp,
-                                                const double length,
-                                                int *restrict error)
+  EXPORT void dwg_ent_viewport_set_LENSLENGTH (dwg_ent_viewport *restrict vp,
+                                               const double length,
+                                               int *restrict error)
       __nonnull ((3)) _deprecated_dynapi_setter;
 
   EXPORT double
-  dwg_ent_viewport_get_lens_length (const dwg_ent_viewport *restrict vp,
-                                    int *restrict error)
+  dwg_ent_viewport_get_LENSLENGTH (const dwg_ent_viewport *restrict vp,
+                                   int *restrict error)
       __nonnull ((2)) _deprecated_dynapi_getter;
 
-  EXPORT void dwg_ent_viewport_set_front_clip_z (dwg_ent_viewport *restrict vp,
-                                                 const double front_z,
-                                                 int *restrict error)
+  EXPORT void dwg_ent_viewport_set_FRONTZ (dwg_ent_viewport *restrict vp,
+                                           const double front_z,
+                                           int *restrict error)
       __nonnull ((3)) _deprecated_dynapi_setter;
   EXPORT double
-  dwg_ent_viewport_get_front_clip_z (const dwg_ent_viewport *restrict vp,
-                                     int *restrict error)
+  dwg_ent_viewport_get_FRONTZ (const dwg_ent_viewport *restrict vp,
+                               int *restrict error)
       __nonnull ((2)) _deprecated_dynapi_getter;
 
-  EXPORT void dwg_ent_viewport_set_back_clip_z (dwg_ent_viewport *restrict vp,
-                                                const double back_z,
-                                                int *restrict error)
+  EXPORT void dwg_ent_viewport_set_BACKZ (dwg_ent_viewport *restrict vp,
+                                          const double back_z,
+                                          int *restrict error)
       __nonnull ((3)) _deprecated_dynapi_setter;
   EXPORT double
   dwg_ent_viewport_get_back_clip_z (const dwg_ent_viewport *restrict vp,
@@ -9500,7 +9500,9 @@ extern "C"
                                     const char *restrict name) __nonnull_all;
 
   /* utf-8 string without lowercase letters, space or !. maxlen 256 */
+#ifndef DWG_IS_VALID_TAG_DEFINED
   EXPORT bool dwg_is_valid_tag (const char *tag) __nonnull_all;
+#endif
 
   EXPORT Dwg_Entity_TEXT *
   dwg_add_TEXT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
@@ -9527,6 +9529,13 @@ extern "C"
                  const char *restrict name) __nonnull_all;
   EXPORT Dwg_Entity_ENDBLK *
   dwg_add_ENDBLK (Dwg_Object_BLOCK_HEADER *restrict blkhdr) __nonnull_all;
+  EXPORT Dwg_Entity_REPEAT *
+  dwg_add_REPEAT (Dwg_Object_BLOCK_HEADER *restrict blkhdr) __nonnull_all;
+  EXPORT Dwg_Entity_ENDREP *
+  dwg_add_ENDREP (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
+                  const BITCODE_RS numcols, const BITCODE_RS numrows,
+                  const BITCODE_RD colspacing,
+                  const BITCODE_RD rowspacing) __nonnull_all;
   EXPORT Dwg_Entity_SEQEND *
   dwg_add_SEQEND (dwg_ent_generic *restrict owner) __nonnull_all;
 
@@ -9588,6 +9597,10 @@ extern "C"
   dwg_add_LINE (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
                 const dwg_point_3d *restrict start_pt,
                 const dwg_point_3d *restrict end_pt) __nonnull_all;
+  EXPORT Dwg_Entity__3DLINE *
+  dwg_add_3DLINE (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
+                  const dwg_point_3d *restrict start_pt,
+                  const dwg_point_3d *restrict end_pt) __nonnull_all;
   EXPORT Dwg_Entity_DIMENSION_ALIGNED *dwg_add_DIMENSION_ALIGNED (
       Dwg_Object_BLOCK_HEADER *restrict blkhdr,
       const dwg_point_3d *restrict xline1_pt,
@@ -9825,9 +9838,9 @@ extern "C"
   EXPORT Dwg_Object_ACSH_CHAMFER_CLASS *dwg_add_ACSH_CHAMFER_CLASS (
       Dwg_Object_EVALUATION_GRAPH *restrict evalgraph,
       const dwg_point_3d *restrict origin_pt,
-      const dwg_point_3d *restrict normal, const int bl92,
+      const dwg_point_3d *restrict normal, const int method,
       const double base_dist, const double other_dist, const int num_edges,
-      const int32_t *edges, const int bl95) __nonnull_all;
+      const int32_t *edges, const int32_t base_face) __nonnull_all;
   EXPORT Dwg_Object_ACSH_CONE_CLASS *
   dwg_add_ACSH_CONE_CLASS (Dwg_Object_EVALUATION_GRAPH *restrict evalgraph,
                            const dwg_point_3d *restrict origin_pt,
@@ -9900,7 +9913,7 @@ extern "C"
   // dwg_add_CHAMFER (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
   //                  const dwg_point_3d *restrict origin_pt,
   //                  const dwg_point_3d *restrict normal, /* maybe NULL */
-  //                  const int bl92, const double base_dist,
+  //                  const int method, const double base_dist,
   //                  const double other_dist, const int num_edges,
   //                  const int32_t* edges, const int bl95)  __nonnull ((1,2));
   // EXPORT Dwg_Entity_3DSOLID*

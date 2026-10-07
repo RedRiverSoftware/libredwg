@@ -49,8 +49,6 @@ char *basename (char *);
 #endif
 #include "free.h"
 
-/* The logging level per .o */
-static unsigned int loglevel;
 #ifdef USE_TRACING
 /* This flag means we have checked the environment variable
    LIBREDWG_TRACE and set `loglevel' appropriately.  */
@@ -107,7 +105,7 @@ dat_read_file (Bit_Chain *restrict dat, FILE *restrict fp,
   if (!dat->chain)
     {
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
-      LOG_ERROR ("Not enough memory.\n")
+      LOG_ERROR ("Not enough memory");
       fclose (fp);
       dat->fh = NULL;
       return DWG_ERR_OUTOFMEM;
@@ -118,8 +116,8 @@ dat_read_file (Bit_Chain *restrict dat, FILE *restrict fp,
     {
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
       LOG_ERROR ("Could not read file (%" PRIuSIZE " out of %" PRIuSIZE
-                 "): %s\n",
-                 size, dat->size, filename)
+                 "): %s",
+                 size, dat->size, filename);
       fclose (fp);
       free (dat->chain);
       dat->chain = NULL;
@@ -207,6 +205,34 @@ dat_read_stream (Bit_Chain *restrict dat, FILE *restrict fp)
   return 0;
 }
 
+static void
+dwg_fixup_viewport_ids (Dwg_Data *restrict dwg)
+{
+  BITCODE_BL i;
+  BITCODE_RS last_id = 0;
+  for (i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg->object[i];
+      if (obj->supertype == DWG_SUPERTYPE_ENTITY
+          && obj->fixedtype == DWG_TYPE_VIEWPORT)
+        {
+          Dwg_Entity_VIEWPORT *_obj = obj->tio.entity->tio.VIEWPORT;
+          if (obj->tio.entity->entmode == 0)
+            {
+              _obj->on_off = 0;
+              _obj->id = 0;
+              last_id = 0;
+            }
+          else
+            {
+              _obj->on_off = 1;
+              last_id++;
+              _obj->id = last_id;
+            }
+        }
+    }
+}
+
 /** dwg_read_file
  * returns 0 on success.
  *
@@ -249,7 +275,7 @@ dwg_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
     }
   if (!fp)
     {
-      LOG_ERROR ("Could not open file: %s\n", filename)
+      LOG_ERROR ("Could not open file: %s\n", filename);
       return DWG_ERR_IOERROR;
     }
 
@@ -273,11 +299,19 @@ dwg_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
     }
   fclose (fp);
 
+  if (bit_chain.size < 6)
+    {
+      LOG_ERROR ("File %s too small, %zu byte", filename, bit_chain.size);
+      free (bit_chain.chain);
+      bit_chain.chain = NULL;
+      return DWG_ERR_INVALIDDWG;
+    }
+
   /* Decode the dwg structure */
   error = dwg_decode (&bit_chain, dwg);
   if (error >= DWG_ERR_CRITICAL)
     {
-      LOG_ERROR ("Failed to decode file: %s 0x%x\n", filename, error)
+      LOG_ERROR ("Failed to decode file: %s 0x%x", filename, error);
       free (bit_chain.chain);
       bit_chain.chain = NULL;
       bit_chain.size = 0;
@@ -290,6 +324,7 @@ dwg_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
   bit_chain.chain = NULL;
   bit_chain.size = 0;
 
+  dwg_fixup_viewport_ids (dwg);
   return error;
 }
 
@@ -315,7 +350,7 @@ dxf_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
 
   if (!filename || stat (filename, &attrib))
     {
-      LOG_ERROR ("File not found: %s\n", filename ? filename : "(null)")
+      LOG_ERROR ("File not found: %s", filename ? filename : "(null)");
       return DWG_ERR_IOERROR;
     }
   if (!(S_ISREG (attrib.st_mode)
@@ -324,13 +359,13 @@ dxf_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
 #  endif
             ))
     {
-      LOG_ERROR ("Error: %s\n", filename)
+      LOG_ERROR ("%s", filename);
       return DWG_ERR_IOERROR;
     }
   fp = fopen (filename, "rb");
   if (!fp)
     {
-      LOG_ERROR ("Could not open file: %s\n", filename)
+      LOG_ERROR ("Could not open file: %s", filename);
       return DWG_ERR_IOERROR;
     }
 
@@ -348,7 +383,7 @@ dxf_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
   dat.chain = (unsigned char *)calloc (1, dat.size + 2);
   if (!dat.chain)
     {
-      LOG_ERROR ("Not enough memory.\n");
+      LOG_ERROR ("Not enough memory");
       fclose (fp);
       return DWG_ERR_OUTOFMEM;
     }
@@ -363,8 +398,8 @@ dxf_read_file (const char *restrict filename, Dwg_Data *restrict dwg)
   if (size != dat.size)
     {
       LOG_ERROR ("Could not read the entire file (%" PRIuSIZE
-                 " out of %" PRIuSIZE "): %s\n",
-                 size, dat.size, filename)
+                 " out of %" PRIuSIZE "): %s",
+                 size, dat.size, filename);
       free (dat.chain);
       dat.chain = NULL;
       dat.size = 0;
@@ -380,16 +415,21 @@ ENDSEC
    */
   if (size < 31)
     {
-      LOG_ERROR ("File %s too small, %" PRIuSIZE " byte.\n", filename, size)
+      LOG_ERROR ("File %s too small, %" PRIuSIZE " byte.", filename, size);
       free (dat.chain);
       dat.chain = NULL;
       dat.size = 0;
       return DWG_ERR_IOERROR;
     }
-  // properly end the buffer for strtol()/... readers
+  /* properly end the buffer for strtol()/... readers. The NUL has to go after
+     the newline we just appended, not on top of it: the chain is calloc'd with
+     two spare bytes for exactly this. Overwriting it left the buffer ending in
+     "...\n0\0" for a DXF without a trailing newline, and dxf_read_string
+     bails out when it finds no '\n' in what is left -- so the file's last
+     group pair was lost and the whole import failed. */
   if (dat.chain[size - 1] != '\n')
     {
-      dat.chain[size] = '\n';
+      dat.chain[size++] = '\n';
       dat.size++;
     }
   dat.chain[size] = '\0';
@@ -398,7 +438,7 @@ ENDSEC
   if (!memcmp (dat.chain, "AC10", 4) || !memcmp (dat.chain, "AC1.", 4)
       || !memcmp (dat.chain, "AC2.10", 4) || !memcmp (dat.chain, "MC0.0", 4))
     {
-      LOG_ERROR ("This is a DWG, not a DXF file: %s\n", filename)
+      LOG_ERROR ("This is a DWG, not a DXF file: %s", filename);
       free (dat.chain);
       dat.chain = NULL;
       dat.size = 0;
@@ -417,7 +457,7 @@ ENDSEC
   dwg->opts |= (DWG_OPTS_INDXF | loglevel);
   if (error >= DWG_ERR_CRITICAL)
     {
-      LOG_ERROR ("Failed to decode DXF file: %s\n", filename)
+      LOG_ERROR ("Failed to decode DXF file: %s", filename);
       free (dat.chain);
       dat.chain = NULL;
       dat.size = 0;
@@ -464,7 +504,7 @@ dwg_write_file (const char *restrict filename, const Dwg_Data *restrict dwg)
   error = dwg_encode ((Dwg_Data *)dwg, &dat);
   if (error >= DWG_ERR_CRITICAL)
     {
-      LOG_ERROR ("Failed to encode Dwg_Data\n");
+      LOG_ERROR ("Failed to encode Dwg_Data");
       /* In development we want to look at the corpses */
 #  ifdef IS_RELEASE
       if (dat.size > 0)
@@ -486,20 +526,20 @@ dwg_write_file (const char *restrict filename, const Dwg_Data *restrict dwg)
 #  endif
   )
     {
-      LOG_ERROR ("The file already exists. We won't overwrite it.")
+      LOG_ERROR ("The file already exists. We won't overwrite it.");
       return error | DWG_ERR_IOERROR;
     }
   fh = fopen (filename, "wb");
   if (!fh || !dat.chain)
     {
-      LOG_ERROR ("Failed to create the file: %s\n", filename)
+      LOG_ERROR ("Failed to create the file: %s", filename);
       return error | DWG_ERR_IOERROR;
     }
 
   // Write the data into the file
   if (fwrite (dat.chain, sizeof (char), dat.size, fh) != dat.size)
     {
-      LOG_ERROR ("Failed to write data into the file: %s\n", filename)
+      LOG_ERROR ("Failed to write data into the file: %s", filename);
       fclose (fh);
       free (dat.chain);
       dat.chain = NULL;
@@ -539,7 +579,7 @@ dwg_bmp (const Dwg_Data *restrict dwg, BITCODE_RL *restrict size,
   dat = *(Bit_Chain *)&dwg->thumbnail;
   if (!dat.size || !dat.chain)
     {
-      LOG_INFO ("no THUMBNAIL Image Data\n")
+      LOG_INFO ("no THUMBNAIL Image Data");
       return NULL;
     }
   // dat.byte = 0; sentinel at 16
@@ -563,45 +603,46 @@ dwg_bmp (const Dwg_Data *restrict dwg, BITCODE_RL *restrict size,
   LOG_TRACE ("Thumbnail: " FORMAT_RL "\n", dwg->header.thumbnail_address);
   osize = bit_read_RL (&dat); /* overall size of all images */
   LOG_TRACE ("overall size: " FORMAT_RL " [RL]\n", osize);
-  if (osize > (dat.size - 4))
+  if (dat.size < 5 || osize > dat.size - 4)
     {
       LOG_ERROR ("Preview overflow > %" PRIuSIZE, dat.size - 4);
       return NULL;
     }
   num_headers = bit_read_RC (&dat);
-  LOG_INFO ("num_headers: %d [RC]\n", (int)num_headers)
+  LOG_INFO ("num_headers: %d [RC]\n", (int)num_headers);
 
   found = 0;
   header_size = 0;
   for (i = 0; i < num_headers; i++)
     {
-      if (dat.byte > dat.size)
+      if (dat.byte >= dat.size)
         {
           LOG_ERROR ("Preview overflow");
           break;
         }
       type = bit_read_RC (&dat);
       *typep = type;
-      LOG_TRACE ("\t[%i] Code: %i [RC]\n", i, type)
+      LOG_TRACE ("\t[%i] Code: %i [RC]\n", i, type);
       address = bit_read_RL (&dat);
       if (type == 1)
         {
           BITCODE_RL h_size = bit_read_RL (&dat);
-          LOG_TRACE ("\t\tHeader data start: " FORMAT_RL " [RL]\n", address)
+          LOG_TRACE ("\t\tHeader data start: " FORMAT_RL " [RL]\n", address);
           header_size += h_size;
           LOG_TRACE ("\t\tHeader data size: " FORMAT_RL " [RL] (" FORMAT_RL
                      ")\n",
-                     h_size, header_size)
+                     h_size, header_size);
         }
       else if (type == 2 && found == 0)
         {
           *size = bit_read_RL (&dat);
           found = 1;
-          LOG_TRACE ("\t\tBMP data start: " FORMAT_RL " [RL]\n", address)
-          LOG_INFO ("\t\tBMP size: %i [RL]\n", *size)
-          if (*size > (dat.size - 4))
+          LOG_TRACE ("\t\tBMP data start: " FORMAT_RL " [RL]\n", address);
+          LOG_INFO ("\t\tBMP size: %i [RL]\n", *size);
+          if (*size > dat.size - dat.byte)
             {
-              LOG_ERROR ("BMP thumbnail overflow > %" PRIuSIZE, dat.size - 4);
+              LOG_ERROR ("BMP thumbnail overflow > %" PRIuSIZE,
+                         dat.size - dat.byte);
               return NULL;
             }
         }
@@ -609,30 +650,30 @@ dwg_bmp (const Dwg_Data *restrict dwg, BITCODE_RL *restrict size,
         {
           osize = bit_read_RL (&dat);
           *size = osize;
-          LOG_TRACE ("\t\tWMF data start: " FORMAT_RL " [RL]\n", address)
-          LOG_INFO ("\t\tWMF size: %i [RL]\n", osize)
+          LOG_TRACE ("\t\tWMF data start: " FORMAT_RL " [RL]\n", address);
+          LOG_INFO ("\t\tWMF size: %i [RL]\n", osize);
         }
       else if (type == 6) // PNG default since r2013
         {
           osize = bit_read_RL (&dat);
           *size = osize;
-          LOG_TRACE ("\t\tPNG data start: " FORMAT_RL " [RL]\n", address)
-          LOG_INFO ("\t\tPNG size: %i [RL]\n", osize)
+          LOG_TRACE ("\t\tPNG data start: " FORMAT_RL " [RL]\n", address);
+          LOG_INFO ("\t\tPNG size: %i [RL]\n", osize);
         }
       else
         {
           osize = bit_read_RL (&dat);
-          LOG_TRACE ("\t\tData start: " FORMAT_RL " [RL]\n", address)
-          LOG_TRACE ("\t\tSize of unknown type %i: %i [RL]\n", type, osize)
+          LOG_TRACE ("\t\tData start: " FORMAT_RL " [RL]\n", address);
+          LOG_TRACE ("\t\tSize of unknown type %i: %i [RL]\n", type, osize);
         }
     }
   dat.byte += header_size;
   if (*size)
     LOG_TRACE ("Image offset: %" PRIuSIZE "\n", dat.byte);
-  if (header_size + *size > dat.size)
+  if (dat.byte + *size > dat.size)
     {
-      LOG_ERROR ("Preview overflow " FORMAT_RL " + " FORMAT_RL " > %" PRIuSIZE,
-                 header_size, *size, dat.size);
+      LOG_ERROR ("Preview overflow " FORMAT_RL " + %" PRIuSIZE " > %" PRIuSIZE,
+                 *size, dat.byte, dat.size);
       *size = 0;
       return NULL;
     }
@@ -689,7 +730,7 @@ EXPORT double
 dwg_page_x_min (const Dwg_Data *dwg)
 {
   assert (dwg);
-  return dwg->header_vars.EXTMIN.x;
+  return dwg->header_vars.PEXTMIN.x;
 }
 
 EXPORT double
@@ -844,7 +885,7 @@ dwg_ref_object (Dwg_Data *restrict dwg, Dwg_Object_Ref *restrict ref)
     }
   // if (dwg->header.from_version < R_12 && !ref->absolute_ref)
   //   { // resolve r11_idx to absolute_ref, looking up in the table entries
-  //     LOG_WARN ("Cannot resolve r11_idx %u", ref->r11_idx)
+  //     LOG_WARN ("Cannot resolve r11_idx %u", ref->r11_idx);
   //   }
   //  Without obj we don't get an absolute_ref from relative OFFSETOBJHANDLE
   //  handle types.
@@ -1018,8 +1059,8 @@ dwg_block_control (Dwg_Data *dwg)
       Dwg_Object *obj;
       Dwg_Object_Ref *ctrl = dwg->header_vars.BLOCK_CONTROL_OBJECT;
       if (!ctrl)
-        dwg->header_vars.BLOCK_CONTROL_OBJECT = ctrl =
-          dwg_find_table_control (dwg, "BLOCK_CONTROL");
+        dwg->header_vars.BLOCK_CONTROL_OBJECT = ctrl
+            = dwg_find_table_control (dwg, "BLOCK_CONTROL");
       if (!ctrl || !(obj = dwg_ref_object (dwg, ctrl))
           || obj->fixedtype != DWG_TYPE_BLOCK_CONTROL)
         {
@@ -1186,6 +1227,7 @@ get_first_owned_entity (const Dwg_Object *hdr)
       Dwg_Data *dwg = hdr->parent;
       if (dwg->dirty_refs)
         dwg_resolve_objectrefs_silent (dwg);
+      _hdr->__iterator = 0; /* reset step counter for cycle detection */
       /* With r2000 we rather follow the next_entity chain */
       return _hdr->first_entity ? _hdr->first_entity->obj : NULL;
     }
@@ -1229,7 +1271,7 @@ dwg_next_entity (const Dwg_Object *restrict obj)
       if (next && next->absolute_ref)
         {
           Dwg_Object *next_obj = dwg_ref_object_silent (obj->parent, next);
-          return (obj == next_obj
+          return (next_obj == NULL || obj == next_obj
                   || next_obj->supertype != DWG_SUPERTYPE_ENTITY)
                      ? NULL
                      : next_obj;
@@ -1268,9 +1310,19 @@ get_next_owned_entity (const Dwg_Object *restrict hdr,
   if (R_13b1 <= version && version <= R_2000)
     {
       Dwg_Object *obj;
-      if (_hdr->last_entity == NULL
-          || current->handle.value >= _hdr->last_entity->absolute_ref)
+      BITCODE_BL max_steps;
+      if (_hdr->last_entity == NULL || current == _hdr->last_entity->obj)
         return NULL;
+      /* Cycle detection: __iterator was reset in get_first_owned_entity */
+      _hdr->__iterator++;
+      max_steps = _hdr->num_owned ? _hdr->num_owned : hdr->parent->num_objects;
+      if (_hdr->__iterator > max_steps)
+        {
+          LOG_WARN ("Cycle in entity link chain for BLOCK_HEADER " FORMAT_HV
+                    "\n",
+                    hdr->handle.value);
+          return NULL;
+        }
       obj = dwg_next_entity (current);
       while (obj
              && (obj->fixedtype == DWG_TYPE_ATTDEF
@@ -1281,6 +1333,9 @@ get_next_owned_entity (const Dwg_Object *restrict hdr,
                  || obj->fixedtype == DWG_TYPE_VERTEX_PFACE
                  || obj->fixedtype == DWG_TYPE_VERTEX_PFACE_FACE))
         {
+          if (obj
+              == _hdr->last_entity->obj) // stop before skipping last_entity
+            return obj;
           obj = dwg_next_entity (obj);
           // this may happen with r2000 attribs
           if (obj && obj->tio.entity != NULL
@@ -1529,12 +1584,29 @@ get_next_owned_block_entity (const Dwg_Object *restrict hdr,
 
   if (R_13b1 <= version && version <= R_2000)
     {
+      Dwg_Object *obj;
+      BITCODE_BL max_steps;
       /* With r2000 we rather follow the next_entity chain. It may jump around
        * the linked list. */
-      if (!_hdr->last_entity
-          || current->handle.value == _hdr->last_entity->absolute_ref)
+      if (!_hdr->last_entity || current == _hdr->last_entity->obj)
         return NULL;
-      return dwg_next_entity (current);
+      /* Cycle detection: __iterator was reset in get_first_owned_entity */
+      _hdr->__iterator++;
+      max_steps = _hdr->num_owned ? _hdr->num_owned : dwg->num_objects;
+      if (_hdr->__iterator > max_steps)
+        {
+          LOG_WARN ("Cycle in entity link chain for BLOCK_HEADER " FORMAT_HV
+                    "\n",
+                    hdr->handle.value);
+          return NULL;
+        }
+      obj = dwg_next_entity (current);
+      /* Detect cycle: if the next entity's ownerhandle points to a different
+         block, the next_entity chain has crossed a block boundary. */
+      if (obj && obj->tio.entity && obj->tio.entity->ownerhandle
+          && obj->tio.entity->ownerhandle->absolute_ref != hdr->handle.value)
+        return NULL;
+      return obj;
     }
   if (version > R_2000 || version < R_13b1)
     {
@@ -2122,7 +2194,8 @@ dwg_add_handle (Dwg_Handle *restrict hdl, const BITCODE_RC code,
           hdl->code = 12;
           if ((unsigned)offset == 0x80000000) // invalid negation
             {
-              LOG_ERROR ("HANDLE 12 overflow for object " FORMAT_RL, obj->index);
+              LOG_ERROR ("HANDLE 12 overflow for object " FORMAT_RL,
+                         obj->index);
               hdl->value = 0;
               return 1;
             }
@@ -2174,7 +2247,7 @@ dwg_add_handleref (Dwg_Data *restrict dwg, const BITCODE_RC code,
           = (Dwg_Object_Ref *)ordered_ref_find (dwg, code, absref);
       if (NULL != refi)
         {
-          LOG_HANDLE ("[use handleref " FORMAT_REF "] ", ARGS_REF (refi))
+          LOG_HANDLE ("[use handleref " FORMAT_REF "] ", ARGS_REF (refi));
           return refi;
         }
     }
@@ -2186,14 +2259,15 @@ dwg_add_handleref (Dwg_Data *restrict dwg, const BITCODE_RC code,
     {
       ref->handleref.size = 2;
       if (dwg->header_vars.HANDSEED && dwg->header_vars.HANDSEED->absolute_ref
-          && absref > dwg->header_vars.HANDSEED->absolute_ref)
+          && absref > dwg->header_vars.HANDSEED->absolute_ref
+          && absref <= 0xFFFFFFFF)
         {
           dwg->header_vars.HANDSEED->absolute_ref = absref;
         }
     }
   ref->absolute_ref = absref;
   ref->obj = NULL;
-  LOG_HANDLE ("[add handleref " FORMAT_REF "] ", ARGS_REF (ref))
+  LOG_HANDLE ("[add handleref " FORMAT_REF "] ", ARGS_REF (ref));
   // fill ->obj later
   ordered_ref_add (dwg, ref);
   return ref;
@@ -2248,14 +2322,14 @@ dwg_find_table_control (Dwg_Data *restrict dwg, const char *restrict table)
               // probably importing from a minimal DXF
               LOG_TRACE ("dwg_find_table_control: table control object %s has "
                          "no handle\n",
-                         table)
+                         table);
               return NULL;
             }
         }
     }
   // if we haven't read all objects yet, ignore this error
   LOG_TRACE ("dwg_find_table_control: table control object %s not found\n",
-             table)
+             table);
   return NULL;
 }
 
@@ -2271,7 +2345,7 @@ dwg_find_dictionary (Dwg_Data *restrict dwg, const char *restrict name)
   loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
   if (!obj || !obj->tio.object || obj->fixedtype != DWG_TYPE_DICTIONARY)
     {
-      LOG_ERROR ("dwg_find_dictionary: 1st NOD DICTIONARY not found")
+      LOG_ERROR ("dwg_find_dictionary: 1st NOD DICTIONARY not found");
       return NULL;
     }
   nod = obj->tio.object->tio.DICTIONARY;
@@ -2299,7 +2373,7 @@ dwg_find_dictionary (Dwg_Data *restrict dwg, const char *restrict name)
       if (IS_FROM_TU_DWG (dwg))
         free (u8);
     }
-  LOG_TRACE ("dwg_find_dictionary: DICTIONARY with %s not found\n", name)
+  LOG_TRACE ("dwg_find_dictionary: DICTIONARY with %s not found\n", name);
   return NULL;
 }
 
@@ -2478,7 +2552,7 @@ dwg_ctrl_table (Dwg_Data *restrict dwg, const char *restrict table)
 
   if (!dwg || !table)
     return NULL;
-  if (strEQc (table, "BLOCK"))
+  if (strEQc (table, "BLOCK") || strEQc (table, "BLOCK_HEADER"))
     {
       if (!(ctrl = vars->BLOCK_CONTROL_OBJECT))
         vars->BLOCK_CONTROL_OBJECT = ctrl
@@ -2718,6 +2792,26 @@ dwg_find_tablehandle (Dwg_Data *restrict dwg, const char *restrict name,
           LOG_INSANE ("Found %s\n", name);
           if (isnew)
             free (hdlname);
+
+          if (strEQc (table, "LTYPE"))
+            {
+              if (strEQc (name, "BYLAYER") || strEQc (name, "ByLayer"))
+                {
+                  if (!vars->LTYPE_BYLAYER)
+                    vars->LTYPE_BYLAYER = hdlv[i];
+                }
+              else if (strEQc (name, "BYBLOCK") || strEQc (name, "ByBlock"))
+                {
+                  if (!vars->LTYPE_BYBLOCK)
+                    vars->LTYPE_BYBLOCK = hdlv[i];
+                }
+              else if (strEQc (name, "CONTINUOUS")
+                       || strEQc (name, "Continuous"))
+                {
+                  if (!vars->LTYPE_CONTINUOUS)
+                    vars->LTYPE_CONTINUOUS = hdlv[i];
+                }
+            }
           return hdlv[i];
         }
       if (ok && isnew && hdlname)
@@ -2829,11 +2923,20 @@ dwg_handle_name (Dwg_Data *restrict dwg, const char *restrict table,
 
   if (!dwg || !table || !handle)
     return NULL;
-  if (dwg->header.from_version < R_12 && !handle->absolute_ref)
-    ;
-  else if (!handle->absolute_ref)
-    return NULL;
+  if (!handle->absolute_ref)
+    {
+      if (dwg->header.from_version > R_11)
+        return NULL;
+    }
   loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
+  // R11 special LTYPE sentinels: 32767=BYLAYER, 32766=BYBLOCK
+  if (dwg->header.from_version <= R_12 && strEQc (table, "LTYPE"))
+    {
+      if (handle->r11_idx == 32767)
+        return strdup ("BYLAYER");
+      else if (handle->r11_idx == 32766)
+        return strdup ("BYBLOCK");
+    }
   // look for the _CONTROL table, and search for name in all entries
   ctrl = dwg_ctrl_table (dwg, table);
   if (!ctrl)
@@ -3327,6 +3430,12 @@ dwg_next_handseed (Dwg_Data *dwg)
     {
       BITCODE_RLL seed;
       seed = dwg->header_vars.HANDSEED->absolute_ref + 1;
+      // skip handles already in the object_map (GH #1229)
+      if (dwg->object_map)
+        {
+          while (hash_get (dwg->object_map, seed) != HASH_NOT_FOUND)
+            seed++;
+        }
       dwg->header_vars.HANDSEED->absolute_ref
           = dwg->header_vars.HANDSEED->handleref.value = seed;
       dwg->auxheader.HANDSEED = seed;
@@ -3388,7 +3497,7 @@ dwg_init_handseed (Dwg_Data *dwg)
       if (!lastobj->handle.value && dwg->num_objects > 1)
         lastobj = &dwg->object[dwg->num_objects - 2];
       dwg->header_vars.HANDSEED
-        = dwg_add_handleref (dwg, 0, lastobj->handle.value + 1, NULL);
+          = dwg_add_handleref (dwg, 0, lastobj->handle.value + 1, NULL);
     }
 }
 
@@ -3399,11 +3508,24 @@ dwg_set_next_objhandle (Dwg_Object *obj)
   BITCODE_RLL seed;
   if (dwg->next_hdl)
     {
-      obj->handle.value = dwg->next_hdl;
-      dwg_set_handle_size (&obj->handle);
-      hash_set (dwg->object_map, obj->handle.value, (uint64_t)obj->index);
-      dwg->next_hdl = 0;
-      return;
+      /* Check that the candidate handle is not already in use.
+         When a table record is added after the main DXF import pass,
+         next_hdl may point to a handle already owned by another object.  */
+      if (dwg->object_map
+          && hash_get (dwg->object_map, dwg->next_hdl) != HASH_NOT_FOUND)
+        {
+          LOG_WARN ("next_hdl " FORMAT_HV " already in object_map",
+                    dwg->next_hdl);
+          dwg->next_hdl = 0;
+        }
+      else
+        {
+          obj->handle.value = dwg->next_hdl;
+          dwg_set_handle_size (&obj->handle);
+          hash_set (dwg->object_map, obj->handle.value, (uint64_t)obj->index);
+          dwg->next_hdl = 0;
+          return;
+        }
     }
   seed = dwg_new_handseed (dwg);
   if (!dwg->object_map)
@@ -3411,17 +3533,18 @@ dwg_set_next_objhandle (Dwg_Object *obj)
   else
     {
       bool found = true;
-      while (found) {
-        uint64_t i = hash_get (dwg->object_map, seed);
-        if (i != HASH_NOT_FOUND)
-          {
-            LOG_WARN ("HANDSEED " FORMAT_HV " already exists: "
-                      FORMAT_BLL, seed, i);
-            seed = dwg_new_handseed (dwg);
-          }
-        else
-          found = false;
-      }
+      while (found)
+        {
+          uint64_t i = hash_get (dwg->object_map, seed);
+          if (i != HASH_NOT_FOUND)
+            {
+              LOG_WARN ("HANDSEED " FORMAT_HV " already exists: " FORMAT_BLL,
+                        seed, i);
+              seed = dwg_new_handseed (dwg);
+            }
+          else
+            found = false;
+        }
     }
   obj->handle.value = seed;
   dwg_set_handle_size (&obj->handle);
@@ -3512,8 +3635,8 @@ dwg_sections_init (Dwg_Data *dwg)
        * section, but treated as one)
        */
       if (!dwg->header.num_sections
-          || (dwg->header.from_version > R_2000
-              && dwg->header.version <= R_2000))
+          || ((dwg->header.from_version > R_2000)
+              != (dwg->header.version > R_2000)))
         {
           dwg->header.num_sections = dwg->header.version < R_13c3    ? 3
                                      : dwg->header.version < R_2000b ? 5
@@ -3522,8 +3645,8 @@ dwg_sections_init (Dwg_Data *dwg)
             dwg->header.num_sections = 5;
         }
       if (!dwg->header.sections
-          || (dwg->header.from_version > R_2000
-              && dwg->header.version <= R_2000))
+          || ((dwg->header.from_version > R_2000)
+              != (dwg->header.version > R_2000)))
         // ODA writes zeros
         dwg->header.sections = dwg->header.num_sections;
       // newer DWG's have proper HEADER.sections
@@ -3542,14 +3665,10 @@ dwg_sections_init (Dwg_Data *dwg)
       return DWG_ERR_INVALIDDWG;
     }
 
-  if (dwg->header.section)
-    // zero-based, including THUMBNAIL
-    dwg->header.section = (Dwg_Section *)realloc (
-        dwg->header.section,
-        sizeof (Dwg_Section) * (dwg->header.num_sections + 2));
-  else
-    dwg->header.section = (Dwg_Section *)calloc (dwg->header.num_sections + 2,
-                                                 sizeof (Dwg_Section));
+  free (dwg->header.section);
+  // zero-based, including THUMBNAIL
+  dwg->header.section = (Dwg_Section *)calloc (dwg->header.num_sections + 2,
+                                               sizeof (Dwg_Section));
   if (!dwg->header.section)
     {
       LOG_ERROR ("Out of memory");
@@ -3748,8 +3867,8 @@ dwg_downgrade_MLINESTYLE (Dwg_Object_MLINESTYLE *o)
             : 32767; // or 32766 for BYBLOCK
   for (BITCODE_RC j = 0; j < o->num_lines; j++)
     {
-      // TODO lookup lt.ltype
-      o->lines[j].lt.index = lt_index;
+      // TODO lookup lt_ltype
+      o->lines[j].lt_index = lt_index;
     }
 }
 
@@ -3761,28 +3880,28 @@ dwg_upgrade_MLINESTYLE (Dwg_Data *restrict dwg,
   // lookup on LTYPE_CONTROL list
   for (BITCODE_RC j = 0; j < o->num_lines; j++)
     {
-      BITCODE_BSd lt_index = o->lines[j].lt.index;
-      LOG_TRACE ("MLINESTYLE.lines[%d].lt.index = %d [BSd 6]\n", j,
+      BITCODE_BSd lt_index = o->lines[j].lt_index;
+      LOG_TRACE ("MLINESTYLE.lines[%d].lt_index = %d [BSd 6]\n", j,
                  (int)lt_index);
       if (lt_index == 0)
-        o->lines[j].lt.ltype = dwg->header_vars.LTYPE_CONTINUOUS;
+        o->lines[j].lt_ltype = dwg->header_vars.LTYPE_CONTINUOUS;
       else if (lt_index == 32767)
-        o->lines[j].lt.ltype = dwg->header_vars.LTYPE_BYLAYER;
+        o->lines[j].lt_ltype = dwg->header_vars.LTYPE_BYLAYER;
       else if (lt_index == 32766)
-        o->lines[j].lt.ltype = dwg->header_vars.LTYPE_BYBLOCK;
+        o->lines[j].lt_ltype = dwg->header_vars.LTYPE_BYBLOCK;
       else if (lt_index > 0)
         {
           BITCODE_H hdl
               = dwg_find_tablehandle_index (dwg, (int)lt_index, "LTYPE");
-          o->lines[j].lt.ltype
+          o->lines[j].lt_ltype
               = dwg_add_handleref (dwg, 5, hdl ? hdl->absolute_ref : 0, NULL);
           if (hdl)
-            LOG_TRACE ("MLINESTYLE.lines[%d].lt.ltype %s => " FORMAT_REF
+            LOG_TRACE ("MLINESTYLE.lines[%d].lt_ltype %s => " FORMAT_REF
                        " [H]\n",
                        j, o->name, ARGS_REF (hdl));
         }
       else
-        o->lines[j].lt.ltype = dwg_add_handleref (dwg, 5, 0, NULL);
+        o->lines[j].lt_ltype = dwg_add_handleref (dwg, 5, 0, NULL);
     }
 }
 
@@ -3794,7 +3913,7 @@ bsearch_ex (const void *pKey, const void *pBase, size_t numBase,
 {
   size_t numNow = numBase;
   char *pLo = (char *)pBase;
-  char *pHi = (char *)pBase + (numNow - 1) * nItemWidth;
+  char *pHi;
   if (NULL != ppBefore)
     {
       *ppBefore = NULL;
@@ -3803,6 +3922,7 @@ bsearch_ex (const void *pKey, const void *pBase, size_t numBase,
     {
       return NULL;
     }
+  pHi = (char *)pBase + (numNow - 1) * nItemWidth;
   for (; pLo <= pHi;)
     {
       if (0 == numNow)
@@ -3867,14 +3987,16 @@ bsearch_ex (const void *pKey, const void *pBase, size_t numBase,
 }
 
 static int
-Ref_cmp (const Dwg_Object_Ref *pKey, const Dwg_Object_Ref **ppR)
+Ref_cmp (const void *key, const void *elem)
 {
-  int retVal = (int)pKey->handleref.code - (int)(*ppR)->handleref.code;
+  const Dwg_Object_Ref *pKey = (const Dwg_Object_Ref *)key;
+  const Dwg_Object_Ref *pR = *(const Dwg_Object_Ref **)elem;
+  int retVal = (int)pKey->handleref.code - (int)pR->handleref.code;
   if (0 != retVal)
     return retVal;
-  return pKey->absolute_ref > (*ppR)->absolute_ref    ? 1
-         : pKey->absolute_ref == (*ppR)->absolute_ref ? 0
-                                                      : 1;
+  return pKey->absolute_ref > pR->absolute_ref    ? 1
+         : pKey->absolute_ref == pR->absolute_ref ? 0
+                                                  : -1;
 }
 
 void
@@ -3921,15 +4043,14 @@ ordered_ref_add (Dwg_Data *dwg, Dwg_Object_Ref *ref)
           else
             {
               dwg->object_ordered_ref = pNew;
-              memset (&dwg->object_ordered_ref[dwg->num_object_ordered_refs], 0,
-                      REFS_PER_REALLOC * sizeof (Dwg_Object_Ref *));
+              memset (&dwg->object_ordered_ref[dwg->num_object_ordered_refs],
+                      0, REFS_PER_REALLOC * sizeof (Dwg_Object_Ref *));
             }
         }
     }
   pFound = (Dwg_Object_Ref **)bsearch_ex (
       ref, dwg->object_ordered_ref, dwg->num_object_ordered_refs,
-      sizeof (Dwg_Object_Ref *), (int (*) (const void *, const void *))Ref_cmp,
-      (const void **)&pBefore);
+      sizeof (Dwg_Object_Ref *), Ref_cmp, (const void **)&pBefore);
   if (NULL == pFound)
     {
       // OK, no duplicates
@@ -3950,11 +4071,14 @@ ordered_ref_add (Dwg_Data *dwg, Dwg_Object_Ref *ref)
     }
   else
     {
-      // There are duplicates, disable bsearch
-      // It should never happen !
-      free (dwg->object_ordered_ref);
-      dwg->object_ordered_ref = NULL;
-      dwg->num_object_ordered_refs = -1;
+      // Duplicate (code, absref) pair. This DOES happen: dwg_add_handleref
+      // only dedupes via ordered_ref_find on some paths (e.g. obj == NULL),
+      // yet always calls ordered_ref_add. Disabling the index here demoted
+      // every later lookup to a linear scan over all refs — quadratic DXF
+      // import (minutes for a 19 MB file). Refs with the same key are
+      // interchangeable by design (the dedupe branch returns any of them),
+      // so just skip the duplicate and keep the index alive.
+      return;
     }
 }
 
@@ -3971,13 +4095,12 @@ ordered_ref_find (Dwg_Data *dwg, const BITCODE_RC code,
   nKey.handleref.code = code;
   nKey.absolute_ref = absref;
 
-  // bsearch first,if possible
-  if (0 != dwg->num_object_ordered_refs && NULL != dwg->object_ordered_ref)
+  // bsearch first, if possible and useful
+  if (dwg->object_ordered_ref && dwg->num_object_ordered_refs > 4)
     {
       Dwg_Object_Ref **pFound = (Dwg_Object_Ref **)bsearch (
           &nKey, dwg->object_ordered_ref, dwg->num_object_ordered_refs,
-          sizeof (Dwg_Object_Ref *),
-          (int (*) (const void *, const void *))Ref_cmp);
+          sizeof (Dwg_Object_Ref *), Ref_cmp);
       if (NULL != pFound)
         {
           return *pFound;

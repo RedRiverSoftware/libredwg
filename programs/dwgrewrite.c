@@ -65,9 +65,9 @@ help (void)
   printf ("  --as rNNNN                save as version\n");
   printf ("           Valid versions:\n");
   printf ("             r1.4, r2.6, r2.10, r9, r10, r11, r13, r14, r2000 "
-          "(default)\n");
+          "(default), r2004\n");
   printf ("           Planned versions:\n");
-  printf ("             r2004, r2007, r2010, r2013, r2018\n");
+  printf ("             r2007, r2010, r2013, r2018\n");
   printf ("  -o dwgfile, --file        \n");
   printf ("           --help           display this help and exit\n");
   printf ("           --version        output version information and exit\n"
@@ -76,9 +76,9 @@ help (void)
   printf ("  -v[0-9]     verbosity\n");
   printf ("  -a rNNNN    save as version\n");
   printf ("              Valid versions:\n");
-  printf ("                r1.4-r11, r13, r14, r2000 (default)\n");
+  printf ("                r1.4-r11, r13, r14, r2000 (default), r2004\n");
   printf ("              Planned versions:\n");
-  printf ("                r2004-r2018\n");
+  printf ("                r2007-r2018\n");
   printf ("  -o dwgfile\n");
   printf ("  -h          display this help and exit\n");
   printf ("  -i          output version information and exit\n"
@@ -98,50 +98,52 @@ int
 main (int argc, char *argv[])
 {
   Dwg_Data dwg;
-  Bit_Chain dat = { NULL, 0, 0, 0, 0 };
-  Bit_Chain out_dat = { NULL, 0, 0, 0, 0 };
+  Bit_Chain dat = { 0 };
+  Bit_Chain out_dat = { 0 };
   FILE *fp;
 
   __AFL_INIT ();
   printf ("Fuzzing decode + encode + decode from shared memory\n");
 
-  while (__AFL_LOOP (10000))
-    {   // llvm_mode persistent, non-forking mode
+  {
+    while (__AFL_LOOP (10000))
+      { // llvm_mode persistent, non-forking mode
 #  if 1 // fastest mode via shared mem (crashes still)
-      dat.chain = __AFL_FUZZ_TESTCASE_BUF;
-      dat.size = __AFL_FUZZ_TESTCASE_LEN;
-      // printf ("size: %lu\n", dat.size);
+        dat.chain = __AFL_FUZZ_TESTCASE_BUF;
+        dat.size = __AFL_FUZZ_TESTCASE_LEN;
+        // printf ("size: %lu\n", dat.size);
 #  elif 1 // still 1000x faster than the old file-forking fuzzer.
-      /* from stdin: */
-      dat.size = 0;
-      // dat.chain = NULL;
-      dat_read_stream (&dat, stdin);
+        /* from stdin: */
+        dat.size = 0;
+        // dat.chain = NULL;
+        dat_read_stream (&dat, stdin);
 #  else
-      /* else from file */
-      fp = fopen (argv[1], "rb");
-      if (!fp)
-        return 0;
-      dat.size = 0;
-      dat_read_file (&dat, fp, argv[1]);
-      fclose (fp);
+        /* else from file */
+        fp = fopen (argv[1], "rb");
+        if (!fp)
+          return 0;
+        dat.size = 0;
+        dat_read_file (&dat, fp, argv[1]);
+        fclose (fp);
 #  endif
-      if (dat.size < 100)
-        continue; // useful minimum input length
-      // dwg in only
-      if (dwg_decode (&dat, &dwg) <= DWG_ERR_CRITICAL)
-        {
-          memset (&out_dat, 0, sizeof (out_dat));
-          bit_chain_set_version (&out_dat, &dat);
-          out_dat.version = R_2000;
-          if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
-            exit (0);
-          dwg_free (&dwg);
-          dwg_decode (&out_dat, &dwg);
-          free (out_dat.chain);
-        }
-      else
-        exit (0);
-    }
+        if (dat.size < 100)
+          continue; // useful minimum input length
+        // dwg in only
+        if (dwg_decode (&dat, &dwg) <= DWG_ERR_CRITICAL)
+          {
+            memset (&out_dat, 0, sizeof (out_dat));
+            bit_chain_set_version (&out_dat, &dat);
+            out_dat.version = R_2000;
+            if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
+              exit (0);
+            dwg_free (&dwg);
+            dwg_decode (&out_dat, &dwg);
+            free (out_dat.chain);
+          }
+        else
+          exit (0);
+      }
+  }
   dwg_free (&dwg);
 }
 #  define main orig_main
@@ -230,7 +232,7 @@ main (int argc, char *argv[])
           dwg_version = dwg_version_as (optarg);
           if (dwg_version == R_INVALID)
             {
-              fprintf (stderr, "Invalid version '%s'\n", argv[1]);
+              fprintf (stderr, "Invalid version '%s'\n", optarg);
               return usage ();
             }
           version = optarg;

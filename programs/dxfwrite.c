@@ -75,13 +75,12 @@ help (void)
   printf ("  --as rNNNN                save as version\n");
   printf ("              Valid versions:\n");
   printf ("                r9, r10, r11, r12, r13, r14, r2000, r2004, r2007,"
-          "                r2010, r2013, r2018, r2021\n");
+          "                r2010, r2013, r2018\n");
 #  ifndef DISABLE_JSON
   printf ("  -I fmt,  --format fmt     DWG, DXF, DXFB, JSON\n");
 #  else
   printf ("  -I fmt,  --format fmt     DWG, DXF, DXFB\n");
 #  endif
-  printf ("           Planned input formats: GeoJSON, YAML, XML/OGR, GPX\n");
   printf ("  -o dxffile, --file        \n");
   printf ("  -m, --minimal             only $ACADVER, HANDSEED and "
           "ENTITIES\n");
@@ -95,14 +94,12 @@ help (void)
   printf ("  -a rNNNN    save as version\n");
   printf ("              Valid versions:\n");
   printf ("                r9, r10, r11, r12, r13, r14, r2000, r2004, r2007,"
-          "                r2010, r2013, r2018, r2021\n");
+          "                r2010, r2013, r2018\n");
 #  ifndef DISABLE_JSON
   printf ("  -I fmt      fmt: DWG, DXF, DXFB, JSON\n");
 #  else
   printf ("  -I fmt      fmt: DWG, DXF, DXFB\n");
 #  endif
-  printf (
-      "              Planned input formats: GeoJSON, YAML, XML/OGR, GPX\n");
   printf ("  -o dxffile\n");
   printf ("  -m          minimal, only $ACADVER, HANDSEED and ENTITIES\n");
   printf ("  -b          create a binary DXF\n");
@@ -219,7 +216,7 @@ main (int argc, char *argv[])
           dwg_version = dwg_version_as (optarg);
           if (dwg_version == R_INVALID)
             {
-              fprintf (stderr, "Invalid version '%s'\n", argv[1]);
+              fprintf (stderr, "Invalid version '%s'\n", optarg);
               return usage ();
             }
           version = optarg;
@@ -278,7 +275,8 @@ main (int argc, char *argv[])
               else if (strstr (infile, ".json") || strstr (infile, ".JSON"))
                 fmt = (char *)"json";
 #  endif
-              else if (strstr (infile, ".dxfb") || strstr (infile, ".DXFB"))
+              else if (strstr (infile, ".dxfb") || strstr (infile, ".DXFB")
+                       || strstr (infile, ".DXB"))
                 fmt = (char *)"dxfb";
               else if (strstr (infile, ".dxf") || strstr (infile, ".DXF"))
                 fmt = (char *)"dxf";
@@ -313,8 +311,8 @@ main (int argc, char *argv[])
       else
         dat.fh = stdin;
 
-      if ((fmt && !strcasecmp (fmt, "dwg"))
-          || (infile && !strcasecmp (infile, ".dwg")))
+      if ((fmt && !strcasecmp (fmt, "DWG"))
+          || (infile && !strcasecmp (infile, ".DWG")))
         {
           if (opts > 1)
             fprintf (stderr, "Reading DWG file %s\n",
@@ -323,8 +321,8 @@ main (int argc, char *argv[])
         }
 #ifndef DISABLE_DXF
 #  ifndef DISABLE_JSON
-      else if ((fmt && !strcasecmp (fmt, "json"))
-               || (infile && !strcasecmp (infile, ".json")))
+      else if ((fmt && !strcasecmp (fmt, "JSON"))
+               || (infile && !strcasecmp (infile, ".JSON")))
         {
           if (opts > 1)
             fprintf (stderr, "Reading JSON file %s\n",
@@ -332,16 +330,18 @@ main (int argc, char *argv[])
           error = dwg_read_json (&dat, &dwg);
         }
 #  endif
-      else if ((fmt && !strcasecmp (fmt, "dxfb"))
-               || (infile && !strcasecmp (infile, ".dxfb")))
+      else if ((fmt && (!strcasecmp (fmt, "DXFB") || !strcasecmp (fmt, "DXB")))
+               || (infile
+                   && (!strcasecmp (infile, ".DXFB")
+                       || !strcasecmp (infile, ".DXB"))))
         {
           if (opts > 1)
             fprintf (stderr, "Reading Binary DXF file %s\n",
                      infile ? infile : "from stdin");
           error = dxf_read_file (infile ? infile : "-", &dwg);
         }
-      else if ((fmt && !strcasecmp (fmt, "dxf"))
-               || (infile && !strcasecmp (infile, ".dxf")))
+      else if ((fmt && !strcasecmp (fmt, "DXF"))
+               || (infile && !strcasecmp (infile, ".DXF")))
         {
           if (opts > 1)
             fprintf (stderr, "Reading DXF file %s\n",

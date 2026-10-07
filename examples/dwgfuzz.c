@@ -71,7 +71,15 @@ int dwg_fuzz_dat (Dwg_Data **restrict dwgp, Bit_Chain *restrict dat);
 static int
 version (void)
 {
+#if FUZZ_MODE == FUZZ_INMEM
   printf ("dwgfuzz %s INMEM\n", PACKAGE_VERSION);
+#elif FUZZ_MODE == FUZZ_FILE
+  printf ("dwgfuzz %s FILE\n", PACKAGE_VERSION);
+#elif FUZZ_MODE == FUZZ_STDIN
+  printf ("dwgfuzz %s STDIN\n", PACKAGE_VERSION);
+#else
+  error unknown FUZZ_MODE
+#endif
 #ifndef __AFL_COMPILER
   printf ("not instrumented\n");
 #else
@@ -121,12 +129,12 @@ help (void)
   printf ("MODE:\n");
 #ifdef USE_WRITE
 #  ifndef DISABLE_DXF
-  printf ("  -indxf:   import from DXF,  export as r2000 DWG\n");
+  printf ("  -indxf:   import from DXF,  export as DWG\n");
 #  endif
 #  ifndef DISABLE_JSON
-  printf ("  -injson:  import from JSON, export as r2000 DWG\n");
+  printf ("  -injson:  import from JSON, export as DWG\n");
 #  endif
-  printf ("  -rw:      import from DWG,  export as r2000 DWG, re-import from "
+  printf ("  -rw:      import from DWG,  export as DWG, re-import from "
           "this DWG (rewrite)\n");
   printf ("  -add:     import from special add file, export as DWG and DXF, "
           "re-import from this\n");
@@ -181,10 +189,14 @@ main (int argc, char *argv[])
 #endif
   } mode
       = INVALID;
-  __AFL_INIT ();
-
   if (argc <= 1 || !*argv[1])
     return 1;
+  if (strEQc (argv[1], "--version"))
+    return version ();
+  if (strEQc (argv[1], "--help"))
+    return help ();
+
+  __AFL_INIT ();
   if (strEQc (argv[1], "-dwg"))
     mode = DWG;
 #ifdef USE_WRITE
@@ -213,10 +225,6 @@ main (int argc, char *argv[])
   else if (strEQc (argv[1], "-geojson"))
     mode = GEOJSON;
 #endif
-  else if (strEQc (argv[1], "--version"))
-    return version ();
-  else if (strEQc (argv[1], "--help"))
-    return help ();
   else
     return 1;
   if (mode == INVALID)
@@ -293,10 +301,12 @@ main (int argc, char *argv[])
         case INDXF:
           if (dwg_read_dxf (&dat, &dwg) < DWG_ERR_CRITICAL)
             {
-              out_dat.version = R_2000;
+              if (dat.version == R_2007)
+                out_dat.version = R_2010;
               if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
                 exit (0);
               free (out_dat.chain);
+              out_dat.chain = NULL;
             }
           break;
 #endif
@@ -304,12 +314,14 @@ main (int argc, char *argv[])
         case RW:
           if (dwg_decode (&dat, &dwg) < DWG_ERR_CRITICAL)
             {
-              out_dat.version = R_2000;
+              if (dat.version == R_2007)
+                out_dat.version = R_2010;
               if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
                 exit (0);
               if (dwg_decode (&out_dat, &dwg) >= DWG_ERR_CRITICAL)
                 exit (0);
               free (out_dat.chain);
+              out_dat.chain = NULL;
             }
           break;
         case ADD:
@@ -341,7 +353,8 @@ main (int argc, char *argv[])
         case INJSON:
           if (dwg_read_json (&dat, &dwg) < DWG_ERR_CRITICAL)
             {
-              out_dat.version = R_2000;
+              if (dat.version == R_2007)
+                out_dat.version = R_2010;
               if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
                 exit (0);
             }

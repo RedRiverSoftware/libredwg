@@ -5280,7 +5280,7 @@ apply_vport_view_rescue (Dwg_Data *dwg)
          for a straight plan view.  Skip twisted or non-plan (isometric)
          saved views — adopting their window would frame the wrong region.
          Comparisons are written so NaN values also skip. */
-      if (!(fabs (vp->view_twist) <= 1e-6))
+      if (!(fabs (vp->VIEWTWIST) <= 1e-6))
         continue;
       if (!(fabs (vp->VIEWDIR.x) <= 1e-6) || !(fabs (vp->VIEWDIR.y) <= 1e-6)
           || !(vp->VIEWDIR.z > 0.0))
