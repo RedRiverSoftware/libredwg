@@ -106,6 +106,13 @@ submodule, and rewritten SHAs break that pin.
   - a `LIBREDWG_SO_VERSION` bump. It renames `libredwg.so.0.0.N`, so
     cableflow's `.gitattributes` LFS patterns and its
     `LibraryVersionCorrect` test need updating.
+- After merging, copy the merged upstream tag into the fork
+  (`git push origin refs/tags/<tag>`). The build takes its version from
+  the nearest tag, and CI only fetches the last 50 commits. Without that
+  tag the version is empty, and upstream's `add_test` fails in the
+  `--enable-release` CI job. The tag push also triggers upstream's
+  workflow, which publishes a GitHub Release for it; cancel that run, or
+  delete the Release (keep the tag).
 - Last sync: tag `0.14.8601` (id:366853). Plan and runbook:
   `docs/runbooks/libredwg-upstream-sync/` in cableflow.
 
