@@ -1,5 +1,5 @@
 #define DWG_TYPE DWG_TYPE_VIEW
-#include "common.c"
+#include "tests_common.c"
 
 void
 api_process (dwg_object *obj)
@@ -19,10 +19,10 @@ api_process (dwg_object *obj)
   BITCODE_2RD VIEWCTR;
   BITCODE_3BD view_target;
   BITCODE_3BD VIEWDIR;
-  BITCODE_BD twist_angle;
-  BITCODE_BD lens_length;
-  BITCODE_BD front_clip_z;
-  BITCODE_BD back_clip_z;
+  BITCODE_BD VIEWTWIST;
+  BITCODE_BD LENSLENGTH;
+  BITCODE_BD FRONTZ;
+  BITCODE_BD BACKZ;
   BITCODE_4BITS VIEWMODE;
   BITCODE_RC render_mode;
   BITCODE_B use_default_lights;
@@ -63,10 +63,10 @@ api_process (dwg_object *obj)
   CHK_ENTITY_2RD (_obj, VIEW, VIEWCTR);
   CHK_ENTITY_3RD (_obj, VIEW, view_target);
   CHK_ENTITY_3RD (_obj, VIEW, VIEWDIR);
-  CHK_ENTITY_TYPE (_obj, VIEW, twist_angle, BD);
-  CHK_ENTITY_TYPE (_obj, VIEW, lens_length, BD);
-  CHK_ENTITY_TYPE (_obj, VIEW, front_clip_z, BD);
-  CHK_ENTITY_TYPE (_obj, VIEW, back_clip_z, BD);
+  CHK_ENTITY_TYPE (_obj, VIEW, VIEWTWIST, BD);
+  CHK_ENTITY_TYPE (_obj, VIEW, LENSLENGTH, BD);
+  CHK_ENTITY_TYPE (_obj, VIEW, FRONTZ, BD);
+  CHK_ENTITY_TYPE (_obj, VIEW, BACKZ, BD);
   CHK_ENTITY_TYPE (_obj, VIEW, VIEWMODE, 4BITS);
   CHK_ENTITY_TYPE (_obj, VIEW, render_mode, RC);
   CHK_ENTITY_TYPE (_obj, VIEW, use_default_lights, B);

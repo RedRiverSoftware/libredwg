@@ -21,7 +21,7 @@
 %module LibreDWG
 
 %{
-#include "../src/config.h"
+#include "config.h"
 #include "dwg_api.h"
 #include "dwg_svg_api.h"
 %}
@@ -47,6 +47,8 @@
 %ignore dwg_set_3DSOLID;
 %ignore dwg_get_XLINE;
 %ignore dwg_set_XLINE;
+%ignore dwg_get__3DLINE;
+%ignore dwg_set__3DLINE;
 %ignore dwg_api_init_version;
 %ignore dwg_ent_get_BINARY;
 %ignore dwg_ent_set_BINARY;

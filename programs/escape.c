@@ -1,7 +1,7 @@
 /*****************************************************************************/
 /*  LibreDWG - free implementation of the DWG file format                    */
 /*                                                                           */
-/*  Copyright (C) 2019,2023 Free Software Foundation, Inc.                   */
+/*  Copyright (C) 2019,2023,2026 Free Software Foundation, Inc.              */
 /*                                                                           */
 /*  This library is free software, licensed under the terms of the GNU       */
 /*  General Public License as published by the Free Software Foundation,     */
@@ -23,8 +23,25 @@
 #include "common.h"
 #include "escape.h"
 
-char *
-ATTRIBUTE_MALLOC
+#define APPEND_GROW(d, dest, end, len, s)                                \
+      if ((d) + (sizeof(s) - 1) >= (end))                                \
+        {                                                                \
+          const int _off = (d) - (dest);                                 \
+          char *_new                                                     \
+              = (char *)realloc ((dest), (len) + (sizeof(s) - 1) + 10);  \
+          if (!_new)                                                     \
+            return NULL;                                                 \
+          (dest) = _new;                                                 \
+          (len) += (sizeof(s) - 1) + 10;                                 \
+          (d) = (dest) + _off;                                           \
+          *(d) = 0;                                                      \
+          (end) = (dest) + (len);                                        \
+        }                                                                \
+      memcpy ((d), (s), sizeof(s) - 1);                                  \
+      (d) += (sizeof(s) - 1);                                            \
+      *(d) = 0
+
+char *ATTRIBUTE_MALLOC
 htmlescape (const char *restrict src, const Dwg_Codepage cp)
 {
   size_t len;
@@ -41,56 +58,47 @@ htmlescape (const char *restrict src, const Dwg_Codepage cp)
   end = dest + len;
   while (*s)
     {
-      if (end - d <= 8)
-        {
-          const int off = d - dest;
-          char *newdest = (char *)realloc (dest, len + 10);
-          if (!newdest)
-            return NULL;
-          dest = newdest;
-          len += 10;
-          d = dest + off;
-          *d = 0;
-          end = dest + len;
-        }
       switch (*s)
         {
         case '"':
-          strcat (d, "&quot;");
-          d += 6;
+          APPEND_GROW (d, dest, end, len, "&quot;");
           break;
         case '\'':
-          strcat (d, "&#39;");
-          d += 5;
+          APPEND_GROW (d, dest, end, len, "&#39;");
           break;
         case '`':
-          strcat (d, "&#96;");
-          d += 5;
+          APPEND_GROW (d, dest, end, len, "&#96;");
           break;
         case '&':
-          strcat (d, "&amp;");
-          d += 5;
+          APPEND_GROW (d, dest, end, len, "&amp;");
           break;
         case '<':
-          strcat (d, "&lt;");
-          d += 4;
+          APPEND_GROW (d, dest, end, len, "&lt;");
           break;
         case '>':
-          strcat (d, "&gt;");
-          d += 4;
+          APPEND_GROW (d, dest, end, len, "&gt;");
           break;
         case '{':
-          strcat (d, "&#123;");
-          d += 6;
+          APPEND_GROW (d, dest, end, len, "&#123;");
           break;
         case '}':
-          strcat (d, "&#125;");
-          d += 6;
+          APPEND_GROW (d, dest, end, len, "&#125;");
           break;
         default:
           {
             uint16_t cc = *s;
             wchar_t wc;
+            if (end - d <= 16)
+              {
+                const int _off = d - dest;
+                char *_new = (char *)realloc (dest, len + 16);
+                if (!_new)
+                  return NULL;
+                dest = _new;
+                len += 16;
+                d = dest + _off;
+                end = dest + len;
+              }
             if (dwg_codepage_is_twobyte (cp, *s))
               cc = cc << 8 | *++s;
             wc = dwg_codepage_uwc (cp, cc);
@@ -98,7 +106,8 @@ htmlescape (const char *restrict src, const Dwg_Codepage cp)
               {
                 if (!d)
                   return NULL;
-                sprintf (d, "&#x%X;", (unsigned)wc); // 4 + 4
+                snprintf (d, (size_t)(end - d), "&#x%X;",
+                          (unsigned)wc); // 4 + 4
                 d += strlen (d);
               }
             else
@@ -114,12 +123,11 @@ htmlescape (const char *restrict src, const Dwg_Codepage cp)
   return dest;
 }
 
-char *
-ATTRIBUTE_MALLOC
+char *ATTRIBUTE_MALLOC
 htmlwescape (BITCODE_TU wstr)
 {
   int len = 0;
-  char *dest, *d;
+  char *dest, *d, *end;
   BITCODE_TU tmp = wstr;
   BITCODE_RS c;
 
@@ -131,60 +139,53 @@ htmlwescape (BITCODE_TU wstr)
   d = dest = (char *)calloc (len, 1);
   if (!d)
     return NULL;
+  end = dest + len;
 
   while (*wstr)
     {
-      const int off = d - dest;
-      if (off >= len - 8)
-        {
-          char *newdest = (char *)realloc (dest, len + 16);
-          if (!newdest)
-            return NULL;
-          dest = newdest;
-          len += 16;
-          d = dest + off;
-          *d = 0;
-        }
       switch (*wstr)
         {
-        case 34:
-          strcat (d, "&quot;");
-          d += 6;
+        case 34: // '"'
+          APPEND_GROW (d, dest, end, len, "&quot;");
           break;
-        case 39:
-          strcat (d, "&#39;");
-          d += 5;
+        case 39: // '\''
+          APPEND_GROW (d, dest, end, len, "&#39;");
           break;
-        case 38:
-          strcat (d, "&amp;");
-          d += 5;
+        case 38: // '&'
+          APPEND_GROW (d, dest, end, len, "&amp;");
           break;
-        case 60:
-          strcat (d, "&lt;");
-          d += 4;
+        case 60: // '<'
+          APPEND_GROW (d, dest, end, len, "&lt;");
           break;
-        case 62:
-          strcat (d, "&gt;");
-          d += 4;
+        case 62: // '>'
+          APPEND_GROW (d, dest, end, len, "&gt;");
           break;
-        case 96:
-          strcat (d, "&#96;");
-          d += 5;
+        case 96: // '`'
+          APPEND_GROW (d, dest, end, len, "&#96;");
           break;
-        case 123:
-          strcat (d, "&#123;");
-          d += 6;
+        case 123: // '{'
+          APPEND_GROW (d, dest, end, len, "&#123;");
           break;
-        case 125:
-          strcat (d, "&#125;");
-          d += 6;
+        case 125: // '}'
+          APPEND_GROW (d, dest, end, len, "&#125;");
           break;
         default:
+          if (end - d <= 16)
+            {
+              const int _off = d - dest;
+              char *_new = (char *)realloc (dest, len + 16);
+              if (!_new)
+                return NULL;
+              dest = _new;
+              len += 16;
+              d = dest + _off;
+              end = dest + len;
+            }
           if (*wstr >= 127 || *wstr < 20) // utf8 encodings
             {
               if (!d)
                 return NULL;
-              sprintf (d, "&#x%X;", *wstr);
+              snprintf (d, (size_t)(end - d), "&#x%X;", *wstr);
               d += strlen (d);
               *d = 0;
             }
@@ -199,3 +200,5 @@ htmlwescape (BITCODE_TU wstr)
   *d = 0;
   return dest;
 }
+
+#undef APPEND_GROW

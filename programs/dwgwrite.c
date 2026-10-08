@@ -1,7 +1,7 @@
 /*****************************************************************************/
 /*  LibreDWG - free implementation of the DWG file format                    */
 /*                                                                           */
-/*  Copyright (C) 2018-2023 Free Software Foundation, Inc.                   */
+/*  Copyright (C) 2018-2026 Free Software Foundation, Inc.                   */
 /*                                                                           */
 /*  This library is free software, licensed under the terms of the GNU       */
 /*  General Public License as published by the Free Software Foundation,     */
@@ -73,10 +73,11 @@ help (void)
   printf ("  --as rNNNN                save as version\n");
   printf ("           Valid versions:\n");
   printf (
-      "             r1.1, r1.2, r1.3, r1.4, r2.0, r2.10, r2.21, r2.22, r2.4,"
-      "             r2.5, r2.6, r9, r10, r11, r13, r14, r2000 (default)\n");
+      "             r1.1, r1.2, r1.3, r1.4, r2.0, r2.10, r2.21, r2.22, r2.4,\n"
+      "             r2.5, r2.6, r9, r10, r11, r13, r14, r2000, r2004,\n"
+      "             r2010, r2013, r2018\n");
   printf ("           Planned versions:\n");
-  printf ("             r2004-r2021\n");
+  printf ("             r2007\n");
 #  ifndef DISABLE_JSON
   printf ("  -I fmt,  --format fmt     DXF, DXFB, JSON\n");
 #  else
@@ -91,20 +92,18 @@ help (void)
 #else
   printf ("  -v[0-9]     verbosity\n");
   printf ("  -a rNNNN    save as version\n");
-  printf ("              Valid versions:\n");
+  printf ("           Valid versions:\n");
   printf (
-      "                r1.1, r1.2, r1.3, r1.4, r2.0, r2.10, r2.21, r2.22, "
-      "r2.4,"
-      "                r2.5, r2.6, r9, r10, r11, r13, r14, r2000 (default)\n");
-  printf ("              Planned versions:\n");
-  printf ("                r2004-r2021\n");
+      "             r1.1, r1.2, r1.3, r1.4, r2.0, r2.10, r2.21, r2.22, r2.4,\n"
+      "             r2.5, r2.6, r9, r10, r11, r13, r14, r2000, r2004, r2010,\n"
+      "             r2013, r2018\n");
+  printf ("           Planned versions:\n");
+  printf ("             r2007\n");
 #  ifndef DISABLE_JSON
   printf ("  -I fmt      fmt: DXF, DXFB, JSON\n");
 #  else
   printf ("  -I fmt      fmt: DXF, DXFB\n");
 #  endif
-  printf (
-      "              Planned input formats: GeoJSON, YAML, XML/OGR, GPX\n");
   printf ("  -o dwgfile\n");
   printf ("  -y          overwrite existing files\n");
   printf ("  -h          display this help and exit\n");
@@ -125,8 +124,8 @@ int
 main (int argc, char *argv[])
 {
   Dwg_Data dwg;
-  Bit_Chain dat = { NULL, 0, 0, 0, 0 };
-  Bit_Chain out_dat = { NULL, 0, 0, 0, 0 };
+  Bit_Chain dat = { 0 };
+  Bit_Chain out_dat = { 0 };
   FILE *fp;
 
   __AFL_INIT ();
@@ -137,40 +136,42 @@ main (int argc, char *argv[])
 #  ifdef AFL_SHARED_MEM
   dat.chain = __AFL_FUZZ_TESTCASE_BUF;
 #  endif
-  while (__AFL_LOOP (10000))
-    { // llvm_mode persistent, non-forking mode
+  {
+    while (__AFL_LOOP (10000))
+      { // llvm_mode persistent, non-forking mode
 #  ifdef AFL_SHARED_MEM
-      dat.size = __AFL_FUZZ_TESTCASE_LEN;
+        dat.size = __AFL_FUZZ_TESTCASE_LEN;
 #  elif 1 // still 1000x faster than the old file-forking fuzzer.
-      /* from stdin: */
-      dat.size = 0;
-      dat_read_stream (&dat, stdin);
+        /* from stdin: */
+        dat.size = 0;
+        dat_read_stream (&dat, stdin);
 #  else
-      /* else from file */
-      stat (argv[1], &attrib);
-      fp = fopen (argv[1], "rb");
-      if (!fp)
-        return 0;
-      dat.size = attrib.st_size;
-      dat_read_file (&dat, fp, argv[1]);
-      fclose (fp);
+        /* else from file */
+        stat (argv[1], &attrib);
+        fp = fopen (argv[1], "rb");
+        if (!fp)
+          return 0;
+        dat.size = attrib.st_size;
+        dat_read_file (&dat, fp, argv[1]);
+        fclose (fp);
 #  endif
-      if (dat.size < 100)
-        continue; // useful minimum input length
+        if (dat.size < 100)
+          continue; // useful minimum input length
 
-      if (dwg_read_json (&dat, &dwg) <= DWG_ERR_CRITICAL)
-        {
-          memset (&out_dat, 0, sizeof (out_dat));
-          bit_chain_set_version (&out_dat, &dat);
-          out_dat.version = R_2000;
-          out_dat.codepage = dwg.header.codepage;
-          if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
-            exit (0);
-          free (out_dat.chain);
-        }
-      else
-        exit (0);
-    }
+        if (dwg_read_json (&dat, &dwg) <= DWG_ERR_CRITICAL)
+          {
+            memset (&out_dat, 0, sizeof (out_dat));
+            bit_chain_set_version (&out_dat, &dat);
+            dwg.header.version = out_dat.version = dwg.header.from_version;
+            out_dat.codepage = dwg.header.codepage;
+            if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
+              exit (0);
+            free (out_dat.chain);
+          }
+        else
+          exit (0);
+      }
+  }
   dwg_free (&dwg);
 }
 #  define main orig_main
@@ -264,7 +265,7 @@ main (int argc, char *argv[])
           dwg_version = dwg_version_as (optarg);
           if (dwg_version == R_INVALID)
             {
-              fprintf (stderr, "Invalid version '%s'\n", argv[1]);
+              fprintf (stderr, "Invalid version '%s'\n", optarg);
               return usage ();
             }
           version = optarg;
@@ -312,7 +313,8 @@ main (int argc, char *argv[])
             fmt = (char *)"json";
           else
 #  endif
-              if (strstr (infile, ".dxfb") || strstr (infile, ".DXFB"))
+              if (strstr (infile, ".dxfb") || strstr (infile, ".DXFB")
+                  || strstr (infile, ".dxb") || strstr (infile, ".DXB"))
             fmt = (char *)"dxfb";
           else if (strstr (infile, ".dxf") || strstr (infile, ".DXF"))
             fmt = (char *)"dxf";
@@ -350,8 +352,8 @@ main (int argc, char *argv[])
 
 #ifndef DISABLE_DXF
 #  ifndef DISABLE_JSON
-  if ((fmt && !strcasecmp (fmt, "json"))
-      || (infile && !strcasecmp (infile, ".json")))
+  if ((fmt && !strcasecmp (fmt, "JSON"))
+      || (infile && (strstr (infile, ".json") || strstr (infile, ".JSON"))))
     {
       if (opts > 1)
         fprintf (stderr, "Reading JSON file %s\n",
@@ -362,8 +364,10 @@ main (int argc, char *argv[])
     }
   else
 #  endif
-      if ((fmt && !strcasecmp (fmt, "dxfb"))
-          || (infile && !strcasecmp (infile, ".dxfb")))
+      if ((fmt && (!strcasecmp (fmt, "DXFB") || !strcasecmp (fmt, "DXB")))
+          || (infile
+              && (strstr (infile, ".dxfb") || strstr (infile, ".dxb")
+                  || strstr (infile, ".DXB"))))
     {
       if (opts > 1)
         {
@@ -377,8 +381,8 @@ main (int argc, char *argv[])
       else
         error = dwg_read_dxfb (&dat, &dwg);
     }
-  else if ((fmt && !strcasecmp (fmt, "dxf"))
-           || (infile && !strcasecmp (infile, ".dxf")))
+  else if ((fmt && !strcasecmp (fmt, "DXF"))
+           || (infile && (strstr (infile, ".dxf") || strstr (infile, ".DXF"))))
     {
       if (opts > 1)
         {
@@ -408,20 +412,13 @@ main (int argc, char *argv[])
   free (dat.chain);
   if (infile && dat.fh)
     fclose (dat.fh);
-  if (error >= DWG_ERR_CRITICAL)
+  if (error >= DWG_ERR_CRITICAL || dwg.header.from_version == R_INVALID)
     goto free;
 
   if (dwg_version == R_INVALID)
-    {
-      dwg_version = dwg.header.from_version;
-      if (dwg_version >= R_2004)
-        dwg_version = R_2000;
-      else if (dwg_version < R_1_4)
-        dwg_version = R_1_4;
-    }
+    dwg_version = dwg.header.from_version;
   if (dwg.header.from_version == R_INVALID)
     fprintf (stderr, "Unknown DWG header.from_version\n");
-  // FIXME: for now only r1.4 - R_2000. later remove this line.
   dat.version = dwg.header.version = dwg_version;
 
   if (!outfile)

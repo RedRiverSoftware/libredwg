@@ -680,6 +680,31 @@ main (int argc, char *argv[])
               error += test_code_nodist (
                   prefix, "2010/visualization_-_conference_room.dwg", cov);
             }
+          if (DWG_TYPE == DWG_TYPE_DIMASSOC)
+            {
+              error += test_code_nodist (prefix, "../test/issues/gh518/9.dwg",
+                                         cov);
+              error += test_code_nodist (
+                  prefix,
+                  "../test-old/2018/from_cadforum.cz/A_BIG_COLLECTION.dwg",
+                  cov);
+              error += test_code_nodist (
+                  prefix, "../td/2007/400306222-Main_board_line.dwg", cov);
+              error += test_code_nodist (
+                  prefix, "../td/2007/400306224-X_E_Motor_Line.dwg", cov);
+              error += test_code_nodist (
+                  prefix,
+                  "../test-old/2004/from_uloz.to/61_001_00_Bo_Ze_A_KV1.dwg",
+                  cov);
+              error += test_code_nodist (
+                  prefix,
+                  "../test-old/2004/from_uloz.to/00_005_POHLADY_Kl_A.dwg",
+                  cov);
+              error += test_code_nodist (prefix,
+                                         "../test-old/2004/from_uloz.to/"
+                                         "00_006_SCHODISKO_e_IX_X_Kl.dwg",
+                                         cov);
+            }
           if (DWG_TYPE == DWG_TYPE_POINTCLOUDCOLORMAP)
             {
               if (g_countmax == 1000) // only with -a
@@ -1111,16 +1136,16 @@ test_code (const char *dir, const char *filename, int cov)
       || (!numpassed () && !numfailed ()))
     {
       if (cov)
-        LOG_INFO ("Testing with %s:\n", path)
+        LOG_INFO ("Testing with %s:\n", path);
     }
   else if (cov)
     {
-      LOG_INFO ("Skipping %s:\n", path)
+      LOG_INFO ("Skipping %s:\n", path);
       return 0;
     }
   if (stat (path, &attrib))
     {
-      LOG_INFO ("file not found:\n")
+      LOG_INFO ("file not found:\n");
       return 0;
     }
 #endif
@@ -2227,10 +2252,8 @@ api_common_object (dwg_object *obj)
 #define CHK_EVALEXPR(type)                                                    \
   CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, parentid, BLd);                \
   CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, major, BL);                    \
-  CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, minor, BL);                    \
-  /* variant_DXF type */                                                      \
-  CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, value_code, BSd);              \
-  /* variant_value's */                                                       \
+  CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, minor, BL); /* variant_DXF type */                                                      \
+  CHK_SUBCLASS_TYPE (_obj->evalexpr, EvalExpr, value_code, BSd); /* variant_value's */                                                       \
   switch (_obj->evalexpr.value_code)                                          \
     {                                                                         \
     case 40:                                                                  \
@@ -2262,8 +2285,7 @@ api_common_object (dwg_object *obj)
 
 #define CHK_ACSH_HISTORYNODE()                                                \
   CHK_SUBCLASS_TYPE (_obj->history_node, ACSH_HistoryNode, major, BL);        \
-  CHK_SUBCLASS_TYPE (_obj->history_node, ACSH_HistoryNode, minor, BL);        \
-  /* last 16x nums 40-55 */                                                   \
+  CHK_SUBCLASS_TYPE (_obj->history_node, ACSH_HistoryNode, minor, BL); /* last 16x nums 40-55 */                                                   \
   if (!dwg_dynapi_subclass_value (&_obj->history_node, "ACSH_HistoryNode",    \
                                   "trans", &trans, NULL))                     \
     fail ("ACSH_HistoryNode.trans");                                          \

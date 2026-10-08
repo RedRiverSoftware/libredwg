@@ -5,8 +5,9 @@
 #include <stddef.h>
 #include <stdarg.h>
 #if !defined DECODE_TEST_C && !defined ENCODE_TEST_C
-static unsigned int loglevel;
-#  define DWG_LOGLEVEL loglevel
+#  ifndef DWG_LOGLEVEL
+#    define DWG_LOGLEVEL loglevel
+#  endif
 #  include "logging.h"
 #endif
 #include "common.h"
@@ -69,10 +70,9 @@ static void ATTRIBUTE_FORMAT (1, 2) fail (const char *fmt, ...)
     printf ("not ok %d\t# %s\n", ++num, buffer);
 }
 
-#if 0
-static void
-ATTRIBUTE_FORMAT (1, 2)
-todo (const char *fmt, ...)
+#if 1
+void ATTRIBUTE_FORMAT (1, 2) todo (const char *fmt, ...);
+void ATTRIBUTE_FORMAT (1, 2) todo (const char *fmt, ...)
 {
   va_list ap;
 

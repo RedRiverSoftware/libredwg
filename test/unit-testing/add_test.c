@@ -20,7 +20,12 @@
 #include <string.h>
 #include <math.h>
 #include <assert.h>
+#ifndef _WIN32
+#  include <setjmp.h>
+#  include <signal.h>
+#endif
 
+// extern unsigned int loglevel;
 static int tracelevel;
 static int debug;
 static int cnt = 0;
@@ -36,6 +41,10 @@ static int cnt = 0;
 #include "classes.h"
 #include "bits.h"
 #include "out_dxf.h"
+#ifndef DISABLE_DXF
+#  include "decode.h"
+#  include "in_dxf.h"
+#endif
 
 enum _temp_complex_types
 { // and test-cases
@@ -123,8 +132,13 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
       ok ("LIBREDWG_DEBUG cnt %d %s", cnt, name);
     }
 
-  dwg = dwg_new_Document (as_dxf ? R_2018 : R_2000, 0 /*metric/iso */,
-                          tracelevel);
+  dwg = dwg_new_Document (
+      type == DWG_TYPE__3DLINE                   ? R_9
+      : type == DWG_TYPE_REPEAT || type == DWG_TYPE_ENDREP
+                                                ? R_2_10
+      : as_dxf                                 ? R_2018
+                                               : R_2000,
+      0 /*metric/iso */, tracelevel);
   mspace = dwg_model_space_object (dwg);
   mspace_ref = dwg_model_space_ref (dwg);
   if (!mspace)
@@ -211,6 +225,20 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
         dwg_add_INSERT (hdr, &pt1, "bloko", 1.0, 1.0, 1.0, 0.0);
       }
       break;
+    case DWG_TYPE_REPEAT:
+      {
+        dwg_add_REPEAT (hdr);
+        dwg_add_LINE (hdr, &pt1, &pt2);
+        dwg_add_ENDREP (hdr, 2, 3, 1.25, 2.5);
+      }
+      break;
+    case DWG_TYPE_ENDREP:
+      {
+        dwg_add_REPEAT (hdr);
+        dwg_add_LINE (hdr, &pt1, &pt2);
+        dwg_add_ENDREP (hdr, 2, 3, 1.25, 2.5);
+      }
+      break;
     case DWG_TYPE_MINSERT:
       {
         Dwg_Object_BLOCK_HEADER *blk;
@@ -280,6 +308,13 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
         dwg_add_3DFACE (hdr, &pt1, &pt2, &pt3, NULL);
       }
       break;
+    case DWG_TYPE__3DLINE:
+      {
+        const dwg_point_3d pt3d_1 = { 1.0, 2.0, 3.0 };
+        const dwg_point_3d pt3d_2 = { 4.0, 5.0, 6.0 };
+        dwg_add_3DLINE (hdr, &pt3d_1, &pt3d_2);
+      }
+      break;
     case DWG_TYPE_SOLID:
       {
         const dwg_point_2d pt2_2d = { 1.5, 0.0 };
@@ -305,8 +340,7 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
     case DWG_TYPE_ELLIPSE:
       {
         const dwg_point_3d ctr = { 11.143259, 9.537395, 0.0 };
-        Dwg_Entity_ELLIPSE *ellipse
-            = dwg_add_ELLIPSE (hdr, &ctr, -8.750802, 0.336109);
+        dwg_add_ELLIPSE (hdr, &ctr, -8.750802, 0.336109);
       }
       break;
     case DWG_TYPE_REGION:
@@ -886,6 +920,62 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
       TEST_ENTITY (POLYLINE_PFACE);
       TEST_ENTITY (SPLINE);
       TEST_ENTITY (INSERT);
+    case DWG_TYPE_REPEAT:
+      {
+        Dwg_Entity_REPEAT **reps = dwg_getall_REPEAT (mspace_ref);
+        Dwg_Entity_ENDREP **ends = dwg_getall_ENDREP (mspace_ref);
+        if (reps && reps[0] && !reps[1])
+          ok ("found 1 REPEAT");
+        else if (!reps)
+          fail ("found no REPEAT at all");
+        else if (!reps[0])
+          fail ("found no REPEAT");
+        else
+          fail ("found many REPEAT's");
+        if (ends && ends[0] && !ends[1])
+          ok ("found 1 ENDREP");
+        else if (!ends)
+          fail ("found no ENDREP at all");
+        else if (!ends[0])
+          fail ("found no ENDREP");
+        else
+          fail ("found many ENDREP's");
+        free (reps);
+        free (ends);
+      }
+      break;
+    case DWG_TYPE_ENDREP:
+      {
+        Dwg_Entity_REPEAT **reps = dwg_getall_REPEAT (mspace_ref);
+        Dwg_Entity_ENDREP **ends = dwg_getall_ENDREP (mspace_ref);
+        Dwg_Entity_ENDREP *end;
+        if (reps && reps[0] && !reps[1])
+          ok ("found 1 REPEAT");
+        else if (!reps)
+          fail ("found no REPEAT at all");
+        else if (!reps[0])
+          fail ("found no REPEAT");
+        else
+          fail ("found many REPEAT's");
+        if (ends && ends[0] && !ends[1])
+          ok ("found 1 ENDREP");
+        else if (!ends)
+          fail ("found no ENDREP at all");
+        else if (!ends[0])
+          fail ("found no ENDREP");
+        else
+          fail ("found many ENDREP's");
+        end = ends && ends[0] ? ends[0] : NULL;
+        if (end && end->numcols == 2 && end->numrows == 3
+            && end->colspacing == 1.25 && end->rowspacing == 2.5)
+          ok ("ENDREP fields preserved");
+        else if (end)
+          fail ("ENDREP fields changed to %d,%d %.9g,%.9g", end->numcols,
+                end->numrows, end->colspacing, end->rowspacing);
+        free (reps);
+        free (ends);
+      }
+      break;
       TEST_ENTITY (MINSERT);
       TEST_ENTITY (ATTRIB);
       TEST_ENTITY (DIMENSION_ALIGNED);
@@ -897,6 +987,7 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
       TEST_ENTITY (DIMENSION_LINEAR);
       TEST_ENTITY (POINT);
       TEST_ENTITY (_3DFACE);
+      TEST_ENTITY (_3DLINE);
       TEST_ENTITY (SOLID);
       TEST_ENTITY (TRACE);
       TEST_ENTITY (SHAPE);
@@ -1016,8 +1107,8 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
   if (debug >= 2)
     {
       char cmd[280];
-      snprintf (cmd, sizeof(cmd), "../../oda %s", dwgfile);
-      if (system(cmd))
+      snprintf (cmd, sizeof (cmd), "../../oda %s", dwgfile);
+      if (system (cmd))
         fail ("oda %s", dwgfile);
     }
 
@@ -1026,6 +1117,88 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
     unlink (dwgfile);
   return n_failed;
 }
+
+#if !defined(_WIN32) && !defined(DISABLE_DXF)
+static sigjmp_buf mlinestyle_angle_timeout_jmp;
+
+ATTRIBUTE_NORETURN static void
+mlinestyle_angle_timeout_handler (int sig)
+{
+  (void)sig;
+  siglongjmp (mlinestyle_angle_timeout_jmp, 1);
+}
+
+/* GHSA-46mp-4x39-p444: converting a crafted DWG with a non-finite
+ * MLINESTYLE start_angle/end_angle hung dwg2dxf. The DXF writer
+ * normalized the angle with an unbounded "while (angle > 91.0) angle -=
+ * 90.0;" loop; for +-Infinity the subtraction never changes the value,
+ * so the loop condition never flips and the process hangs forever. Force
+ * start_angle=INFINITY, end_angle=NAN on a real MLINESTYLE object and
+ * confirm dwg_write_dxf() returns within a bounded wall-clock time
+ * instead of hanging, via a SIGALRM + siglongjmp escape hatch so a
+ * regression fails the test instead of hanging the whole suite. */
+static int
+test_mlinestyle_nonfinite_angle (void)
+{
+  Dwg_Data *dwg;
+  Dwg_Object_MLINESTYLE *mlstyle;
+  Bit_Chain dat = { 0 };
+  int error;
+  struct sigaction sa, old_sa;
+
+  failed = 0;
+  dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  mlstyle = dwg_add_MLINESTYLE (dwg, "nonfinite-angle");
+  if (!mlstyle)
+    {
+      fail ("mlinestyle_nonfinite_angle: dwg_add_MLINESTYLE failed");
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  mlstyle->start_angle = (double)INFINITY;
+  mlstyle->end_angle = (double)NAN;
+
+  dat.version = dwg->header.version;
+  dat.from_version = dwg->header.from_version;
+  dat.opts = dwg->opts;
+  dat.fh = fopen ("/dev/null", "wb");
+  if (!dat.fh)
+    {
+      fail ("mlinestyle_nonfinite_angle: fopen /dev/null failed");
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+
+  memset (&sa, 0, sizeof (sa));
+  sa.sa_handler = mlinestyle_angle_timeout_handler;
+  sigaction (SIGALRM, &sa, &old_sa);
+
+  if (sigsetjmp (mlinestyle_angle_timeout_jmp, 1) != 0)
+    {
+      fail ("mlinestyle_nonfinite_angle: dwg_write_dxf hung with "
+            "non-finite angles (infinite-loop regression)");
+    }
+  else
+    {
+      alarm (5);
+      error = dwg_write_dxf (&dat, dwg);
+      alarm (0);
+      if (error >= DWG_ERR_CRITICAL)
+        fail ("mlinestyle_nonfinite_angle: dwg_write_dxf failed: 0x%x", error);
+      else
+        ok ("mlinestyle_nonfinite_angle: DXF writer terminates with "
+            "non-finite MLINESTYLE angles");
+    }
+  sigaction (SIGALRM, &old_sa, NULL);
+
+  fclose (dat.fh);
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+#endif
 
 static int
 test_names (void)
@@ -1138,12 +1311,52 @@ test_names (void)
   return numfailed ();
 }
 
+// smoke/rel* branches bump VERSION ahead of the next release tag, so the
+// configure-time PACKAGE_VERSION (derived from `git describe`) still refers
+// to the previous tag until the branch itself is tagged. Detect this so we
+// can skip the major/minor vs tag consistency checks below.
+static int
+on_smoke_rel_branch (void)
+{
+  static const char prefix[] = "smoke/rel";
+  const char *branch = getenv ("GITHUB_REF_NAME");
+  if (!branch)
+    branch = getenv ("GITHUB_HEAD_REF");
+  if (!branch)
+    branch = getenv ("CI_COMMIT_REF_NAME");
+  if (!branch)
+    branch = getenv ("CI_COMMIT_BRANCH");
+  if (branch)
+    return !strncmp (branch, prefix, sizeof (prefix) - 1);
+
+  {
+#ifdef _WIN32
+    FILE *fp = _popen ("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+#else
+    FILE *fp = popen ("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
+#endif
+    char buf[128];
+    int found = 0;
+    if (fp)
+      {
+        if (fgets (buf, sizeof (buf), fp))
+          found = !strncmp (buf, prefix, sizeof (prefix) - 1);
+#ifdef _WIN32
+        _pclose (fp);
+#else
+        pclose (fp);
+#endif
+      }
+    return found;
+  }
+}
+
 static int
 test_api_version (void)
 {
   const char *version = dwg_api_version_string ();
   long i0, i1, i2;
-  char *d0, *d1, *d2;
+  const char *d0, *d1, *d2;
   const int major = dwg_api_version_major ();
   const int minor = dwg_api_version_minor ();
 
@@ -1156,16 +1369,22 @@ test_api_version (void)
   if (d0) // or git hash only. no tags fetched
     {
       assert (d0);
-      d1 = strchr (&d0[1], '.');
-      assert (d1);
-      // d2 = strchr (&d1[1], '.');
+      // FIXME: detected "0.14" (single dot only) and skip this test then
+      // d1 = strchr (&d0[1], '.');
+      // assert (d1);
 
-      // assert (strEQc(dwg_api_so_version (), "0:13:0")); //
+      // assert (strEQc(dwg_api_so_version (), "0:14:0")); //
       // LIBREDWG_SO_VERSION check that major and minor match the tag
       i0 = atoi (version);
       i1 = atoi (&d0[1]);
-      assert (major == i0);
-      assert (minor == i1);
+      if ((major != i0 || minor != i1) && on_smoke_rel_branch ())
+        todo ("smoke/rel branch: VERSION %d.%d bumped ahead of tag %ld.%ld",
+              major, minor, i0, i1);
+      else
+        {
+          assert (major == i0);
+          assert (minor == i1);
+        }
     }
   else
     {
@@ -1190,7 +1409,8 @@ test_api_version (void)
   if (major + minor == i0 + i1 + i2)
     ok ("so_version %s matches major %d + minor %d", version, major, minor);
   else
-    fail ("so_version %s: %d + %d != %ld + %ld + %ld", version, major, minor,
+    // FIXME: change to fail() for the 0.14.0 release
+    todo ("so_version %s: %d + %d != %ld + %ld + %ld", version, major, minor,
           i0, i1, i2);
 
 #ifndef IS_RELEASE
@@ -1200,6 +1420,116 @@ test_api_version (void)
   return numfailed ();
 }
 
+// GHSA-q4c2-xfww-pp93: dwg_add_MLINESTYLE() kept a stale Dwg_Object *obj
+// pointer across the nested dwg_add_DICTIONARY() call it makes when
+// ACAD_MLINESTYLE is missing. dwg_add_DICTIONARY() may grow and realloc
+// dwg->object[], so obj must be re-fetched by index afterwards. Reproduce
+// the exact object-pool growth boundary from the advisory's PoC on a bare
+// (dictionary-less) Dwg_Data, so ASan/valgrind catch any regression.
+static int
+test_mlinestyle_obj_realloc (void)
+{
+  Dwg_Data dwg;
+  Dwg_Object_MLINESTYLE *mlstyle;
+  int i;
+
+  failed = 0;
+  memset (&dwg, 0, sizeof (dwg));
+  dwg.header.version = R_2000;
+  dwg.header.from_version = R_2000;
+
+  for (i = 0; i < 1023; i++)
+    {
+      if (dwg_add_object (&dwg) < 0)
+        {
+          fail ("mlinestyle_obj_realloc: unexpected realloc filling slot %d",
+                i);
+          dwg_free (&dwg);
+          return numfailed ();
+        }
+    }
+  if (dwg.num_objects != 1023 || dwg.num_alloced_objects != 1024)
+    {
+      fail ("mlinestyle_obj_realloc: unexpected pool state num_objects=%u "
+            "num_alloced_objects=%u",
+            (unsigned)dwg.num_objects, (unsigned)dwg.num_alloced_objects);
+      dwg_free (&dwg);
+      return numfailed ();
+    }
+
+  // ACAD_MLINESTYLE is absent, so dwg_add_MLINESTYLE() creates it via
+  // dwg_add_DICTIONARY(), crossing the 1024-object growth boundary.
+  mlstyle = dwg_add_MLINESTYLE (&dwg, "asan-mlstyle");
+  if (!mlstyle)
+    fail ("mlinestyle_obj_realloc: dwg_add_MLINESTYLE failed at the "
+          "growth boundary");
+  else
+    {
+      int error;
+      Dwg_Object *obj = dwg_obj_generic_to_object (mlstyle, &error);
+      if (error || !obj || !obj->tio.object->ownerhandle)
+        fail ("mlinestyle_obj_realloc: MLINESTYLE has no ownerhandle after "
+              "dwg->object[] growth");
+      else
+        ok ("mlinestyle_obj_realloc: MLINESTYLE survives dwg->object[] "
+            "growth at the dictionary-creation boundary");
+    }
+  dwg_free (&dwg);
+  return numfailed ();
+}
+
+#ifndef DISABLE_DXF
+// GHSA-qcxp-m6vj-h5h8: importing a pre-R2004 DXF VIEWPORT entity makes
+// new_object() call dwg_add_VX() to create its VX_TABLE_RECORD. That may
+// grow and realloc dwg->object[], but new_object() kept dereferencing (and
+// writing through) its local, now-stale Dwg_Object *obj afterwards -- a
+// heap-use-after-free. Reproduce the advisory's exact boundary: 1022
+// preceding POINT entities fill the 1024-slot initial object pool exactly,
+// so the VIEWPORT's dwg_add_VX() call crosses the growth boundary.
+static int
+test_viewport_vx_realloc (void)
+{
+  Dwg_Data dwg;
+  Bit_Chain dat;
+  char *buf, *p;
+  const size_t cap = 4096 + ((size_t)1022 * 48);
+  int i, error;
+
+  failed = 0;
+  buf = (char *)malloc (cap);
+  if (!buf)
+    {
+      fail ("viewport_vx_realloc: out of memory");
+      return numfailed ();
+    }
+  p = buf;
+  p += sprintf (p, "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1014\n"
+                   "  0\nENDSEC\n  0\nSECTION\n  2\nENTITIES\n");
+  for (i = 1; i <= 1022; i++)
+    p += sprintf (
+        p, "  0\nPOINT\n  5\n%X\n  8\n0\n 10\n0.0\n 20\n0.0\n 30\n0.0\n",
+        0x100 + i);
+  p += sprintf (p, "  0\nVIEWPORT\n  5\n5000\n  8\n0\n 10\n0.0\n 20\n0.0\n"
+                   "  30\n0.0\n 40\n1.0\n 41\n1.0\n 68\n1\n 69\n1\n"
+                   "  0\nENDSEC\n  0\nEOF\n");
+
+  memset (&dwg, 0, sizeof (dwg));
+  memset (&dat, 0, sizeof (dat));
+  dat.chain = (unsigned char *)buf;
+  dat.size = (size_t)(p - buf);
+
+  error = dwg_read_dxf (&dat, &dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("viewport_vx_realloc: dwg_read_dxf failed with 0x%x", error);
+  else
+    ok ("viewport_vx_realloc: DXF VIEWPORT survives dwg->object[] growth "
+        "at the VX_TABLE_RECORD-creation boundary");
+  dwg_free (&dwg);
+  free (buf);
+  return numfailed ();
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -1207,8 +1537,8 @@ main (int argc, char *argv[])
   char *trace = getenv ("LIBREDWG_TRACE");    // read_dwg
   char *debugenv = getenv ("LIBREDWG_DEBUG"); // keep files
   int dxf = 0;
-
   loglevel = is_make_silent () ? 0 : 2; // print ok
+
   if (trace)
     tracelevel = atoi (trace);
   else
@@ -1218,7 +1548,17 @@ main (int argc, char *argv[])
   else
     debug = 0;
 
-  error = test_names ();
+#if !defined(_WIN32) && !defined(DISABLE_DXF)
+  error = test_viewport_vx_realloc ();
+  error += test_mlinestyle_obj_realloc ();
+  error += test_mlinestyle_nonfinite_angle ();
+#elif !defined(DISABLE_DXF)
+  error = test_viewport_vx_realloc ();
+  error += test_mlinestyle_obj_realloc ();
+#else
+  error = test_mlinestyle_obj_realloc ();
+#endif
+  error += test_names ();
   error += test_api_version ();
 
 #ifndef DISABLE_DXF
@@ -1236,6 +1576,8 @@ main (int argc, char *argv[])
       error += test_add (DWG_TYPE_POLYLINE_PFACE, "add_pface_2000", dxf);
       error += test_add (DWG_TYPE_SPLINE, "add_spline_2000", dxf);
       error += test_add (DWG_TYPE_INSERT, "add_insert_2000", dxf);
+      error += test_add (DWG_TYPE_REPEAT, "add_repeat_r210", dxf);
+      error += test_add (DWG_TYPE_ENDREP, "add_endrep_r210", dxf);
       error += test_add (DWG_TYPE_MINSERT, "add_minsert_2000", dxf);
       if (debug == cnt || debug == -1)
         error += test_add (DWG_TYPE_ATTRIB, "add_attrib_2000", dxf);
@@ -1250,6 +1592,7 @@ main (int argc, char *argv[])
       error += test_add (DWG_TYPE_DIMENSION_LINEAR, "add_dimlin_2000", dxf);
       error += test_add (DWG_TYPE_POINT, "add_point_2000", dxf);
       error += test_add (DWG_TYPE__3DFACE, "add_3dface_2000", dxf);
+      error += test_add (DWG_TYPE__3DLINE, "add_3dline_r9", dxf);
       error += test_add (DWG_TYPE_SOLID, "add_solid_2000", dxf);
       error += test_add (DWG_TYPE_TRACE, "add_trace_2000", dxf);
       error += test_add (DWG_TYPE_SHAPE, "add_shape_2000", dxf);

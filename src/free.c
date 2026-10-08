@@ -1,7 +1,7 @@
 /*****************************************************************************/
 /*  LibreDWG - free implementation of the DWG file format                    */
 /*                                                                           */
-/*  Copyright (C) 2018-2025 Free Software Foundation, Inc.                   */
+/*  Copyright (C) 2018-2026 Free Software Foundation, Inc.                   */
 /*                                                                           */
 /*  This library is free software, licensed under the terms of the GNU       */
 /*  General Public License as published by the Free Software Foundation,     */
@@ -36,7 +36,6 @@
 #include "hash.h"
 #include "free.h"
 
-static unsigned int loglevel;
 #ifdef USE_TRACING
 static int env_var_checked_p;
 #endif
@@ -86,7 +85,7 @@ static BITCODE_BL rcount1, rcount2;
   {                                                                           \
   }
 #define FIELD_TRACE(name, type)                                               \
-  LOG_TRACE (#name ": " FORMAT_##type "\n", _obj->name)
+  LOG_TRACE (#name ": " FORMAT_##type "\n", _obj->name);
 #define FIELD_G_TRACE(name, type, dxfgroup)                                   \
   LOG_TRACE (#name ": " FORMAT_##type " [" #type " %d]\n", _obj->name,        \
              dxfgroup)
@@ -316,7 +315,7 @@ static BITCODE_BL rcount1, rcount2;
     int error = 0;                                                            \
     if (obj->tio.entity)                                                      \
       {                                                                       \
-        LOG_HANDLE ("Free entity " #token " [%d]\n", obj->index)              \
+        LOG_HANDLE ("Free entity " #token " [%d]\n", obj->index);             \
         if (obj->tio.entity->tio.token)                                       \
           error = dwg_free_##token##_private (dat, dat, dat, obj);            \
                                                                               \
@@ -363,7 +362,7 @@ static BITCODE_BL rcount1, rcount2;
     if (obj->tio.object)                                                      \
       {                                                                       \
         _obj = obj->tio.object->tio.token;                                    \
-        LOG_HANDLE ("Free object " #token " [%d]\n", obj->index)              \
+        LOG_HANDLE ("Free object " #token " [%d]\n", obj->index);             \
         error = dwg_free_##token##_private (dat, dat, dat, obj);              \
         dwg_free_common_object_data (obj);                                    \
         dwg_free_eed (obj);                                                   \
@@ -476,6 +475,7 @@ dwg_free_eed (Dwg_Object *obj)
 }
 
 #include "dwg.spec"
+#include "dwg2.spec"
 
 // could be a hash or switch, but there are not that many DEBUGGING classes.
 // but a switch is fine, as we get all missing types in objects.inc, generated
@@ -528,14 +528,22 @@ dwg_free_variable_type (Dwg_Data *restrict dwg, Dwg_Object *restrict obj)
   // no matching class
   if (i < 0 || i >= (int)dwg->num_classes)
     {
-      LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
+      if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ
+          || obj->fixedtype == DWG_TYPE_UNKNOWN_ENT)
+        LOG_TRACE ("No class for %s type %d found", obj->name, obj->type);
+      else
+        LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
       return dwg_free_variable_no_class (dwg, obj);
     }
 
   klass = &dwg->dwg_class[i];
   if (!klass || !klass->dxfname || !obj->dxfname)
     {
-      LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
+      if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ
+          || obj->fixedtype == DWG_TYPE_UNKNOWN_ENT)
+        LOG_TRACE ("No class for %s type %d found", obj->name, obj->type);
+      else
+        LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
       return dwg_free_variable_no_class (dwg, obj);
     }
 
@@ -564,7 +572,11 @@ dwg_free_variable_type (Dwg_Data *restrict dwg, Dwg_Object *restrict obj)
   #undef WARN_UNSTABLE_CLASS
   // clang-format on
 
-  LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
+  if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ
+      || obj->fixedtype == DWG_TYPE_UNKNOWN_ENT)
+    LOG_TRACE ("No class for %s type %d found", obj->name, obj->type);
+  else
+    LOG_WARN ("No class for %s type %d found", obj->name, obj->type);
   return dwg_free_variable_no_class (dwg, obj);
 }
 
@@ -624,14 +636,22 @@ free_TABLESTYLE_r2010 (Bit_Chain *restrict dat, Dwg_Object *restrict obj)
   if (_obj->rowstyles)
     for (unsigned i = 0; i < 3; i++)
       {
-        for (unsigned j = 0; j < 6; j++)
-          {
-            SUB_FIELD_CMTC (rowstyles[i].borders[j], color, 0);
-          }
+        if (_obj->rowstyles[i].borders)
+          for (unsigned j = 0; j < 6; j++)
+            {
+              SUB_FIELD_CMTC (rowstyles[i].borders[j], color, 0);
+            }
         FREE_IF (_obj->rowstyles[i].borders);
-        SUB_FIELD_HANDLE (rowstyles[i], text_style, 5, 7);
-        SUB_FIELD_CMTC (rowstyles[i], text_color, 0);
-        SUB_FIELD_CMTC (rowstyles[i], fill_color, 0);
+        // rowstyles[0].text_style, text_color and fill_color might be shallow
+        // copies of the cellstyle content_format/bg_color made by
+        // downconvert_TABLESTYLE. They are owned and freed via the spec free
+        // below, so freeing them here would double-free them.
+        if (_obj->ovr.type != 1 || i > 0)
+          {
+            SUB_FIELD_HANDLE (rowstyles[i], text_style, 5, 7);
+            SUB_FIELD_CMTC (rowstyles[i], text_color, 0);
+            SUB_FIELD_CMTC (rowstyles[i], fill_color, 0);
+          }
       }
   FREE_IF (_obj->rowstyles);
   _obj->num_rowstyles = 0;
@@ -666,7 +686,7 @@ free_preR13_object (Dwg_Object *obj)
   Bit_Chain *dat = &pdat;
 
   // if (obj->name)
-  //   LOG_HANDLE ("free_preR13_object: %s %d\n", obj->name, obj->index)
+  //   LOG_HANDLE ("free_preR13_object: %s %d\n", obj->name, obj->index);
   if (obj && obj->parent)
     {
       dwg = obj->parent;
@@ -675,20 +695,32 @@ free_preR13_object (Dwg_Object *obj)
     }
   else
     return;
-  if (obj->type == DWG_TYPE_FREED || obj->tio.object == NULL)
+  if (obj->type == DWG_TYPE_FREED)
     return;
 
+  /* preR13 objects can be entities or non-entities; they are allocated
+     differently (see in_json/in_dxf). Guard the correct union member.
+     Otherwise we may read past the end of the allocation (ASan). */
   if (obj->supertype == DWG_SUPERTYPE_ENTITY)
     {
       Dwg_Object_Entity *_obj = obj->tio.entity;
-      FIELD_HANDLE (layer, 2, 8);
-      if (_obj->flag_r11 & FLAG_R11_HAS_LTYPE) // 2
-        FIELD_HANDLE (ltype, 1, 6);
-      if (_obj->flag_r11 & FLAG_R11_HAS_HANDLING)
-        {   // 32
-          ; // obj->handle is static
+      if (!_obj)
+        return;
+      /* For injson/indxf we may create partial/unknown entities.
+         Do not touch potentially uninitialized handle pointers here. */
+      if (!(dwg->opts & DWG_OPTS_IN))
+        {
+          FIELD_HANDLE (layer, 2, 8);
+          if (_obj->flag_r11 & FLAG_R11_HAS_LTYPE) // 2
+            FIELD_HANDLE (ltype, 1, 6);
+          if (_obj->flag_r11 & FLAG_R11_HAS_HANDLING)
+            {   // 32
+              ; // obj->handle is static
+            }
         }
     }
+  else if (obj->tio.object == NULL)
+    return;
 
   if (obj->fixedtype == DWG_TYPE_UNUSED // deleted
       && dwg->header.version < R_2_0b && obj->type > 64)
@@ -738,7 +770,7 @@ free_preR13_object (Dwg_Object *obj)
               break;
             default:
               LOG_ERROR ("Unknown preR11 %s.flag_r11 %d", obj->name,
-                         obj->tio.entity->flag_r11)
+                         obj->tio.entity->flag_r11);
             }
           break;
         // now the rest
@@ -925,6 +957,15 @@ free_preR13_object (Dwg_Object *obj)
       break;
     case DWG_TYPE_DICTIONARY:
       dwg_free_DICTIONARY (dat, obj);
+      break;
+    case DWG_TYPE_UNKNOWN_ENT:
+      dwg_free_UNKNOWN_ENT (dat, obj);
+      break;
+    case DWG_TYPE_UNKNOWN_OBJ:
+      dwg_free_UNKNOWN_OBJ (dat, obj);
+      break;
+    case DWG_TYPE_DUMMY:
+      dwg_free_DUMMY (dat, obj);
       break;
     case DWG_TYPE_UNUSED:
       // deleted entity. leak? see above
@@ -1551,6 +1592,16 @@ dwg_free_header_vars (Dwg_Data *dwg)
   // clang-format on
 
   FIELD_TV (DWGCODEPAGE, 0);
+  FREE_IF (_obj->HYPERLINKBASE);
+  FREE_IF (_obj->STYLESHEET);
+  FREE_IF (_obj->FINGERPRINTGUID);
+  FREE_IF (_obj->VERSIONGUID);
+  FREE_IF (_obj->PROJECTNAME);
+  FREE_IF (_obj->DIMPOST);
+  FREE_IF (_obj->DIMAPOST);
+  FREE_IF (_obj->DIMBLK_T);
+  FREE_IF (_obj->DIMBLK1_T);
+  FREE_IF (_obj->DIMBLK2_T);
   return 0;
 }
 
@@ -1577,6 +1628,7 @@ dwg_free_appinfo (Dwg_Data *dwg)
   // clang-format off
   #include "appinfo.spec"
   // clang-format on
+  FREE_IF (_obj->unknown_bits);
   return 0;
 }
 static int
@@ -1614,7 +1666,6 @@ dwg_free_acds (Dwg_Data *dwg)
   BITCODE_RL rcount3 = 0, rcount4, vcount;
   int error = 0;
 
-  // clang-format off
   #include "acds.spec"
   // clang-format on
   return 0;
@@ -1643,17 +1694,15 @@ dwg_free (Dwg_Data *dwg)
           env_var_checked_p = 1;
         }
 #endif /* USE_TRACING */
-      LOG_INFO ("\n============\ndwg_free\n")
+      LOG_INFO ("\n============\ndwg_free\n");
       // copied table fields have duplicate pointers, but are freed only once
       for (i = 0; i < dwg->num_objects; ++i)
         {
           if (!dwg_obj_is_control (&dwg->object[i]))
             dwg_free_object (&dwg->object[i]);
         }
-      if (dwg->header.version < R_13b1)
-        dwg_free_preR13_header_vars (dwg);
-      else
-        dwg_free_header_vars (dwg);
+      dwg_free_preR13_header_vars (dwg);
+      dwg_free_header_vars (dwg);
       dwg_free_summaryinfo (dwg);
       if (dwg->header.section_infohdr.num_desc)
         {
@@ -1694,10 +1743,10 @@ dwg_free (Dwg_Data *dwg)
       FREE_IF (dwg->dwg_class);
       if (dwg->object_ref)
         {
-          LOG_HANDLE ("free %d global refs\n", dwg->num_object_refs)
+          LOG_HANDLE ("free %d global refs\n", dwg->num_object_refs);
           for (i = 0; i < dwg->num_object_refs; ++i)
             {
-              LOG_INSANE ("free ref %d\n", i)
+              LOG_INSANE ("free ref %d\n", i);
               FREE_IF (dwg->object_ref[i]);
             }
         }

@@ -21,17 +21,12 @@
 
   // to be done after encryption, resp. before when encoding
   SINCE (R_2004a) {
-    IF_ENCODE_FROM_EARLIER {
+    IF_ENCODE_FROM_EARLIER_OR_DXF {
       FIELD_VALUE (header_size) = 108;
       FIELD_VALUE (x04) = 4;
       FIELD_VALUE (x20) = 0x20;
       FIELD_VALUE (x80) = 0x80;
       FIELD_VALUE (x40) = 0x40;
-      //??
-      FIELD_VALUE (last_section_id) = 19;
-      FIELD_VALUE (numsections) = 17;
-      FIELD_VALUE (section_map_id) = 19;
-      FIELD_VALUE (section_array_size) = 19;
     }
   }
   FIELD_TFF (file_ID_string, 12, 0) //pre-allocated: "AcFssFcAJMB"
@@ -62,4 +57,3 @@
   // well, the padding is also encrypted, but ODA didn't grok that.
   // 12 byte encrypted via 0
   FIELD_TFFx (padding, (int)sizeof(FIELD_VALUE (padding)), 0) // @120
-

@@ -27,12 +27,13 @@
 #include <unistd.h>
 #include <getopt.h>
 
-#include <dwg.h>
-#define DWG_LOGLEVEL loglevel
 #include "logging.h"
+// #define DWG_LOGLEVEL loglevel
+#include "common.h"
+
+#include <dwg.h>
 #include <dwg_api.h>
 
-#include "common.h"
 #include "decode.h"
 #include "encode.h"
 #include "bits.h"
@@ -48,7 +49,6 @@
 #endif
 
 static int dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat);
-static unsigned int loglevel;
 
 struct opt_s
 {
@@ -127,20 +127,20 @@ help (struct opt_s *opt)
   printf ("  --as rNNNN                save as version\n");
   printf ("           Valid versions:\n");
   printf ("             r1.1, r1.2, r1.4, r2.6, r2.10, r9, r10, r11, r13,"
-          " r14, r2000 (default),\n");
+          " r14, r2000 (default), r2004\n");
   if (!opt->dxf && !opt->binary && !opt->json)
     printf ("           Planned versions:\n");
-  printf ("             r2004, r2007, r2010, r2013, r2018\n");
+  printf ("             r2007, r2010, r2013, r2018\n");
   printf ("  -o outfile, --file outfile (default: stdout)\n");
 #else
   printf ("  -v[0-9]     verbosity\n");
   printf ("  -a rNNNN    save as version\n");
   printf ("              Valid versions:\n");
   printf ("                r1.1, r1.2, r1.4, r2.6, r2.10, r9, r10, r11, r13, "
-          "r14, r2000 (default),\n");
+          "r14, r2000 (default), r2004\n");
   if (!opt->dxf && !opt->binary && !opt->json)
     printf ("              Planned versions:\n");
-  printf ("                r2004, r2007, r2010, r2013, r2018\n");
+  printf ("                r2007, r2010, r2013, r2018\n");
   printf ("  -o outfile (default: stdout)\n");
 #endif
   printf ("\n"
@@ -300,20 +300,20 @@ main (int argc, char *argv[])
   fp = fopen (argv[i], "rb");
   if (!fp)
     {
-      LOG_ERROR ("Could not read %s", argv[i])
+      LOG_ERROR ("Could not read %s", argv[i]);
       exit (1);
     }
-  LOG_INFO ("dwgadd read %s\n", argv[i])
+  LOG_INFO ("dwgadd read %s\n", argv[i]);
   dat_read_file (&dat, fp, argv[i]);
   if (dat.size == 0)
     {
-      LOG_ERROR ("empty %s", argv[i])
+      LOG_ERROR ("empty %s", argv[i]);
       free (dat.chain);
       exit (1);
     }
 
   dwgp = &dwg;
-  LOG_INFO ("dwgadd process %s\n", argv[i])
+  LOG_INFO ("dwgadd process %s\n", argv[i]);
   if ((retval = dwg_add_dat (&dwgp, &dat)) == 0)
     {
       int error;
@@ -329,14 +329,14 @@ main (int argc, char *argv[])
           outfile = "/dev/stdout";
 #endif
           if (opt.verify)
-            LOG_ERROR ("Cannot --verify with %s\n", outfile)
+            LOG_ERROR ("Cannot --verify with %s\n", outfile);
           opt.verify = false;
         }
-      LOG_INFO ("\ndwgadd write %s\n", outfile)
+      LOG_INFO ("\ndwgadd write %s\n", outfile);
       out_dat.fh = fopen (outfile, "wb");
       if (!out_dat.fh)
         {
-          LOG_ERROR ("Could not write %s", outfile)
+          LOG_ERROR ("Could not write %s", outfile);
           free (dat.chain);
           exit (1);
         }
@@ -367,7 +367,7 @@ main (int argc, char *argv[])
         }
       if (error >= DWG_ERR_CRITICAL)
         {
-          LOG_ERROR ("dwgadd -o %s failed with error 0x%x", outfile, error)
+          LOG_ERROR ("dwgadd -o %s failed with error 0x%x", outfile, error);
           retval = error;
         }
       if (!opt.dwg)
@@ -385,7 +385,7 @@ main (int argc, char *argv[])
           dat.fh = fopen (outfile, "rb");
           memset (&dwg, 0, sizeof (Dwg_Data));
           dwg.opts = opts;
-          LOG_INFO ("\ndwgadd verify %s\n", outfile)
+          LOG_INFO ("\ndwgadd verify %s\n", outfile);
           dat_read_file (&dat, dat.fh, outfile);
 
 #ifndef DISABLE_DXF
@@ -399,13 +399,13 @@ main (int argc, char *argv[])
               if (opt.json)
             error = dwg_read_json (&dat, &dwg);
           else if (opt.geojson)
-            LOG_ERROR ("--verify skipped with --geojson")
+            LOG_ERROR ("--verify skipped with --geojson");
           else
 #endif
             error = dwg_decode (&dat, &dwg); // dat -> dwg
           if (error >= DWG_ERR_CRITICAL)
             {
-              LOG_ERROR ("--verify failed with error 0x%x", error)
+              LOG_ERROR ("--verify failed with error 0x%x", error);
               retval = error;
             }
           fclose (dat.fh);
@@ -418,7 +418,7 @@ main (int argc, char *argv[])
       fclose (fp);
       dwg_free (&dwg);
       free (dat.chain);
-      LOG_ERROR ("dwgadd failed to add objects")
+      LOG_ERROR ("dwgadd failed to add objects");
     }
 
   return retval;
@@ -602,6 +602,14 @@ next_line (char *restrict p, const char *restrict end)
   return p;
 }
 
+static int
+match_line_cmd (const char *restrict p, const char *restrict cmd)
+{
+  const size_t len = strlen (cmd);
+  return memBEGIN (p, cmd, len)
+         && (p[len] == '\n' || p[len] == '\r' || p[len] == '\0');
+}
+
 static ATTRIBUTE_NORETURN void
 fn_error (const char *msg)
 {
@@ -613,10 +621,10 @@ fn_error (const char *msg)
   if (!hdr)                                                                   \
     fn_error ("Missing block header\n");
 
-#define ADD_INITIAL                                           \
-  mspace = dwg_model_space_object (dwg);                      \
-  hdr = mspace ? mspace->tio.object->tio.BLOCK_HEADER : NULL; \
-  orig_num = dwg->num_objects;                                \
+#define ADD_INITIAL                                                           \
+  mspace = dwg_model_space_object (dwg);                                      \
+  hdr = mspace ? mspace->tio.object->tio.BLOCK_HEADER : NULL;                 \
+  orig_num = dwg->num_objects;                                                \
   initial = 0
 
 static int
@@ -632,6 +640,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
   int i = 0;
   int initial = 1;
   int imperial = 0;
+  int repeat_open = 0;
   BITCODE_BL orig_num = 0;
   typedef struct
   {
@@ -641,6 +650,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
       Dwg_Entity_ATTDEF *attdef;
       Dwg_Entity_ATTRIB *attrib;
       Dwg_Entity_LINE *line;
+      Dwg_Entity__3DLINE *_3dline;
       Dwg_Entity_RAY *ray;
       Dwg_Entity_XLINE *xline;
       Dwg_Entity_CIRCLE *circle;
@@ -660,6 +670,8 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
       Dwg_Entity_DIMENSION_ANG3PT *dimang3pt;
       Dwg_Entity_BLOCK *block;
       Dwg_Entity_ENDBLK *endblk;
+      Dwg_Entity_REPEAT *repeat;
+      Dwg_Entity_ENDREP *endrep;
       Dwg_Entity__3DFACE *_3dface;
       Dwg_Entity__3DSOLID *_3dsolid;
       Dwg_Entity_SOLID *solid;
@@ -748,7 +760,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
             }
           if (1 == SSCANF_S (p, "readdwg " FMT_PATH, text SZ))
             {
-              LOG_INFO ("readdwg %s\n", text)
+              LOG_INFO ("readdwg %s\n", text);
               if ((error = dwg_read_file (text, *dwgp)) >= DWG_ERR_CRITICAL)
                 {
                   LOG_ERROR ("Invalid readdwg \"%s\" => error 0x%x", text,
@@ -775,7 +787,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
             }
           if (1 == SSCANF_S (p, "readdxf " FMT_PATH, text SZ))
             {
-              LOG_INFO ("readdxf %s\n", text)
+              LOG_INFO ("readdxf %s\n", text);
               if ((error = dxf_read_file (text, *dwgp)) >= DWG_ERR_CRITICAL)
                 {
                   LOG_ERROR ("Invalid readdxf \"%s\" => error 0x%x", text,
@@ -803,7 +815,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
           if (1 == SSCANF_S (p, "readjson " FMT_PATH, text SZ))
             {
               Bit_Chain in_dat = EMPTY_CHAIN (0);
-              LOG_INFO ("readjson %s\n", text)
+              LOG_INFO ("readjson %s\n", text);
               in_dat.fh = fopen (text, "rb");
               if (in_dat.fh)
                 dat_read_file (&in_dat, in_dat.fh, text);
@@ -1009,13 +1021,47 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
                      ent.type);                                               \
           exit (1);                                                           \
         }                                                                     \
-      str = strdup (text);                                                    \
-      dwg_dynapi_entity_set_value (ent.u.var, #name, s1, &str, 1);            \
-      free (str);                                                             \
-      LOG_TRACE (#var ".%s = \"%s\"\n", s1, text);                            \
+      {                                                                       \
+        const Dwg_DYNAPI_field *ef                                            \
+            = dwg_dynapi_entity_field (#name, s1);                            \
+        const Dwg_DYNAPI_field *cf                                            \
+            = ef ? NULL : dwg_dynapi_common_entity_field (s1);                \
+        const Dwg_DYNAPI_field *hf                                            \
+            = (ef && strEQc (ef->type, "H"))                                  \
+                  ? ef                                                        \
+                  : (cf && strEQc (cf->type, "H")) ? cf : NULL;               \
+        if (hf)                                                               \
+          {                                                                   \
+            char tbl[64];                                                     \
+            size_t k;                                                         \
+            BITCODE_H hdl;                                                    \
+            for (k = 0; s1[k] && k < sizeof (tbl) - 1; k++)                  \
+              tbl[k] = toupper ((unsigned char)s1[k]);                        \
+            tbl[k] = '\0';                                                    \
+            hdl = dwg_find_tablehandle (dwg, text, tbl);                      \
+            if (hdl)                                                          \
+              {                                                               \
+                if (cf)                                                       \
+                  dwg_dynapi_common_set_value (ent.u.var, s1, &hdl, 0);      \
+                else                                                          \
+                  dwg_dynapi_entity_set_value (ent.u.var, #name, s1, &hdl,   \
+                                               0);                           \
+                LOG_TRACE (#var ".%s = \"%s\"\n", s1, text);                  \
+              }                                                               \
+            else                                                              \
+              LOG_WARN (#var ".%s = \"%s\": table not found\n", s1, text);   \
+          }                                                                   \
+        else                                                                  \
+          {                                                                   \
+            str = strdup (text);                                              \
+            dwg_dynapi_entity_set_value (ent.u.var, #name, s1, &str, 1);      \
+            free (str);                                                       \
+            LOG_TRACE (#var ".%s = \"%s\"\n", s1, text);                      \
+          }                                                                   \
+      }                                                                       \
     }
 
-      if (memBEGINc (p, "pspace\n"))
+      if (match_line_cmd (p, "pspace"))
         {
           Dwg_Object *pspace = dwg_paper_space_object (dwg);
           if (pspace)
@@ -1027,7 +1073,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
           else
             fn_error ("Empty pspace object\n");
         }
-      else if (memBEGINc (p, "mspace\n"))
+      else if (match_line_cmd (p, "mspace"))
         {
           if (mspace)
             {
@@ -1088,6 +1134,26 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
         SET_ENT (attrib, ATTRIB)
       // clang-format on
       else if (6
+               == SSCANF_S (p, "3dline (%lf %lf %lf) (%lf %lf %lf)", &pt1.x,
+                            &pt1.y, &pt1.z, &pt2.x, &pt2.y, &pt2.z))
+      {
+        if (version < R_2_4)
+          fn_error ("Invalid entity 3DLINE\n");
+        LOG_TRACE ("add_3DLINE %s (%f %f %f) (%f %f %f)\n", hdr_s, pt1.x,
+                   pt1.y, pt1.z, pt2.x, pt2.y, pt2.z);
+        CHK_MISSING_BLOCK_HEADER
+        if (version < R_11)
+          ent = (lastent_t){ .u._3dline = dwg_add_3DLINE (hdr, &pt1, &pt2),
+                             .type = DWG_TYPE__3DLINE };
+        else
+          ent = (lastent_t){ .u.line = dwg_add_LINE (hdr, &pt1, &pt2),
+                             .type = DWG_TYPE_LINE };
+      }
+      else
+          // clang-format off
+        SET_ENT (_3dline, _3DLINE)
+      // clang-format on
+      else if (6
                == SSCANF_S (p, "line (%lf %lf %lf) (%lf %lf %lf)", &pt1.x,
                             &pt1.y, &pt1.z, &pt2.x, &pt2.y, &pt2.z))
       {
@@ -1133,8 +1199,8 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
           // clang-format off
         SET_ENT (xline, XLINE)
       // clang-format on
-      else if ((i = SSCANF_S (p, "text " FMT_ANY " (%lf %lf %lf) %lf\n", text SZ,
-                              &pt1.x, &pt1.y, &pt1.z, &height))
+      else if ((i = SSCANF_S (p, "text " FMT_ANY " (%lf %lf %lf) %lf\n",
+                              text SZ, &pt1.x, &pt1.y, &pt1.z, &height))
                >= 5)
       {
         if (strlen (text) && text[strlen (text) - 1] == '"')
@@ -1188,7 +1254,7 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
           // clang-format off
         SET_ENT (block, BLOCK)
       // clang-format on
-      else if (memBEGINc (p, "endblk\n"))
+      else if (match_line_cmd (p, "endblk"))
       {
         LOG_TRACE ("add_ENDBLK\n");
         dwg_add_ENDBLK (hdr);
@@ -1196,6 +1262,41 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
       else
           // clang-format off
         SET_ENT (endblk, ENDBLK)
+      // clang-format on
+      else if (match_line_cmd (p, "repeat"))
+      {
+        Dwg_Entity_REPEAT *_repeat;
+        if (repeat_open)
+          fn_error ("Nested REPEAT not allowed\n");
+        LOG_TRACE ("add_REPEAT %s\n", hdr_s);
+        CHK_MISSING_BLOCK_HEADER
+        _repeat = dwg_add_REPEAT (hdr);
+        if (!_repeat)
+          return 1;
+        ent = (lastent_t){ .u.repeat = _repeat, .type = DWG_TYPE_REPEAT };
+        repeat_open = 1;
+      }
+      else
+          // clang-format off
+        SET_ENT (repeat, REPEAT)
+      // clang-format on
+      else if (4
+               == SSCANF_S (p, "endrep %d %d %lf %lf", &i1, &i2, &f1, &f2))
+      {
+        Dwg_Entity_ENDREP *_endrep;
+        if (!repeat_open)
+          fn_error ("Missing REPEAT for ENDREP\n");
+        LOG_TRACE ("add_ENDREP %s %d %d %f %f\n", hdr_s, i1, i2, f1, f2);
+        CHK_MISSING_BLOCK_HEADER
+        _endrep = dwg_add_ENDREP (hdr, i1, i2, f1, f2);
+        if (!_endrep)
+          return 1;
+        ent = (lastent_t){ .u.endrep = _endrep, .type = DWG_TYPE_ENDREP };
+        repeat_open = 0;
+      }
+      else
+          // clang-format off
+        SET_ENT (endrep, ENDREP)
       // clang-format on
       else if (8
                == SSCANF_S (p,
@@ -2158,11 +2259,13 @@ dwg_add_dat (Dwg_Data **dwgp, Bit_Chain *dat)
       {
         char *n = strchr (p, '\n');
         int size = n ? n - p : (int)strlen (p);
-        LOG_WARN ("Ignored %.*s", size, p)
+        LOG_WARN ("Ignored %.*s", size, p);
       }
 
       p = next_line (p, end);
     }
+  if (repeat_open)
+    fn_error ("Missing ENDREP for REPEAT\n");
   // if we added at least one object
   return (dwg->num_objects - orig_num > 0 ? 0 : 1);
 }

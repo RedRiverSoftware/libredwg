@@ -1,5 +1,5 @@
 #define DWG_TYPE DWG_TYPE_VIEWPORT
-#include "common.c"
+#include "tests_common.c"
 
 void
 api_process (dwg_object *obj)
@@ -12,11 +12,11 @@ api_process (dwg_object *obj)
   BITCODE_RS id;
 
   dwg_point_2d VIEWCTR, SNAPBASE, SNAPUNIT, GRIDUNIT;
-  BITCODE_BD twist_angle;
+  BITCODE_BD VIEWTWIST;
   BITCODE_BD VIEWSIZE;
-  BITCODE_BD lens_length;
-  BITCODE_BD front_clip_z;
-  BITCODE_BD back_clip_z;
+  BITCODE_BD LENSLENGTH;
+  BITCODE_BD FRONTZ;
+  BITCODE_BD BACKZ;
   BITCODE_BD SNAPANG;
   BITCODE_BS circle_zoom;
   BITCODE_BS grid_major;
@@ -54,11 +54,11 @@ api_process (dwg_object *obj)
   CHK_ENTITY_3RD_W_OLD (viewport, VIEWPORT, VIEWDIR);
   CHK_ENTITY_TYPE (viewport, VIEWPORT, on_off, RS);
   CHK_ENTITY_TYPE (viewport, VIEWPORT, id, RS);
-  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, twist_angle, BD);
+  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, VIEWTWIST, BD);
   CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, VIEWSIZE, BD);
-  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, lens_length, BD);
-  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, front_clip_z, BD);
-  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, back_clip_z, BD);
+  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, LENSLENGTH, BD);
+  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, FRONTZ, BD);
+  CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, BACKZ, BD);
   CHK_ENTITY_TYPE_W_OLD (viewport, VIEWPORT, SNAPANG, BD);
   CHK_ENTITY_MAX (viewport, VIEWPORT, SNAPANG, BD, MAX_ANGLE);
   CHK_ENTITY_2RD (viewport, VIEWPORT, VIEWCTR);

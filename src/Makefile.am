@@ -1,6 +1,6 @@
 ## Makefile.am
 ##
-## Copyright (C) 2010,2018-2023 Free Software Foundation, Inc.
+## Copyright (C) 2010,2018-2026 Free Software Foundation, Inc.
 ##
 ## This file is part of LibreDWG.
 ##
@@ -23,7 +23,8 @@ AM_CFLAGS   = -I$(top_srcdir)/include -I. $(WARN_CFLAGS)
 if ENABLE_SHARED
 AM_CFLAGS += -DDLL_EXPORT
 endif
-libredwg_la_LDFLAGS = -version-info $(LIBREDWG_SO_VERSION) -no-undefined -lm @LIBICONV@
+libredwg_la_LDFLAGS = -version-info $(LIBREDWG_SO_VERSION) -no-undefined
+libredwg_la_LIBADD = -lm @LTLIBICONV@
 if ENABLE_MIMALLOC
 libredwg_la_LDFLAGS += -lmimalloc
 endif
@@ -34,13 +35,15 @@ libredwg_la_SOURCES = \
 	common.c \
 	codepages.c \
 	bits.c \
+	logging.c \
 	decode.c \
-        decode_r11.c \
-        decode_r2007.c \
+	decode2.c \
+	decode_r11.c \
+	decode_r2007.c \
 	reedsolomon.c \
-        print.c \
-        free.c \
-        hash.c \
+	print.c \
+	free.c \
+	hash.c \
 	dynapi.c \
 	classes.c \
 	dwg_api.c \
@@ -50,19 +53,20 @@ libredwg_la_SOURCES = \
 	$(EXTRA_HEADERS)
 if !DISABLE_DXF
 libredwg_la_SOURCES += \
-        out_dxf.c \
-        out_dxfb.c
+	out_dxf.c \
+	out_dxfb.c
 #       out_xml.c \
 #       out_yaml.c
 if !DISABLE_JSON
 libredwg_la_SOURCES += \
-        out_json.c \
-        out_geojson.c
+	out_json.c \
+	out_geojson.c
 endif
 endif
 if USE_WRITE
 libredwg_la_SOURCES += \
 	encode.c \
+	encode2.c \
 	dxfclasses.c
 #       encode_r2007.c
 #       in_xml.c
@@ -79,25 +83,28 @@ endif
 
 EXTRA_HEADERS = \
 	dwg.spec \
-        header_variables.spec \
-        header_variables_r11.spec \
-        header_variables_dxf.spec \
-        common_entity_data.spec \
-        common_entity_handle_data.spec \
-        common_object_handle_data.spec \
-        header.spec \
-        auxheader.spec \
-        2ndheader.spec \
+	dwg2.spec \
+	dwg_spec_shared.h \
+	enc_macros.h \
+	header_variables.spec \
+	header_variables_r11.spec \
+	header_variables_dxf.spec \
+	common_entity_data.spec \
+	common_entity_handle_data.spec \
+	common_object_handle_data.spec \
+	header.spec \
+	auxheader.spec \
+	2ndheader.spec \
 	r2004_file_header.spec \
-        summaryinfo.spec \
-        acds.spec \
-        appinfo.spec \
-        filedeplist.spec \
-        security.spec \
-        vbaproject.spec \
-        template.spec \
-        objfreespace.spec \
-        revhistory.spec \
+	summaryinfo.spec \
+	acds.spec \
+	appinfo.spec \
+	filedeplist.spec \
+	security.spec \
+	vbaproject.spec \
+	template.spec \
+	objfreespace.spec \
+	revhistory.spec \
 	classes.inc \
 	objects.inc \
 	spec.h \
@@ -111,10 +118,10 @@ EXTRA_HEADERS = \
 	decode_r11.h \
 	dec_macros.h \
 	free.h \
-        print.h \
+	print.h \
 	logging.h \
 	reedsolomon.h \
-        hash.h \
+	hash.h \
 	dynapi.h \
 	out_json.h \
 	geom.h
@@ -161,7 +168,7 @@ $(srcdir)/objects.c: $(srcdir)/objects.in
 	-cd $(abs_top_srcdir) && \
 	  $(GPERF) --output-file src/objects.tmp.c src/objects.in && \
 	  sed -e's,unsigned int hval = len;,unsigned int hval = len \& UINT_MAX;,' \
-              -e's,unsigned int len,size_t len,; s,register ,,g' <src/objects.tmp.c >src/objects.c && \
+	      -e's,unsigned int len,size_t len,; s,register ,,g' <src/objects.tmp.c >src/objects.c && \
 	  rm -f src/objects.tmp.c
 endif
 

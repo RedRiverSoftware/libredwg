@@ -13,6 +13,7 @@ endif(WIN32)
 add_executable(bits_test
   bits_test.c
   ../../src/bits.c
+  ../../src/logging.c
   ../../src/codepages.c
   ../../src/classes.c
   ../../src/objects.c
@@ -26,6 +27,7 @@ endif()
 add_executable(hash_test
   hash_test.c
   ../../src/bits.c
+  ../../src/logging.c
   ../../src/codepages.c
   ../../src/hash.c
   ../../src/classes.c
@@ -35,6 +37,7 @@ add_test(hash_test ${TARGET_SYSTEM_EMULATOR} hash_test${CMAKE_EXECUTABLE_SUFFIX}
 
 add_executable(common_test
   common_test.c
+  ../../src/logging.c
   ../../src/classes.c
   ../../src/codepages.c
   tests_common.h)
@@ -46,14 +49,15 @@ endif()
 add_executable(decode_test
   decode_test.c
   ../../src/dwg.c
-  ../../src/common.c
   ../../src/bits.c
+  ../../src/logging.c
   ../../src/codepages.c
   ../../src/hash.c
   ../../src/decode_r2007.c
   ../../src/objects.c
   ../../src/classes.c
   ../../src/print.c
+  ../../src/decode2.c
   tests_common.h)
 #set_property(TARGET decode_test
 #  PROPERTY LINK_LIBRARIES -lm ${CMAKE_THREAD_LIBS_INIT})
@@ -63,8 +67,8 @@ add_test(decode_test ${TARGET_SYSTEM_EMULATOR} decode_test${CMAKE_EXECUTABLE_SUF
 
 add_executable(dxf_test
   dxf_test.c
-  ../../src/common.c
   ../../src/dynapi.c
+  ../../src/logging.c
   ../../src/objects.c
   ../../src/classes.c
   tests_common.h)
@@ -75,6 +79,7 @@ add_test(dxf_test ${TARGET_SYSTEM_EMULATOR} dxf_test${CMAKE_EXECUTABLE_SUFFIX})
 add_executable(dynapi_test
   dynapi_test.c
   ../../src/bits.c
+  ../../src/logging.c
   ../../src/codepages.c
   ../../src/objects.c
   ../../src/classes.c
@@ -88,6 +93,7 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     add_test.c
     ../../src/bits.c
     ../../src/codepages.c
+    ../../src/logging.c
     ../../src/classes.c
     tests_common.h)
   # this does not find test-data, because it is under Release/Debug

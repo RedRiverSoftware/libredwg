@@ -85,6 +85,30 @@ passing. If a test fails, decide whether:
 
 Never just relax the assertion to make the test green.
 
+## Syncing with upstream LibreDWG
+
+Upstream is https://github.com/LibreDWG/libredwg (add it as the `upstream`
+remote). Sync by **merging** an upstream tag into a `feature/<id>_...`
+branch. Never rebase our commits: cableflow pins fork commits as a
+submodule, and rewritten SHAs break that pin.
+
+- Merge the sync PR with **"Create a merge commit"**, never squash or
+  rebase. A squash drops upstream's history, so the merge base never moves
+  and the next sync conflicts on every upstream commit again.
+- Conflicts are usually limited to `programs/dwg2SVG.c` and
+  `bindings/dwg.i`. Resolve per file. Never use `git merge -s ours`, which
+  discards all of upstream's changes.
+- Things that break without a text conflict:
+  - fields renamed in `include/dwg.h` that `dwg2SVG.c` uses;
+  - functions that `dwg_api.h` declares but `src/dwg_api.c` no longer
+    defines. These need an `%ignore` in `dwg.i`, or the Windows link of
+    `libredwg_csharp.dll` fails;
+  - a `LIBREDWG_SO_VERSION` bump. It renames `libredwg.so.0.0.N`, so
+    cableflow's `.gitattributes` LFS patterns and its
+    `LibraryVersionCorrect` test need updating.
+- Last sync: tag `0.14.8601` (id:366853). Plan and runbook:
+  `docs/runbooks/libredwg-upstream-sync/` in cableflow.
+
 ## Perf probe (opt-in)
 
 `PerfProbe.cs` in `backend/test/CAD/` benchmarks the library-mode SVG

@@ -48,11 +48,6 @@ fi
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Create local src directory with config.h (wrapper includes ../src/config.h)
-LOCAL_SRC_DIR="$SCRIPT_DIR/src"
-mkdir -p "$LOCAL_SRC_DIR"
-cp "$CONFIG_H" "$LOCAL_SRC_DIR/"
-
 echo ""
 echo "Building native wrapper..."
 echo "  Source:  $WRAPPER_FILE"
@@ -61,7 +56,7 @@ echo "  Lib:     $LIB_DIR"
 echo "  Output:  $OUTPUT_DIR"
 
 # Compile the wrapper into a shared library
-# Build from within the generated directory so ../src/config.h resolves correctly
+# The wrapper includes "config.h", found via -I$BUILD_SRC_DIR
 cd "$GENERATED_DIR"
 
 gcc -shared -fPIC -O2 \

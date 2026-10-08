@@ -5,9 +5,6 @@ generated/
 bin/
 obj/
 
-# Copied config.h for build
-src/
-
 # Temporary build files
 *.obj
 *.o

@@ -8,6 +8,7 @@ project(libredwg C)
 #                   -DDXF_PRECISION=6
 #                   -DGEOMJSON_PRECISION=6
 # for smaller builds and lib.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(MSVC)
   set(redwg libredwg)
@@ -28,7 +29,7 @@ endif()
 string(STRIP "${NL_PACKAGE_VERSION}" PACKAGE_VERSION)
 message(STATUS "PACKAGE_VERSION: ${PACKAGE_VERSION}")
 
-set(LIBREDWG_SO_VERSION "0:13:0")
+set(LIBREDWG_SO_VERSION "0:14:0")
 execute_process(COMMAND perl -an "${CMAKE_CURRENT_SOURCE_DIR}/build-aux/get-so-version.pl"
                         "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac"
                 OUTPUT_VARIABLE LIBREDWG_SO_VERSION)
@@ -250,6 +251,7 @@ endif()
 if(NOT LIBREDWG_DISABLE_WRITE)
  set(write_SOURCES
     src/encode.c
+    src/encode2.c
     src/in_dxf.c
     ${injson_SOURCES}
     src/reedsolomon.c)
@@ -259,9 +261,11 @@ set(libredwg_SOURCES
     src/bits.c
     src/codepages.c
     src/common.c
+    src/logging.c
     src/classes.c
     src/objects.c
     src/decode.c
+    src/decode2.c
     src/decode_r11.c
     src/decode_r2007.c
     src/dwg.c
@@ -377,6 +381,8 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)
           if(NOT LIBREDWG_DISABLE_JSON)
             configure_file(programs/json.test.in json.test @ONLY)
             add_test(json.test json.test)
+            configure_file(programs/dwgfilter.test.in dwgfilter.test @ONLY)
+            add_test(dwgfilter.test dwgfilter.test)
           endif(NOT LIBREDWG_DISABLE_JSON)
         endif(NOT LIBREDWG_DISABLE_DXF)
         configure_file(programs/svg.test.in svg.test @ONLY)

@@ -1,6 +1,6 @@
 // unstable
 #define DWG_TYPE DWG_TYPE_MATERIAL
-#include "common.c"
+#include "tests_common.c"
 
 void
 api_process (dwg_object *obj)
@@ -83,8 +83,7 @@ api_process (dwg_object *obj)
         }                                                                     \
       else                                                                    \
         {                                                                     \
-          CHK_ENTITY_TYPE (_obj, MATERIAL, genproctype, BS);                  \
-          /* TODO procedural...*/                                             \
+          CHK_ENTITY_TYPE (_obj, MATERIAL, genproctype, BS); /* TODO procedural...*/                                             \
         }                                                                     \
     }
 

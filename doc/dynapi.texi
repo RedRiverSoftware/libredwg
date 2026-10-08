@@ -699,7 +699,7 @@ RD
 RL
 @item bitsize_hi
 RL
-@item circle_zoom_percent
+@item circle_zoom
 RS
 @item codepage
 RS
@@ -1114,9 +1114,9 @@ H,	DXF 2
 @item is_partial
 B,	DXF 70
 @item arc_start_param
-BD,	DXF 41
+BD,	DXF 40
 @item arc_end_param
-BD,	DXF 42
+BD,	DXF 41
 @item has_leader
 B,	DXF 71
 @item leader1_pt
@@ -3015,9 +3015,9 @@ BE,	DXF 210
 @item x_axis_dir
 3BD,	DXF 11
 @item rect_height
-BD,	DXF 41
+BD,	DXF 46
 @item rect_width
-BD,	DXF 40
+BD,	DXF 41
 @item text_height
 BD,	DXF 40
 @item attachment
@@ -3041,7 +3041,7 @@ B
 @item bg_fill_flag
 BL,	DXF 90
 @item bg_fill_scale
-BL,	DXF 45
+BD,	DXF 45
 @item bg_fill_color
 CMC,	DXF 63
 @item bg_fill_trans
@@ -3764,7 +3764,7 @@ struct _dwg_object_entity*
 BL,	DXF 90
 @item class_id
 BL,	DXF 91
-@item dwg_versions
+@item version
 BL,	DXF 95
 @item maint_version
 BL,	DXF 95
@@ -4769,15 +4769,15 @@ RS,	DXF 69
 3BD,	DXF 17
 @item VIEWDIR
 3BD,	DXF 16
-@item twist_angle
+@item VIEWTWIST
 BD,	DXF 51
 @item VIEWSIZE
 BD,	DXF 45
-@item lens_length
+@item LENSLENGTH
 BD,	DXF 42
-@item front_clip_z
+@item FRONTZ
 BD,	DXF 43
-@item back_clip_z
+@item BACKZ
 BD,	DXF 44
 @item SNAPANG
 BD,	DXF 50
@@ -4830,7 +4830,7 @@ CMC,	DXF 63
 @item vport_entity_header
 H
 @item frozen_layers
-H*,	DXF 341
+H*,	DXF 331
 @item clip_boundary
 H,	DXF 340
 @item named_ucs
@@ -5160,7 +5160,7 @@ Dwg_ACSH_HistoryNode
 BL,	DXF 90
 @item minor
 BL,	DXF 91
-@item bl92
+@item method
 BL,	DXF 92
 @item base_dist
 BD,	DXF 41
@@ -5170,7 +5170,7 @@ BD,	DXF 42
 BL,	DXF 93
 @item edges
 BL*,	DXF 94
-@item bl95
+@item base_face
 BL,	DXF 95
 
 @end vtable
@@ -5253,7 +5253,7 @@ BL,	DXF 90
 BL,	DXF 91
 @item direction
 3BD,	DXF 10
-@item bl92
+@item method
 BL,	DXF 92
 @item shsw_text_size
 BL,	DXF 90
@@ -5320,7 +5320,7 @@ Dwg_ACSH_HistoryNode
 BL,	DXF 90
 @item minor
 BL,	DXF 91
-@item bl92
+@item method
 BL,	DXF 92
 @item num_edges
 BL,	DXF 93
@@ -5510,7 +5510,7 @@ BL,	DXF 90
 BL,	DXF 91
 @item direction
 3BD,	DXF 10
-@item bl92
+@item method
 BL,	DXF 92
 @item shsw_text_size
 BL,	DXF 90
@@ -6716,81 +6716,21 @@ BL,	DXF 90
 BL,	DXF 90
 @item unknown_2
 BL,	DXF 90
-@item num_steps
+@item unknown_bl1
 BL,	DXF 90
-@item num_subents
+@item unknown_bl2
+BL,	DXF 90
+@item num_steps
 BL,	DXF 90
 @item steps
 BL*,	DXF 90
+@item num_subents
+BL,	DXF 90
 @item subents
-BL*
-@item unknown_bl6
+BL*,	DXF 90
+@item unknown_bl3
 BL,	DXF 90
-@item unknown_bl6a
-BL,	DXF 90
-@item unknown_bl7a
-BL,	DXF 90
-@item unknown_bl7
-BL,	DXF 90
-@item unknown_bl8
-BL,	DXF 90
-@item unknown_bl9
-BL,	DXF 90
-@item unknown_bl10
-BL,	DXF 90
-@item unknown_bl11
-BL,	DXF 90
-@item unknown_bl12
-BL,	DXF 90
-@item unknown_bl13
-BL,	DXF 90
-@item unknown_bl14
-BL,	DXF 90
-@item unknown_bl15
-BL,	DXF 90
-@item unknown_bl16
-BL,	DXF 90
-@item unknown_bl17
-BL,	DXF 90
-@item unknown_bl18
-BL,	DXF 90
-@item unknown_bl19
-BL,	DXF 90
-@item unknown_bl20
-BL,	DXF 90
-@item unknown_bl21
-BL,	DXF 90
-@item unknown_bl22
-BL,	DXF 90
-@item unknown_bl23
-BL,	DXF 90
-@item unknown_bl24
-BL,	DXF 90
-@item unknown_bl25
-BL,	DXF 90
-@item unknown_bl26
-BL,	DXF 90
-@item unknown_bl27
-BL,	DXF 90
-@item unknown_bl28
-BL,	DXF 90
-@item unknown_bl29
-BL,	DXF 90
-@item unknown_bl30
-BL,	DXF 90
-@item unknown_bl31
-BL,	DXF 90
-@item unknown_bl32
-BL,	DXF 90
-@item unknown_bl33
-BL,	DXF 90
-@item unknown_bl34
-BL,	DXF 90
-@item unknown_bl35
-BL,	DXF 90
-@item unknown_bl36
-BL,	DXF 90
-@item unknown_b37
+@item unknown_b4
 B,	DXF 290
 
 @end vtable
@@ -9322,6 +9262,8 @@ BL,	DXF 90
 B,	DXF 70
 @item rotated_type
 RC,	DXF 71
+@item has_lastpt_ref
+B
 @item ref
 Dwg_DIMASSOC_Ref*
 
@@ -9471,12 +9413,6 @@ TV,	DXF 6
 TV,	DXF 7
 @item DIMALTRND
 BD,	DXF 148
-@item DIMCLRD_N
-RS,	DXF 176
-@item DIMCLRE_N
-RS,	DXF 177
-@item DIMCLRT_N
-RS,	DXF 178
 @item DIMCLRD
 CMC,	DXF 176
 @item DIMCLRE
@@ -11209,7 +11145,7 @@ struct _dwg_object_object*
 BL,	DXF 90
 @item class_id
 BL,	DXF 91
-@item dwg_versions
+@item version
 BL,	DXF 95
 @item maint_version
 BL
@@ -12240,13 +12176,13 @@ BD
 3BD,	DXF 12
 @item VIEWDIR
 3BD,	DXF 11
-@item twist_angle
+@item VIEWTWIST
 BD,	DXF 50
-@item lens_length
+@item LENSLENGTH
 BD,	DXF 42
-@item front_clip_z
+@item FRONTZ
 BD,	DXF 43
-@item back_clip_z
+@item BACKZ
 BD,	DXF 44
 @item VIEWMODE
 4BITS,	DXF 71
@@ -12625,13 +12561,13 @@ BD,	DXF 41
 3BD,	DXF 17
 @item VIEWDIR
 3BD,	DXF 16
-@item view_twist
+@item VIEWTWIST
 BD,	DXF 51
-@item lens_length
+@item LENSLENGTH
 BD,	DXF 42
-@item front_clip_z
+@item FRONTZ
 BD,	DXF 43
-@item back_clip_z
+@item BACKZ
 BD,	DXF 44
 @item VIEWMODE
 4BITS,	DXF 71
@@ -13228,9 +13164,41 @@ H
 @indentedblock
 @vtable @code
 
-@item attachment
+@item entmode
+BB
+@item num_reactors
 BL
+@item has_ds_data
+B
+@item color
+CMC
+@item is_xdic_missing
+B
+@item ltype_scale
+BD
+@item ltype_flags
+BB
+@item plotstyle_flags
+BB
+@item material_flags
+BB
+@item shadow_flags
+RC
+@item has_full_visualstyle
+B
+@item has_face_visualstyle
+B
+@item has_edge_visualstyle
+B
+@item invisible
+BS
+@item linewt
+RC
+@item layer
+H
 @item ins_pt
+3BD
+@item extrusion
 3BD
 @item x_axis_dir
 3BD
@@ -13238,11 +13206,47 @@ BL
 BD
 @item rect_width
 BD
+@item text_height
+BD
+@item attachment
+BS
+@item flow_dir
+BS
 @item extents_width
 BD
 @item extents_height
 BD
+@item text
+T
+@item style
+H
+@item linespace_style
+BS
+@item linespace_factor
+BD
+@item unknown_b0
+B
+@item bg_fill_flag
+BL
+@item bg_fill_scale
+BD
+@item bg_fill_color
+CMC
+@item bg_fill_trans
+BL
+@item is_not_annotative
+B
+@item class_version
+BS
+@item default_flag
+B
+@item appid
+H
+@item ignore_attachment
+BL
 @item column_type
+BS
+@item numfragments
 BL
 @item column_width
 BD
@@ -14126,10 +14130,16 @@ BL,	DXF 91
 BS
 @item xrefpaths
 TV*,	DXF 301
+@item num_intersec_xrefpaths
+BS
+@item intersec_xrefpaths
+TV*
 @item has_lastpt_ref
 B,	DXF 75
-@item lastpt_ref
-3BD
+@item intersec_subent_type
+BS,	DXF 74
+@item intersec_gsmarker
+BL,	DXF 92
 @item num_intsectobj
 BL,	DXF 74
 @item intsectobj
@@ -14161,13 +14171,13 @@ RC,	DXF 70
 @item flag1
 RC
 @item user_text
-TV,	DXF 1
+T,	DXF 1
 @item text_rotation
 BD,	DXF 53
 @item horiz_dir
 BD,	DXF 51
 @item ins_scale
-3BD
+3BD_1
 @item ins_rotation
 BD,	DXF 54
 @item attachment
@@ -15066,9 +15076,9 @@ struct _dwg_object_MLINESTYLE*
 BD,	DXF 49
 @item color
 CMC,	DXF 62
-@item lt.index
+@item lt_index
 BSd,	DXF 6
-@item lt.ltype
+@item lt_ltype
 H,	DXF 6
 
 @end vtable

@@ -37,7 +37,7 @@ dnl- If any interfaces have been added since the last public release,
 dnl  then increment age.
 dnl- If any interfaces have been removed or changed since the last public release,
 dnl  then set age to 0.
-LIBREDWG_SO_VERSION=0:13:0
+LIBREDWG_SO_VERSION=0:14:0
 AC_DEFINE_UNQUOTED([LIBREDWG_SO_VERSION], ["${LIBREDWG_SO_VERSION}"],
           [Defined in configure.ac to the libtool version-info of the shared lib.])
 AC_SUBST([LIBREDWG_SO_VERSION])
@@ -50,6 +50,9 @@ m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
 
 dnl create a config.h file (Automake will add -DHAVE_CONFIG_H)
 AC_CONFIG_HEADERS([src/config.h])
+AH_TOP([#ifndef CONFIG_H
+#define CONFIG_H 1])
+AH_BOTTOM([#endif /* CONFIG_H */])
 AC_MSG_CHECKING([PACKAGE_VERSION])
 AC_MSG_RESULT($PACKAGE_VERSION)
 AC_MSG_CHECKING([LIBREDWG_SO_VERSION])
@@ -201,6 +204,7 @@ case $CFLAGS in
      *-fsanitize=leak*)        HAVE_ASAN=yes ;;
      *-fsanitize=*,leak*)      HAVE_ASAN=yes ;;
 esac
+AC_DEFINE(HAVE_ASAN,1,[AddressSanitizer detected in CFLAGS or CC])
 AC_SUBST(HAVE_ASAN)
 AM_CONDITIONAL([HAVE_ASAN], [test -n "$HAVE_ASAN"])
 
@@ -222,7 +226,11 @@ darwin*|macos*)
     AC_DEFINE([_POSIX_C_SOURCE],[900000L],[Needed for all APPLE extensions])
     ;;
 *)
-    AC_DEFINE([_POSIX_C_SOURCE],[200809L],[Needed for strdup])
+    AH_VERBATIM([_POSIX_C_SOURCE],
+[/* Needed for strdup */
+#ifndef _POSIX_C_SOURCE
+# define _POSIX_C_SOURCE 200809L
+#endif])
     ;;
 esac
 case "$host_os" in
@@ -527,11 +535,15 @@ AS_IF([test x$enable_docs = xno],
 dnl --enable-check-less
 AC_MSG_CHECKING([for --enable-check-less])
 AC_ARG_ENABLE([check-less],AS_HELP_STRING([--enable-check-less],[
-    Enable check less unit-tests (default: no).  When enabled (e.g. in mingw),
-    the unit-tests include only the minimal API tests.]),
+    Enable check less unit-tests (default: no, except under OSS-Fuzz/CIFuzz).
+    When enabled (e.g. in mingw or OSS-Fuzz), the unit-tests include only the
+    minimal API tests.]),
   [check_less=yes
   AC_MSG_RESULT([yes])],
-  AC_MSG_RESULT([no (default)]))
+  [AS_IF([test "x$CIFUZZ" != x || test "x$OSS_FUZZ_PROJECT_NAME" != x],
+    [check_less=yes
+     AC_MSG_RESULT([yes (CIFuzz/OSS-Fuzz detected)])],
+    [AC_MSG_RESULT([no (default)])])])
 AM_CONDITIONAL([CHECK_LESS], [test x$check_less = xyes])
 
 
@@ -730,20 +742,20 @@ fi
 
 if test x$enable_python != xno && test -n "$XML2_LIBS" && test x$cross_compiling = xno
 then
-  AC_MSG_CHECKING([for the libxml2 Python package])
-  ac_python_libxml2_result=`$PYTHON -c "import libxml2" 2>&1`
+  AC_MSG_CHECKING([for the lxml Python package])
+  ac_python_lxml_result=`$PYTHON -c "import lxml" 2>&1`
   if test $? -eq 0; then
-    ac_have_python_libxml2=1
+    ac_have_python_lxml=1
     AC_MSG_RESULT([yes])
   else
-    ac_have_python_libxml2=
+    ac_have_python_lxml=
     AC_MSG_RESULT([no])
     AC_MSG_WARN([disable test/xmlsuite.
 The import error was:
-$ac_python_libxml2_result])
+$ac_python_lxml_result])
   fi
 fi
-AM_CONDITIONAL([HAVE_PYTHON_LIBXML2], [test x$ac_have_python_libxml2 = x1])
+AM_CONDITIONAL([HAVE_PYTHON_LXML], [test x$ac_have_python_lxml = x1])
 
 if test -n "$PERL"; then
   ac_cv_perl="$PERL"
@@ -779,6 +791,18 @@ AC_SUBST([with_perl_install])
 
 AM_CONDITIONAL([HAVE_SWIG_PYTHON], [test -n "$SWIG" && test -n "$PYTHON_VERSION"])
 AM_CONDITIONAL([HAVE_PYTHON], [test x$enable_python != xno])
+
+dnl Get python shared extension for -shrext on Windows (.pyd)
+PYTHON_SO_LDFLAGS=
+if test -n "$PYTHON_VERSION" && test x$enable_python != xno; then
+  AC_MSG_CHECKING([python extension suffix])
+  PYTHON_SO=`$PYTHON -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or sysconfig.get_config_var('SO') or '.so')" 2>/dev/null`
+  AC_MSG_RESULT([$PYTHON_SO])
+  case $PYTHON_SO in
+    .pyd) PYTHON_SO_LDFLAGS="-shrext .pyd" ;;
+  esac
+fi
+AC_SUBST([PYTHON_SO_LDFLAGS])
 AM_CONDITIONAL([HAVE_SWIG_PERL], [test -n "$SWIG" && test -n "$PERL_VERSION"])
 AM_CONDITIONAL([HAVE_PERL], [test -n "$PERL"])
 dnl only needed with python bindings
@@ -791,6 +815,7 @@ if test -z "$ODAFILECONVERTER"; then
   AC_CHECK_PROGS([ODAFILECONVERTER], [TeighaFileConverter])
 fi
 AM_CONDITIONAL([HAVE_ODA], [test -n "$ODAFILECONVERTER"])
+AC_CHECK_PROGS([XVFB_RUN], [xvfb-run])
 
 AC_CHECK_PROGS([CPPCHECK], [cppcheck])
 if test -n "$CPPCHECK"; then
@@ -1049,13 +1074,15 @@ AM_COND_IF([DISABLE_BINDINGS], [],
            [AC_CONFIG_FILES([bindings/Makefile bindings/python/Makefile])])
 AM_COND_IF([DISABLE_BINDINGS], [],
            [AM_COND_IF([HAVE_PERL], [AC_CONFIG_FILES([bindings/perl/Makefile.PL])])])
-AM_COND_IF([HAVE_PYTHON_LIBXML2],  [AC_CONFIG_FILES([test/xmlsuite/Makefile])])
+AM_COND_IF([HAVE_PYTHON_LXML],  [AC_CONFIG_FILES([test/xmlsuite/Makefile])])
 AM_COND_IF([HAVE_DOXYGEN], [AC_CONFIG_FILES([doc/Doxyfile doc/footer])])
 AC_CONFIG_FILES([programs/dwgfilter], [chmod +x programs/dwgfilter])
 AC_CONFIG_FILES([programs/alive.test], [chmod +x programs/alive.test])
 AC_CONFIG_FILES([programs/dxf.test], [chmod +x programs/dxf.test])
+AC_CONFIG_FILES([programs/dxfb.test], [chmod +x programs/dxfb.test])
 AC_CONFIG_FILES([programs/json.test], [chmod +x programs/json.test])
 AC_CONFIG_FILES([programs/svg.test], [chmod +x programs/svg.test])
+AC_CONFIG_FILES([programs/dwgfilter.test], [chmod +x programs/dwgfilter.test])
 AC_CONFIG_FILES([examples/dwgadd_test.sh], [chmod +x examples/dwgadd_test.sh])
 AC_CONFIG_FILES([logs-all.sh:$logs_all], [chmod +x logs-all.sh])
 AC_CONFIG_FILES([log], [chmod +x log])

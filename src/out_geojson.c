@@ -683,9 +683,40 @@ dwg_geojson_variable_type (Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
   return 0;
 }
 
+
+/*
+ * Calculate number of polygon segments for a curve (arc/circle/ellipse)
+ * based on the drawing extent (zoom-level) and radius.
+ * Implements approach similar to circle.js: steps ~ sqrt(radius/extent)
+ * with angle_span in radians.
+ */
 static int
-dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
-                    int is_last)
+calc_curve_segments (Dwg_Data *restrict dwg, BITCODE_BD radius,
+                     BITCODE_BD angle_span)
+{
+  double extent, scale;
+  int num_pts;
+  extent = fmax (fabs (dwg->header_vars.LIMMAX.x
+                       - dwg->header_vars.LIMMIN.x),
+                 fabs (dwg->header_vars.LIMMAX.y
+                       - dwg->header_vars.LIMMIN.y));
+  if (extent < 1e-12)
+    extent = 1.0;
+  // Scale: more segments for larger radius relative to extent.
+  // angle_span / (2 * M_PI) gives the fraction of a full circle.
+  // sqrt(radius / extent) scales with feature size.
+  scale = sqrt (fabs (radius) / extent);
+  num_pts = (int)(128.0 * scale * (angle_span / (2 * M_PI)));
+  if (num_pts < 16)
+    num_pts = 16;
+  if (num_pts > 256)
+    num_pts = 256;
+  return num_pts;
+}
+
+static int
+dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
+                    Dwg_Object *restrict obj, int is_last)
 {
   switch (obj->fixedtype)
     {
@@ -704,7 +735,7 @@ dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
     case DWG_TYPE_MINSERT:
       // a grid of INSERT's (named points)
       // dwg_geojson_MINSERT(dat, obj);
-      LOG_TRACE ("MINSERT not yet supported")
+      LOG_TRACE ("MINSERT not yet supported");
       break;
     case DWG_TYPE_POLYLINE_2D:
       {
@@ -795,85 +826,77 @@ dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
         return 1;
       }
     case DWG_TYPE_ARC:
-      // dwg_geojson_ARC(dat, obj);
-      if (1)
-        {
-          Dwg_Entity_ARC *_obj = obj->tio.entity->tio.ARC;
-          const int viewres = 1000;
-          BITCODE_2BD ctr = { _obj->center.x, _obj->center.y };
-          BITCODE_2BD *pts;
-          int num_pts;
-          double end_angle = _obj->end_angle;
-          // viewres is for 2PI. we need anglediff(deg)/2PI
-          while (end_angle - _obj->start_angle < 1e-6)
-            end_angle += M_PI;
-          num_pts
-              = (int)trunc (viewres / rad2deg (end_angle - _obj->start_angle));
-          if (num_pts > 10000 || num_pts < 0)
-            {
-              LOG_ERROR ("Invalid angles");
-              return DWG_ERR_VALUEOUTOFBOUNDS;
-            }
-          num_pts = MIN (num_pts, 120);
-          pts = (BITCODE_2BD *)malloc (num_pts * sizeof (BITCODE_2BD));
-          if (!pts)
-            {
-              LOG_ERROR ("Out of memory");
-              return DWG_ERR_OUTOFMEM;
-            }
-          // explode into line segments. divided by VIEWRES (default 1000)
-          arc_split (pts, num_pts, ctr, _obj->start_angle, _obj->end_angle,
-                     _obj->radius);
-          FEATURE (AcDbEntity : AcDbArc, obj);
-          GEOMETRY (Polygon)
-          KEY (coordinates);
-          ARRAY;
-          ARRAY;
-          for (int j = 0; j < num_pts; j++)
-            {
-              VALUE_2DPOINT (pts[j].x, pts[j].y)
-            }
-          LASTVALUE_2DPOINT (pts[0].x, pts[0].y);
-          LASTENDARRAY;
-          LASTENDARRAY;
-          ENDGEOMETRY;
-          ENDFEATURE;
-          free (pts);
-        }
-      else
-        LOG_TRACE ("ARC not yet supported")
-      break;
+      {
+        Dwg_Entity_ARC *_obj = obj->tio.entity->tio.ARC;
+        BITCODE_2BD ctr = { _obj->center.x, _obj->center.y };
+        BITCODE_2BD *pts;
+        double end_angle = angle_normalize (_obj->end_angle);
+        double angle_span;
+        int num_pts;
+        if (end_angle < _obj->start_angle)
+          end_angle += 2 * M_PI;
+        angle_span = end_angle - _obj->start_angle;
+        num_pts = calc_curve_segments (dwg, _obj->radius, angle_span);
+        if (num_pts <= 0 || num_pts > 10000)
+          {
+            LOG_ERROR ("Invalid angles");
+            return DWG_ERR_VALUEOUTOFBOUNDS;
+          }
+        pts = (BITCODE_2BD *)malloc (num_pts * sizeof (BITCODE_2BD));
+        if (!pts)
+          {
+            LOG_ERROR ("Out of memory");
+            return DWG_ERR_OUTOFMEM;
+          }
+        arc_split (pts, num_pts, ctr, _obj->start_angle, _obj->end_angle,
+                   _obj->radius);
+        FEATURE (AcDbEntity : AcDbArc, obj);
+        GEOMETRY (Polygon)
+        KEY (coordinates);
+        ARRAY;
+        ARRAY;
+        for (int j = 0; j < num_pts; j++)
+          {
+            VALUE_2DPOINT (pts[j].x, pts[j].y)
+          }
+        LASTVALUE_2DPOINT (pts[0].x, pts[0].y);
+        LASTENDARRAY;
+        LASTENDARRAY;
+        ENDGEOMETRY;
+        ENDFEATURE;
+        free (pts);
+        return 1;
+      }
     case DWG_TYPE_CIRCLE:
-      // dwg_geojson_CIRCLE(dat, obj);
-      if (1)
-        {
-          Dwg_Entity_CIRCLE *_obj = obj->tio.entity->tio.CIRCLE;
-          // const int viewres = 1000; //dwg->header_vars.VIEWRES;
-          BITCODE_2BD ctr = { _obj->center.x, _obj->center.y };
-          // double res = viewres / 360.0;
-          int num_pts = 120;
-          BITCODE_2BD *pts
-              = (BITCODE_2BD *)malloc (num_pts * sizeof (BITCODE_2BD));
-          arc_split (pts, num_pts, ctr, 0, M_PI * 2.0, _obj->radius);
-          FEATURE (AcDbEntity : AcDbCircle, obj);
-          GEOMETRY (Polygon)
-          KEY (coordinates);
-          ARRAY;
-          ARRAY;
-          for (int j = 0; j < num_pts; j++)
-            {
-              VALUE_2DPOINT (pts[j].x, pts[j].y)
-            }
-          LASTVALUE_2DPOINT (pts[0].x, pts[0].y);
-          LASTENDARRAY;
-          LASTENDARRAY;
-          ENDGEOMETRY;
-          ENDFEATURE;
-          free (pts);
-        }
-      else
-        LOG_TRACE ("CIRCLE not yet supported")
-      break;
+      {
+        Dwg_Entity_CIRCLE *_obj = obj->tio.entity->tio.CIRCLE;
+        BITCODE_2BD ctr = { _obj->center.x, _obj->center.y };
+        int num_pts = calc_curve_segments (dwg, _obj->radius, 2 * M_PI);
+        BITCODE_2BD *pts
+            = (BITCODE_2BD *)malloc (num_pts * sizeof (BITCODE_2BD));
+        if (!pts)
+          {
+            LOG_ERROR ("Out of memory");
+            return DWG_ERR_OUTOFMEM;
+          }
+        arc_split (pts, num_pts, ctr, 0, M_PI * 2.0, _obj->radius);
+        FEATURE (AcDbEntity : AcDbCircle, obj);
+        GEOMETRY (Polygon)
+        KEY (coordinates);
+        ARRAY;
+        ARRAY;
+        for (int j = 0; j < num_pts; j++)
+          {
+            VALUE_2DPOINT (pts[j].x, pts[j].y)
+          }
+        LASTVALUE_2DPOINT (pts[0].x, pts[0].y);
+        LASTENDARRAY;
+        LASTENDARRAY;
+        ENDGEOMETRY;
+        ENDFEATURE;
+        free (pts);
+        return 1;
+      }
     case DWG_TYPE_LINE:
       {
         Dwg_Entity_LINE *_obj = obj->tio.entity->tio.LINE;
@@ -909,31 +932,126 @@ dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
     case DWG_TYPE__3DFACE:
       // really a Polygon
       // dwg_geojson__3DFACE(dat, obj);
-      LOG_TRACE ("3DFACE not yet supported")
+      LOG_TRACE ("3DFACE not yet supported");
       break;
     case DWG_TYPE_POLYLINE_PFACE:
       // dwg_geojson_POLYLINE_PFACE(dat, obj);
-      LOG_TRACE ("POLYLINE_PFACE not yet supported")
+      LOG_TRACE ("POLYLINE_PFACE not yet supported");
       break;
     case DWG_TYPE_POLYLINE_MESH:
       // dwg_geojson_POLYLINE_MESH(dat, obj);
-      LOG_TRACE ("POLYLINE_MESH not yet supported")
+      LOG_TRACE ("POLYLINE_MESH not yet supported");
       break;
     case DWG_TYPE_SOLID:
       // dwg_geojson_SOLID(dat, obj);
-      LOG_TRACE ("SOLID not yet supported")
+      LOG_TRACE ("SOLID not yet supported");
       break;
     case DWG_TYPE_TRACE:
       // dwg_geojson_TRACE(dat, obj);
-      LOG_TRACE ("TRACE not yet supported")
+      LOG_TRACE ("TRACE not yet supported");
       break;
     case DWG_TYPE_ELLIPSE:
-      // dwg_geojson_ELLIPSE(dat, obj);
-      LOG_TRACE ("ELLIPSE not yet supported")
-      break;
+      {
+        Dwg_Entity_ELLIPSE *_obj = obj->tio.entity->tio.ELLIPSE;
+        double major_r = hypot (_obj->sm_axis.x, _obj->sm_axis.y);
+        double minor_r = major_r * _obj->axis_ratio;
+        double axis_angle = atan2 (_obj->sm_axis.y, _obj->sm_axis.x);
+        double ang_step, ang;
+        double start_angle = _obj->start_angle;
+        double end_angle = _obj->end_angle;
+        double angle_span;
+        BITCODE_2BD *pts;
+        int num_pts;
+        // Default to full ellipse if angles are 0 and 2*PI
+        if (start_angle == 0.0 && end_angle == 0.0)
+          end_angle = 2 * M_PI;
+        start_angle = angle_normalize (start_angle);
+        end_angle = angle_normalize (end_angle);
+        if (end_angle < start_angle)
+          end_angle += 2 * M_PI;
+        angle_span = end_angle - start_angle;
+        num_pts = calc_curve_segments (dwg, major_r, angle_span);
+        pts = (BITCODE_2BD *)malloc (num_pts * sizeof (BITCODE_2BD));
+        if (!pts)
+          {
+            LOG_ERROR ("Out of memory");
+            return DWG_ERR_OUTOFMEM;
+          }
+        ang_step = angle_span / num_pts;
+        ang = start_angle;
+        for (int j = 0; j < num_pts; j++, ang += ang_step)
+          {
+            double cos_a = cos (ang);
+            double sin_a = sin (ang);
+            pts[j].x = _obj->center.x
+                       + major_r * cos_a * cos (axis_angle)
+                       - minor_r * sin_a * sin (axis_angle);
+            pts[j].y = _obj->center.y
+                       + major_r * cos_a * sin (axis_angle)
+                       + minor_r * sin_a * cos (axis_angle);
+          }
+        FEATURE (AcDbEntity : AcDbEllipse, obj);
+        GEOMETRY (Polygon)
+        KEY (coordinates);
+        ARRAY;
+        ARRAY;
+        for (int j = 0; j < num_pts; j++)
+          {
+            VALUE_2DPOINT (pts[j].x, pts[j].y)
+          }
+        LASTVALUE_2DPOINT (pts[0].x, pts[0].y);
+        LASTENDARRAY;
+        LASTENDARRAY;
+        ENDGEOMETRY;
+        ENDFEATURE;
+        free (pts);
+        return 1;
+      }
     case DWG_TYPE_SPLINE:
-      // dwg_geojson_SPLINE(dat, obj);
-      LOG_TRACE ("SPLINE not yet supported")
+      {
+        Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        BITCODE_BL num_pts;
+        int use_fit_pts;
+        // Use fit points if available, otherwise control points
+        if (_obj->num_fit_pts > 0 && _obj->fit_pts)
+          {
+            num_pts = _obj->num_fit_pts;
+            use_fit_pts = 1;
+          }
+        else if (_obj->num_ctrl_pts > 0 && _obj->ctrl_pts)
+          {
+            num_pts = _obj->num_ctrl_pts;
+            use_fit_pts = 0;
+          }
+        else
+          break;
+        FEATURE (AcDbEntity : AcDbSpline, obj);
+        GEOMETRY (LineString);
+        KEY (coordinates);
+        ARRAY;
+        for (BITCODE_BL j = 0; j < num_pts; j++)
+          {
+            double px, py;
+            if (use_fit_pts)
+              {
+                px = _obj->fit_pts[j].x;
+                py = _obj->fit_pts[j].y;
+              }
+            else
+              {
+                px = _obj->ctrl_pts[j].x;
+                py = _obj->ctrl_pts[j].y;
+              }
+            if (j == num_pts - 1)
+              LASTVALUE_2DPOINT (px, py)
+            else
+              VALUE_2DPOINT (px, py)
+          }
+        LASTENDARRAY;
+        ENDGEOMETRY;
+        ENDFEATURE;
+        return 1;
+      }
       break;
     case DWG_TYPE_HATCH:
       // dwg_geojson_HATCH(dat, obj);
@@ -949,11 +1067,11 @@ dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
       break;
     case DWG_TYPE_RAY:
       // dwg_geojson_RAY(dat, obj);
-      LOG_TRACE ("RAY not yet supported")
+      LOG_TRACE ("RAY not yet supported");
       break;
     case DWG_TYPE_XLINE:
       // dwg_geojson_XLINE(dat, obj);
-      LOG_TRACE ("XLINE not yet supported")
+      LOG_TRACE ("XLINE not yet supported");
       break;
     case DWG_TYPE_TEXT:
       {
@@ -981,7 +1099,7 @@ dwg_geojson_object (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
       }
     case DWG_TYPE_MLINE:
       // dwg_geojson_MLINE(dat, obj);
-      LOG_TRACE ("MLINE not yet supported")
+      LOG_TRACE ("MLINE not yet supported");
       break;
     case DWG_TYPE_LWPOLYLINE:
       return dwg_geojson_LWPOLYLINE (dat, obj, is_last);
@@ -1003,7 +1121,7 @@ geojson_entities_write (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
     {
       int is_last = i == dwg->num_objects - 1;
       Dwg_Object *obj = &dwg->object[i];
-      success = dwg_geojson_object (dat, obj, is_last);
+      success = dwg_geojson_object (dat, dwg, obj, is_last);
       if (is_last && !success) // needed for the LASTFEATURE comma. end with an
                                // empty dummy
         {

@@ -58,7 +58,7 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
                const char *restrict subclass, const char *restrict fieldname,
                const char *restrict key, int index)
 {
-  Dwg_DYNAPI_field field;
+  Dwg_DYNAPI_field field = { 0 };
   enum RESBUF_VALUE_TYPE vtype;
   Dwg_Version_Type dwg_version = dwg->header.version;
 
@@ -407,7 +407,7 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
   // check all fields against dxf->fields
   for (; f->value; f++)
     {
-      Dwg_DYNAPI_field field;
+      Dwg_DYNAPI_field field = { 0 };
       const Dwg_DYNAPI_field *fp, *fp1;
       enum RESBUF_VALUE_TYPE vtype;
       if (!f->name || !*f->name)
@@ -849,7 +849,7 @@ test_dxf (const struct _unknown_dxf *dxf, const char *restrict name,
           if (dwg.object[i].fixedtype >= DWG_TYPE_UNKNOWN_ENT)
             break;
           if (strNE (dwg.object[i].dxfname, dxf->name))
-            LOG_WARN ("Invalid handle 0x%X for %s", dxf->handle, dxf->name)
+            LOG_WARN ("Invalid handle 0x%X for %s", dxf->handle, dxf->name);
           else
             error += test_object (&dwg, &dwg.object[i], dxf, name);
           break;
@@ -938,7 +938,7 @@ main (int argc, char *argv[])
                 {
                   free (dwgfile);
                   if (!g_counter) // use --enable-debug
-                    LOG_WARN ("Unhandled %s", dxf->name)
+                    LOG_WARN ("Unhandled %s", dxf->name);
                   continue;
                 }
             }
@@ -956,7 +956,7 @@ main (int argc, char *argv[])
       // GH #268. skip 2018/Helix.dwg. podman works fine.
       if (is_docker && strEQ (dxffile, "test/test-data/2018/Helix.dxf"))
         {
-          LOG_ERROR ("Skip %s in docker", dwgfile)
+          LOG_ERROR ("Skip %s in docker", dwgfile);
           free (dwgfile);
           continue;
         }
@@ -977,7 +977,7 @@ main (int argc, char *argv[])
             strncpy (path, "../../../", sizeof (path) - 1);
           strncat (path, dwgfile, sizeof (path) - 1);
           if (stat (path, &attrib))
-            LOG_WARN ("%s not found\n", path)
+            LOG_WARN ("%s not found\n", path);
           else
             error += test_dxf (dxf, name, path);
         }

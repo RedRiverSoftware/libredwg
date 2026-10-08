@@ -64,20 +64,21 @@ help (void)
 {
   printf ("\nUsage: dwg2dxf [OPTION]... DWGFILES...\n");
   printf ("Converts DWG files to DXF.\n");
-  printf ("Default DXFFILE: DWGFILE with .dxf extension in the current "
-          "directory.\n"
+  printf ("Default DXFFILE: DWGFILE with .dxf extension (.dxb with -b) in the "
+          "current directory.\n"
           "Existing files are not overwritten, unless -y is given.\n"
           "\n");
 #ifdef HAVE_GETOPT_LONG
   printf ("  -v[0-9], --verbose [0-9]  verbosity\n");
   printf ("  --as rNNNN                save as version\n");
-  printf ("           Valid versions:\n");
-  printf ("             r12, r14, r2000, r2004, r2007, r2010, r2013\n");
-  printf ("           Planned versions:\n");
-  printf ("             r9, r10, r11, r2018\n");
+  printf ("              Valid versions:\n");
+  printf (
+      "                r12, r14, r2000, r2004, r2007, r2010, r2013, r2018\n");
+  printf ("              Experimental versions:\n");
+  printf ("                r9, r10, r11\n");
   printf ("  -m, --minimal             only $ACADVER, HANDSEED and "
           "ENTITIES\n");
-  printf ("  -b, --binary              save as binary DXF\n");
+  printf ("  -b, --binary              save as binary DXB\n");
   printf ("  -y, --overwrite           overwrite existing files\n");
   printf ("  -o outfile, --file        optional, only valid with one single "
           "DWGFILE\n");
@@ -88,9 +89,10 @@ help (void)
   printf ("  -v[0-9]     verbosity\n");
   printf ("  -a rNNNN    save as version\n");
   printf ("              Valid versions:\n");
-  printf ("                r12, r14, r2000 (default)\n");
-  printf ("              Planned versions:\n");
-  printf ("                r9, r10, r11, r2004, r2007, r2010, r2013, r2018\n");
+  printf (
+      "                r12, r14, r2000, r2004, r2007, r2010, r2013, r2018\n");
+  printf ("              Experimental versions:\n");
+  printf ("                r9, r10, r11\n");
   printf ("  -m          minimal, only $ACADVER, HANDSEED and ENTITIES\n");
   printf ("  -b          save as binary DXF\n");
   printf ("  -y          overwrite existing files\n");
@@ -198,7 +200,7 @@ main (int argc, char *argv[])
           dwg_version = dwg_version_as (optarg);
           if (dwg_version == R_INVALID)
             {
-              fprintf (stderr, "Invalid version '%s'\n", argv[1]);
+              fprintf (stderr, "Invalid version '%s'\n", optarg);
               return usage ();
             }
           version = optarg;
@@ -246,7 +248,7 @@ main (int argc, char *argv[])
       if (!filename_out)
         {
           need_free = 1;
-          filename_out = suffix (filename_in, "dxf");
+          filename_out = suffix (filename_in, binary ? "dxb" : "dxf");
         }
       if (strEQ (filename_in, filename_out))
         {

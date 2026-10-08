@@ -186,7 +186,7 @@
   FIELD_RD (DIMRND, 40);
   FIELD_RD (DIMDLE, 40);
   FIELD_TFv (DIMBLK_T, 33, 1);
-  FIELD_RS (circle_zoom_percent, 0);
+  FIELD_RS (circle_zoom, 0);
   FIELD_RS (COORDS, 0);
 #ifdef IS_JSON
   FIELD_CMC (CECOLOR, 62);
@@ -306,8 +306,8 @@
   if (_obj->HANDSEED)
     {
       bit_write_RLL_BE (dat, _obj->HANDSEED->absolute_ref);
-      LOG_TRACE ("HANDSEED: " FORMAT_H " [H 5]\n",
-                 ARGS_H (_obj->HANDSEED->handleref));
+      LOG_TRACE ("HANDSEED: " FORMAT_RLLx " [H 5]\n",
+                 _obj->HANDSEED->absolute_ref);
     }
   else
     {
@@ -355,6 +355,18 @@
   DECODER {
     if (FIELD_VALUE (unit1_name))
       free (FIELD_VALUE (unit1_name));
+    if (FIELD_VALUE (unit2_name))
+      free (FIELD_VALUE (unit2_name));
+    if (FIELD_VALUE (unit3_name))
+      free (FIELD_VALUE (unit3_name));
+    if (FIELD_VALUE (unit4_name))
+      free (FIELD_VALUE (unit4_name));
+  }
+  FREE {
+    FIELD_TV (unit1_name, 0);
+    FIELD_TV (unit2_name, 0);
+    FIELD_TV (unit3_name, 0);
+    FIELD_TV (unit4_name, 0);
   }
   FIELD_TFv (unit1_name, 32, 1);
   FIELD_TFv (unit2_name, 32, 1);

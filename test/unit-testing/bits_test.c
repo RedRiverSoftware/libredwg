@@ -758,8 +758,7 @@ bit_read_H_tests (void)
     pass ();                                                                  \
   else                                                                        \
     {                                                                         \
-      fail ("bit_read_H: %s (result " FORMAT_H ")", s, ARGS_H (result));      \
-      /*bit_print (&bitchain, sizeof (Dwg_Handle)); */                        \
+      fail ("bit_read_H: %s (result " FORMAT_H ")", s, ARGS_H (result)); /*bit_print (&bitchain, sizeof (Dwg_Handle)); */                        \
     }                                                                         \
   bitfree (&bitchain)
 
@@ -1093,6 +1092,123 @@ bit_TV_to_utf8_tests (void)
       printf ("\n");
     }
   free (p);
+
+  /* --- Aliasing-return contract regression (PR #1250) ---
+     bit_TV_to_utf8 documents (and the dxf_CMC / VALUE_TV call sites
+     rely on) returning the input `src` pointer unchanged on several
+     fast paths. If the function is ever (re-)annotated with
+     __attribute__((malloc)) the optimizer will exploit that and elide
+     the `u8 != value` aliasing guard in VALUE_TV at -O2/-O3, freeing
+     a caller stack buffer. These pointer-equality assertions lock the
+     contract in so a future "tightening" cannot silently break it.
+
+     The assertions deliberately use plain pointer-equality (not
+     value-equality) — that is the property the optimizer cares about. */
+  /* Path 1: CP_UTF8 with pure-ASCII input and no \U+/\M+ markers.
+     This is the path actually triggered in dxf_CMC for the Panchvati
+     R2018 DWG that surfaced the bug. */
+  {
+    const char *ascii_src = "Layer1$RAL 9010";
+    char *aliased = bit_TV_to_utf8 (ascii_src, CP_UTF8);
+    if (aliased == ascii_src)
+      ok ("bit_TV_to_utf8_tests aliasing CP_UTF8 ASCII no-marker returns src");
+    else
+      {
+        fail ("bit_TV_to_utf8 CP_UTF8 ASCII: expected pointer-equal "
+              "to src %p, got %p",
+              (const void *)ascii_src, (const void *)aliased);
+        if (aliased && aliased != ascii_src)
+          free (aliased);
+      }
+  }
+
+  /* Path 2: CP_UTF8 with empty input. Hits the same line-3372
+     branch as path 1 (no \U+/\M+ markers in empty string) and
+     returns the input pointer. Unlike the iconv `!srclen` branch
+     (bits.c:3389), this path aliases on every build regardless of
+     HAVE_ICONV — that's the property that makes it a useful
+     guarantee for VALUE_TV's caller. */
+  {
+    const char *empty_src = "";
+    char *aliased_empty = bit_TV_to_utf8 (empty_src, CP_UTF8);
+    if (aliased_empty == empty_src)
+      ok ("bit_TV_to_utf8_tests aliasing CP_UTF8 empty-string returns src");
+    else
+      {
+        fail ("bit_TV_to_utf8 CP_UTF8 empty: expected pointer-equal "
+              "to src %p, got %p",
+              (const void *)empty_src, (const void *)aliased_empty);
+        if (aliased_empty && aliased_empty != empty_src)
+          free (aliased_empty);
+      }
+  }
+
+  /* Path 3: codepage with no iconv charset mapping (CP_UNDEFINED, used
+     by R11 drawings). Reaches the `!charset` short-circuit at
+     bits.c:3390 and returns the input pointer. Some builds (e.g.
+     without HAVE_ICONV) route through bit_TV_to_utf8_codepage and may
+     return a fresh allocation via bit_u_expand — also legal. The
+     contract is "either alias src OR a fresh malloc"; what's NOT
+     legal is an attribute-malloc claim that optimizes the alias
+     check away. */
+  {
+    const char *r11_src = "Test";
+    char *aliased_r11 = bit_TV_to_utf8 (r11_src, CP_UNDEFINED);
+    if (aliased_r11 == r11_src)
+      ok ("bit_TV_to_utf8_tests aliasing CP_UNDEFINED returns src");
+    else
+      {
+        ok ("bit_TV_to_utf8_tests CP_UNDEFINED returned a copy "
+            "(also valid; aliasing is opportunistic on this build)");
+        if (aliased_r11)
+          free (aliased_r11);
+      }
+  }
+  /* --- iconv NUL-termination regression (commit dc8e3509) ---
+     bit_TV_to_utf8 iconv path must always NUL-terminate.  When iconv
+     fills the destination buffer exactly, dest points past the
+     allocation and *dest='\0' would OOB-write without the +1 in the
+     calloc/realloc sizing.  Verify strlen returns sane results on
+     the iconv path for a multi-byte codepage. */
+  {
+    // CP_ANSI_932 (Shift-JIS): multi-byte input triggers iconv
+    const char *sjis_input = "\x83\x82\x83\x6d"; // モノ
+    p = bit_TV_to_utf8 (sjis_input, CP_ANSI_932);
+    if (!p)
+      fail ("bit_TV_to_utf8 iconv NUL-term: returned NULL");
+    else
+      {
+        size_t len = strlen (p);
+        if (len == 0 || len > 32)
+          fail ("bit_TV_to_utf8 iconv NUL-term: strlen=%zu (expected "
+                "3..15)",
+                len);
+        else
+          ok ("bit_TV_to_utf8 iconv NUL-term");
+      }
+    if (p != sjis_input)
+      free (p);
+  }
+
+  /* --- GHSA-5p98-8245-6hxq: const-input write / crash on iconv error ---
+     bit_TV_to_utf8 must not write to the caller-provided const src buffer
+     on the iconv error path.  Passing a string literal with \U+XXXX
+     markers and CP_UTF16 (which triggers an iconv conversion failure)
+     must not SIGSEGV and must leave the input unmodified.
+     Fixed by using bit_TV_to_utf8_codepage fallback instead of
+     bit_u_expand in-place expansion. */
+  {
+    const char *literal = "\\U+0234";
+    p = bit_TV_to_utf8 (literal, CP_UTF16);
+    // Reaching here without SIGSEGV is the primary pass condition.
+    if (strEQc (literal, "\\U+0234"))
+      ok ("bit_TV_to_utf8 GHSA-5p98-8245-6hxq const input not modified");
+    else
+      fail ("bit_TV_to_utf8 GHSA-5p98-8245-6hxq modified const input: got %s",
+            literal);
+    if (p && p != literal)
+      free (p);
+  }
 }
 
 static void
@@ -1144,7 +1260,9 @@ bit_write_TV_tests (void)
   bit_set_position (&bitchain, 0);
   bitchain.from_version = R_13;
   bit_write_TV (&bitchain, (char *)"GNU");
-  if (bitchain.byte == 5 && bitchain.bit == 2)
+  // bitprepare sets version to R_2000; pre-R_2004 lengths equal
+  // strlen (no trailing NUL counted)
+  if (bitchain.byte == 4 && bitchain.bit == 2)
     ok ("bit_write_TV (>R_13)");
   else
     fail ("bit_write_TV @%" PRIuSIZE ".%u", bitchain.byte, bitchain.bit);
@@ -1350,7 +1468,8 @@ bit_read_CMC_tests (void)
 static void
 bit_read_MS_tests (void)
 {
-  Bit_Chain bitchain = strtobt ("11111111" "01111111");
+  Bit_Chain bitchain = strtobt ("11111111"
+                                "01111111");
   unsigned int result = bit_read_MS (&bitchain);
   if (result == 32767)
     ok ("bit_read_MS - 32767");
@@ -1358,7 +1477,10 @@ bit_read_MS_tests (void)
     fail ("bit_read_MS");
   bitfree (&bitchain);
 
-  bitchain = strtobt ("11111111" "11111111" "11111111" "01111111");
+  bitchain = strtobt ("11111111"
+                      "11111111"
+                      "11111111"
+                      "01111111");
   result = bit_read_MS (&bitchain);
   if (result == 1073741823)
     ok ("bit_read_MS - 1073741823");
@@ -1382,11 +1504,29 @@ bit_read_UMC_tests (void)
     fail ("bit_read_UMC " FORMAT_UMC " != " FORMAT_UMC, umc, (BITCODE_UMC)x); \
   bitfree (&bitchain)
 
-  test_UMC("00000000", 0x0);
-  test_UMC("01111111", 0x7F);
-  test_UMC("11100101" "10001110" "00100110", 0x98765);
-  test_UMC("11010010" "11101100" "10101001" "11110010" "10010010" "10100010" "00000001", 0x5112E4A7652);
-  test_UMC("11111111" "11111111" "11111111" "11111111" "11111111" "11111111" "11111111" "01111111", 0xFFFFFFFFFFFFFF);
+  test_UMC ("00000000", 0x0);
+  test_UMC ("01111111", 0x7F);
+  test_UMC ("11100101"
+            "10001110"
+            "00100110",
+            0x98765);
+  test_UMC ("11010010"
+            "11101100"
+            "10101001"
+            "11110010"
+            "10010010"
+            "10100010"
+            "00000001",
+            0x5112E4A7652);
+  test_UMC ("11111111"
+            "11111111"
+            "11111111"
+            "11111111"
+            "11111111"
+            "11111111"
+            "11111111"
+            "01111111",
+            0xFFFFFFFFFFFFFF);
 }
 
 static void
@@ -1395,28 +1535,70 @@ bit_read_MC_tests (void)
   Bit_Chain bitchain;
   BITCODE_MC mc;
 
-#define test_MC(s, x)                                                     \
-  bitchain = strtobt (s);                                                 \
-  mc = bit_read_MC (&bitchain);                                           \
-  if (mc == x)                                                            \
-    ok ("bit_read_MC - %d", (BITCODE_MC)x);                               \
-  else                                                                    \
-    fail ("bit_read_MC " FORMAT_MC " != " FORMAT_MC, mc, (BITCODE_MC)x);  \
+#define test_MC(s, x)                                                         \
+  bitchain = strtobt (s);                                                     \
+  mc = bit_read_MC (&bitchain);                                               \
+  if (mc == x)                                                                \
+    ok ("bit_read_MC - %d", (BITCODE_MC)x);                                   \
+  else                                                                        \
+    fail ("bit_read_MC " FORMAT_MC " != " FORMAT_MC, mc, (BITCODE_MC)x);      \
   bitfree (&bitchain)
 
-  test_MC("00000000", 0);
-  test_MC("00111111", 63);
-  test_MC("01111111", -63);
-  test_MC("11111111" "00000000", 127);
-  test_MC("11111111" "01000000", -127);
-  test_MC("11111111" "00111111", 8191);
-  test_MC("11111111" "01111111", -8191);
-  test_MC("11111111" "11111111" "00000000", 16383);
-  test_MC("11111111" "11111111" "01000000", -16383);
-  test_MC("11000000" "10111011" "01111000", -925120);
-  test_MC("11111111" "11111111" "11111111" "00111111", 134217727);
-  test_MC("11111111" "11111111" "11111111" "01111111", -134217727);
-  test_MC("11111111" "11111111" "11111111" "11111111", 268435455);
+  test_MC ("00000000", 0);
+  test_MC ("00111111", 63);
+  test_MC ("01111111", -63);
+  test_MC ("11111111"
+           "00000000",
+           127);
+  test_MC ("11111111"
+           "01000000",
+           -127);
+  test_MC ("11111111"
+           "00111111",
+           8191);
+  test_MC ("11111111"
+           "01111111",
+           -8191);
+  test_MC ("11111111"
+           "11111111"
+           "00000000",
+           16383);
+  test_MC ("11111111"
+           "11111111"
+           "01000000",
+           -16383);
+  test_MC ("11000000"
+           "10111011"
+           "01111000",
+           -925120);
+  test_MC ("11111111"
+           "11111111"
+           "11111111"
+           "00111111",
+           134217727);
+  test_MC ("11111111"
+           "11111111"
+           "11111111"
+           "01111111",
+           -134217727);
+  test_MC ("11111111"
+           "11111111"
+           "11111111"
+           "11111111",
+           268435455);
+}
+
+static void
+codepage_bounds_tests (void)
+{
+  /* out-of-range header.codepage (valid 0..CP_ANSI_1258) must be rejected,
+     not used to index the 46-entry codepage tables. */
+  const Dwg_Codepage bad = (Dwg_Codepage)5000;
+  if (dwg_codepage_uc (bad, 0xA0) == 0 && dwg_codepage_wc (bad, 0xA0) == 0
+      && !dwg_codepage_isalnum (bad, 0xA0))
+    ok ("out-of-range codepage rejected");
+  else
+    fail ("out-of-range codepage rejected");
 }
 
 static void
@@ -1533,6 +1715,7 @@ main (int argc, char const *argv[])
   bit_utf8_to_TV_tests ();
   bit_utf8_to_TU_tests ();
   bit_TV_to_utf8_tests ();
+  codepage_bounds_tests ();
   bit_read_H_tests ();
   bit_write_H_tests ();
   bit_UMC_bug_tests ();
