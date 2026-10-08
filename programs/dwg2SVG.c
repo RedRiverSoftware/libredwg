@@ -61,18 +61,27 @@
 #include "suffix.inc"
 #include "my_getopt.h"
 
-/* Per-call rendering state.  Marked _Thread_local so concurrent calls to
-   the SVG entry points in dwg_svg_api.c don't trample each other — each
-   thread gets its own copy.  This replaced a process-wide mutex that
-   previously serialised all renderer calls. */
-static _Thread_local int opts = 0;
-static _Thread_local int mspace = 0; // only mspace, even when pspace is defined
-static _Thread_local int in_block_definition = 0; // 1 when outputting block symbol entities
-static _Thread_local int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
+/* Per-call rendering state.  Thread-local so concurrent calls to the SVG
+   entry points in dwg_svg_api.c don't trample each other — each thread
+   gets its own copy.  This replaced a process-wide mutex that previously
+   serialised all renderer calls.  MSVC's default C mode has no
+   _Thread_local, so it gets __declspec(thread); dwg_svg_api.c defines the
+   same macro before including this file. */
+#ifndef DWG_SVG_THREAD_LOCAL
+#  if defined(_MSC_VER) && !defined(__clang__)
+#    define DWG_SVG_THREAD_LOCAL __declspec (thread)
+#  else
+#    define DWG_SVG_THREAD_LOCAL _Thread_local
+#  endif
+#endif
+static DWG_SVG_THREAD_LOCAL int opts = 0;
+static DWG_SVG_THREAD_LOCAL int mspace = 0; // only mspace, even when pspace is defined
+static DWG_SVG_THREAD_LOCAL int in_block_definition = 0; // 1 when outputting block symbol entities
+static DWG_SVG_THREAD_LOCAL int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 /* > 0 while re-rendering Model_Space content through a Paper_Space VIEWPORT;
    holds that viewport's model→paper scale factor.  Used by entity_dasharray
    to implement PSLTSCALE=1 (dash lengths uniform in paper units). */
-static _Thread_local double viewport_ltype_scale = 0.0;
+static DWG_SVG_THREAD_LOCAL double viewport_ltype_scale = 0.0;
 
 // Case-insensitive prefix match
 static int
@@ -122,7 +131,7 @@ strcasestr_compat (const char *haystack, const char *needle)
   return NULL;
 #endif
 }
-static _Thread_local double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
+static DWG_SVG_THREAD_LOCAL double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
 /* Block-local origin shift applied while emitting a block's symbol contents,
    so that path coords stay in a precision-safe range (≲ 1e6) even when the
    block's entities live in million-scale block-local coords (a common DWG
@@ -131,11 +140,11 @@ static _Thread_local double block_base_x = 0.0, block_base_y = 0.0; // current b
    subtract these.  output_INSERT adds R·S·offset to its <use> translate so
    the final on-canvas position is unchanged.  Zero by default ⇒ no-op for
    normal small-coord blocks. */
-static _Thread_local double current_block_offset_x = 0.0;
-static _Thread_local double current_block_offset_y = 0.0;
-_Thread_local Dwg_Data g_dwg;
-_Thread_local double model_xmin, model_ymin, model_xmax, model_ymax;
-_Thread_local double page_width, page_height, scale;
+static DWG_SVG_THREAD_LOCAL double current_block_offset_x = 0.0;
+static DWG_SVG_THREAD_LOCAL double current_block_offset_y = 0.0;
+DWG_SVG_THREAD_LOCAL Dwg_Data g_dwg;
+DWG_SVG_THREAD_LOCAL double model_xmin, model_ymin, model_xmax, model_ymax;
+DWG_SVG_THREAD_LOCAL double page_width, page_height, scale;
 
 // Extents calculation structure
 typedef struct _Extents
@@ -147,10 +156,10 @@ typedef struct _Extents
 static void
 extents_init (Extents *ext)
 {
-  ext->xmin = INFINITY;
-  ext->ymin = INFINITY;
-  ext->xmax = -INFINITY;
-  ext->ymax = -INFINITY;
+  ext->xmin = (double)INFINITY;
+  ext->ymin = (double)INFINITY;
+  ext->xmax = -(double)INFINITY;
+  ext->ymax = -(double)INFINITY;
   ext->initialized = 0;
 }
 
@@ -333,8 +342,8 @@ static char *insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
    output_BLOCK_HEADER to drive the layer-0-in-block inheritance rule.
    The BlockCombo machinery below assigns these before each <defs>
    clone emission and resets them to NULL afterwards. */
-static _Thread_local const char *current_eff_layer = NULL;
-static _Thread_local const char *current_eff_layer_safe = NULL;
+static DWG_SVG_THREAD_LOCAL const char *current_eff_layer = NULL;
+static DWG_SVG_THREAD_LOCAL const char *current_eff_layer_safe = NULL;
 
 /* ── Block-clone table ────────────────────────────────────────────────────
    Defined here (rather than later in the file) so output_INSERT, which is
@@ -354,9 +363,9 @@ typedef struct
   double offset_y;
 } BlockCombo;
 
-static _Thread_local BlockCombo *g_block_combos = NULL;
-static _Thread_local unsigned int g_block_combos_n = 0;
-static _Thread_local unsigned int g_block_combos_cap = 0;
+static DWG_SVG_THREAD_LOCAL BlockCombo *g_block_combos = NULL;
+static DWG_SVG_THREAD_LOCAL unsigned int g_block_combos_n = 0;
+static DWG_SVG_THREAD_LOCAL unsigned int g_block_combos_cap = 0;
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -3061,7 +3070,7 @@ output_SPLINE (Dwg_Object *obj)
      larger than any reasonable control polygon and avoids a per-call
      malloc.  Thread-local because dwg2SVG can be linked into a library
      used by multiple threads (the C# bindings do this). */
-  static _Thread_local BITCODE_3DPOINT samples[SPLINE_SAMPLE_CAP];
+  static DWG_SVG_THREAD_LOCAL BITCODE_3DPOINT samples[SPLINE_SAMPLE_CAP];
   int n_samples;
   int i;
   int emitted = 0;
@@ -3772,8 +3781,8 @@ typedef struct
   char *name;               /* HTML-escaped layer name (heap) */
 } LayerHandleEntry;
 
-static _Thread_local LayerHandleEntry *g_layer_htbl = NULL;
-static _Thread_local unsigned int g_layer_htbl_n = 0;
+static DWG_SVG_THREAD_LOCAL LayerHandleEntry *g_layer_htbl = NULL;
+static DWG_SVG_THREAD_LOCAL unsigned int g_layer_htbl_n = 0;
 
 static void
 build_layer_handle_table (Dwg_Data *dwg)
@@ -4001,7 +4010,7 @@ block_representative_point (Dwg_Object *blk_obj, double *out_x, double *out_y)
   e = get_first_owned_entity (blk_obj);
   while (e && n < BLK_REP_MAX_SAMPLES)
     {
-      BITCODE_3BD ocs_pt = { NAN, NAN, NAN };
+      BITCODE_3BD ocs_pt = { (double)NAN, (double)NAN, (double)NAN };
       BITCODE_3BD extrusion = { 0.0, 0.0, 1.0 };
       BITCODE_3BD wcs_pt;
       int got = 0;
@@ -4050,7 +4059,7 @@ block_representative_point (Dwg_Object *blk_obj, double *out_x, double *out_y)
             Dwg_Entity_SPLINE *s = e->tio.entity->tio.SPLINE;
             /* SPLINE has no extrusion field — ctrl_pts/fit_pts are already
                in WCS, so no transform_OCS step is needed. */
-            double sx = NAN, sy = NAN;
+            double sx = (double)NAN, sy = (double)NAN;
             if (s->scenario == 2 && s->fit_pts && s->num_fit_pts > 0)
               {
                 sx = s->fit_pts[0].x;
@@ -5241,7 +5250,7 @@ table_name_is (const Dwg_Data *dwg, char *name, const char *want)
 
 /* Set when the model-space viewBox was taken from the saved VPORT view
    rather than computed geometry extents (see below). */
-static _Thread_local int used_vport_view = 0;
+static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
 
 /* Zoom-extents framing breaks down when a drawing scatters geometry
    absurdly far apart — e.g. a GA drawn at Ordnance-Survey millimetre
@@ -5644,7 +5653,7 @@ main (int argc, char *argv[])
 #ifdef HAVE_GETOPT_LONG
   int option_index = 0;
   /* Not static: &opts is no longer a constant expression because `opts` is
-     _Thread_local.  Auto storage allows runtime initializers. */
+     thread-local.  Auto storage allows runtime initializers. */
   struct option long_options[]
       = { { "verbose", 1, &opts, 1 }, // optional
           { "mspace", 0, 0, 0 },      { "force-free", 0, 0, 0 },
