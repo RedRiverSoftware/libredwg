@@ -406,9 +406,16 @@ help (void)
 }
 #endif /* !DWG2SVG_NO_MAIN */
 
+/* Angle in degrees for an SVG rotate() of a point-symmetric shape (an
+   ellipse).  At the top level the output is Y-down, which negates angles;
+   180 - angle is the same rotation as -angle for such a shape.  Inside
+   block definitions and viewports the coordinates are still Y-up and the
+   parent transform does the flip, so the DWG angle is used as is. */
 static double
 transform_ANGLE (double angle)
 {
+  if (in_block_definition)
+    return angle;
   return 180 - angle;
 }
 
@@ -2571,7 +2578,8 @@ output_ELLIPSE (Dwg_Object *obj)
       }
     else if (arc_span > 2.0 * M_PI - 1e-6)
       {
-        /* Full ellipse — same emit as before this fix. */
+        /* Full ellipse: a native <ellipse>, rotated by transform_ANGLE,
+           which depends on the frame (in_block_definition). */
         printf ("\t<ellipse id=\"dwg-object-%d\" cx=\"%f\" cy=\"%f\" rx=\"%f\" "
                 "ry=\"%f\" transform=\"rotate(%f %f %f)\"\n\t",
                 obj->index, svg_cx, svg_cy,
@@ -3373,57 +3381,27 @@ output_INSERT (Dwg_Object *obj)
       rotation_deg = (in_block_definition ? 1.0 : -1.0) * (180.0 / M_PI)
                      * insert->rotation;
 
-      // Symbol has geometry at raw DWG coords (x, y).
-      // We need to transform to SVG coords:
-      //   Final model X = ins_pt.x - base_pt.x + scale.x * (geom.x - base_pt.x) 
-      //   Final model Y = ins_pt.y - base_pt.y + scale.y * (geom.y - base_pt.y)
-      // But symbol stores raw geom coords, so:
-      //   Final model X = ins_pt.x - base_pt.x + scale.x * geom.x - scale.x * base_pt.x
-      //                 = ins_pt.x - base_pt.x * (1 + scale.x) + scale.x * geom.x
-      // Actually simpler: for symbols with raw coords, INSERT needs to:
-      //   1. Translate symbol so base_pt is at origin: subtract base_pt
-      //   2. Apply scale and rotation  
-      //   3. Translate to ins_pt
-      //   4. Transform to SVG coords
-      //
-      // Using matrix(a, b, c, d, e, f): (x, y) -> (ax + cy + e, bx + dy + f)
-      // We want rotation=0 case first:
-      //   X' = sx * (geom.x - base_pt.x) + ins_pt.x
-      //      = sx * geom.x + (ins_pt.x - sx * base_pt.x)
-      //   In SVG: X' - model_xmin = sx * geom.x + (ins_pt.x - sx * base_pt.x - model_xmin)
-      //
-      //   Y' = sy * (geom.y - base_pt.y) + ins_pt.y
-      //   In SVG: page_height - (Y' - model_ymin)
-      //         = page_height - sy * geom.y - ins_pt.y + sy * base_pt.y + model_ymin
-      //         = -sy * geom.y + (page_height - ins_pt.y + sy * base_pt.y + model_ymin)
-      //
-      // So matrix is: (sx, 0, 0, -sy, tx, ty) where
-      //   tx = ins_pt.x - sx * base_pt.x - model_xmin
-      //   ty = page_height - ins_pt.y + sy * base_pt.y + model_ymin
-      {
-        double sx = insert->scale.x;
-        double sy = insert->scale.y;
-        double base_x = hdr->base_pt.x;
-        double base_y = hdr->base_pt.y;
-        if (in_block_definition)
-          {
-            /* Raw DWG coords — the parent transform (viewport matrix or
-               enclosing INSERT's <use>) handles the final mapping.  When the
-               enclosing block carries an origin shift, its direct geometry is
-               emitted in the shifted frame (transform_X/Y subtract
-               current_block_offset_*), so this nested INSERT's placement must
-               be shifted by the same amount to stay aligned with it.  The
-               child block's own offset, if any, is compensated separately
-               below. */
-            tx = ins_pt.x - sx * base_x - current_block_offset_x;
-            ty = ins_pt.y - sy * base_y - current_block_offset_y;
-          }
-        else
-          {
-            tx = ins_pt.x - sx * base_x - model_xmin;
-            ty = page_height - ins_pt.y + sy * base_y + model_ymin;
-          }
-      }
+      /* An INSERT draws a block point g at ins_pt + R·S·(g - base_pt).  The
+         <use> below applies translate(tx, ty) · rotate · scale to the
+         symbol's coordinates, so (tx, ty) starts as the insertion point in
+         the output frame, and R·S·(offset - base_pt) is added to it further
+         down, once the block's origin shift is known. */
+      if (in_block_definition)
+        {
+          /* Raw DWG coords — the parent transform (viewport matrix or
+             enclosing INSERT's <use>) handles the final mapping.  When the
+             enclosing block carries an origin shift, its direct geometry is
+             emitted in the shifted frame (transform_X/Y subtract
+             current_block_offset_*), so this nested INSERT's placement must
+             be shifted by the same amount to stay aligned with it. */
+          tx = ins_pt.x - current_block_offset_x;
+          ty = ins_pt.y - current_block_offset_y;
+        }
+      else
+        {
+          tx = ins_pt.x - model_xmin;
+          ty = page_height - ins_pt.y + model_ymin;
+        }
 
       {
         /* In block definitions / viewports the parent transform provides the
@@ -3475,36 +3453,35 @@ output_INSERT (Dwg_Object *obj)
           }
         suffix = eff_safe ? eff_safe : "_0";
 
-        /* If the referenced block carries an origin shift (used to keep its
-           path coords in a precision-safe range — see current_block_offset_*
-           and BlockCombo.offset_*), add R·S·offset to (tx, ty) so the final
-           on-canvas position is identical to the un-shifted rendering.  The
-           transform applied to a path point is T(tx,ty) · R(rot) · S(sx,
-           y_scale), so the compensation is the same transform applied to
-           (offset_x, offset_y). */
-        if (off_x != 0.0 || off_y != 0.0)
-          {
-            double sxo = insert->scale.x * off_x;
-            double syo = y_scale * off_y;
-            if (fabs (insert->rotation) < 0.0001)
-              {
-                tx += sxo;
-                ty += syo;
-              }
-            else
-              {
-                /* SVG rotate uses rotation_deg (computed above, with
-                   its sign depending on in_block_definition).  Matrix is
-                     [cos -sin]
-                     [sin  cos]
-                   applied to (sxo, syo). */
-                double rad = rotation_deg * M_PI / 180.0;
-                double c = cos (rad);
-                double s = sin (rad);
-                tx += c * sxo - s * syo;
-                ty += s * sxo + c * syo;
-              }
-          }
+        /* The symbol holds the block's points less its origin shift, if it
+           has one (used to keep its path coords in a precision-safe range —
+           see current_block_offset_* and BlockCombo.offset_*).  The transform
+           applied to a symbol point p = g - offset is T(tx,ty) · R(rot) ·
+           S(sx, y_scale), so for g to land at ins_pt + R·S·(g - base_pt),
+           (tx, ty) needs R·S·(offset - base_pt) added: the base point
+           rotates with the block. */
+        {
+          double dx = insert->scale.x * (off_x - hdr->base_pt.x);
+          double dy = y_scale * (off_y - hdr->base_pt.y);
+          if (fabs (insert->rotation) < 0.0001)
+            {
+              tx += dx;
+              ty += dy;
+            }
+          else
+            {
+              /* SVG rotate uses rotation_deg (computed above, with
+                 its sign depending on in_block_definition).  Matrix is
+                   [cos -sin]
+                   [sin  cos]
+                 applied to (dx, dy). */
+              double rad = rotation_deg * M_PI / 180.0;
+              double c = cos (rad);
+              double s = sin (rad);
+              tx += c * dx - s * dy;
+              ty += s * dx + c * dy;
+            }
+        }
 
         printf ("\t<!-- insert-%d -->\n", obj->index);
         /* If we couldn't resolve an effective layer (entity_layer_name
