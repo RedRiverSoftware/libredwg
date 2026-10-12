@@ -1824,7 +1824,7 @@ output_MTEXT (Dwg_Object *obj)
   const char *fontfamily;
   double cap_height_ratio;
   double font_size;
-  double line_dy;        /* em units; sign flipped inside block defs */
+  double line_dy;        /* em units */
   BITCODE_H style_ref;
   Dwg_Object *o;
   Dwg_Object_STYLE *style;
@@ -1878,12 +1878,11 @@ output_MTEXT (Dwg_Object *obj)
     double lsf = mtext->linespace_factor;
     if (lsf <= 0.0)
       lsf = 1.0;
+    /* Positive in every context: inside block definitions the <text>
+       element carries its own scale(1 -1) (or the equivalent rotation
+       matrix) that undoes the parent's y-flip, so dy already advances
+       downward on the page there too. */
     line_dy = 1.2 * lsf;
-    /* In block definitions the parent transform="scale(1 -1)" flips the
-       y-axis, so dy advances upward in display space.  Negate to keep
-       successive lines visually below each other. */
-    if (in_block_definition)
-      line_dy = -line_dy;
   }
 
   runs = mtext_parse (mtext->text, mtext->text_height);
@@ -3366,8 +3365,13 @@ output_INSERT (Dwg_Object *obj)
         return;
       transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
 
-      // Negate rotation for SVG coordinate system (Y flipped)
-      rotation_deg = -(180.0 / M_PI) * insert->rotation;
+      /* At the top level the output is in Y-down page coordinates and
+         this INSERT does the y-flip itself (y_scale below), so the angle
+         is negated.  Inside block definitions and paper-space viewports
+         the coordinates are still Y-up and the parent transform does the
+         flip, so the DWG angle is used as is. */
+      rotation_deg = (in_block_definition ? 1.0 : -1.0) * (180.0 / M_PI)
+                     * insert->rotation;
 
       // Symbol has geometry at raw DWG coords (x, y).
       // We need to transform to SVG coords:
@@ -3489,8 +3493,8 @@ output_INSERT (Dwg_Object *obj)
               }
             else
               {
-                /* SVG rotate uses rotation_deg (computed above as
-                   -(180/pi)*insert->rotation).  Matrix is
+                /* SVG rotate uses rotation_deg (computed above, with
+                   its sign depending on in_block_definition).  Matrix is
                      [cos -sin]
                      [sin  cos]
                    applied to (sxo, syo). */
