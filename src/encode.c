@@ -2845,6 +2845,16 @@ r2004_pad_page (Bit_Chain *dat, size_t page_end)
     }
 }
 
+/* Store v little-endian at p */
+static void
+r2004_put_RL (BITCODE_RC *p, uint32_t v)
+{
+  p[0] = (BITCODE_RC)(v & 0xFF);
+  p[1] = (BITCODE_RC)((v >> 8) & 0xFF);
+  p[2] = (BITCODE_RC)((v >> 16) & 0xFF);
+  p[3] = (BITCODE_RC)((v >> 24) & 0xFF);
+}
+
 static uint32_t
 r2004_checksum (uint32_t seed, BITCODE_RC *data, uint32_t size)
 {
@@ -2861,23 +2871,20 @@ r2004_write_system_page (Bit_Chain *dat, uint32_t page_type,
                          Bit_Chain *payload)
 {
   size_t start = dat->byte;
+  uint32_t size = (uint32_t)payload->byte;
   uint32_t comp_size, checksum;
   BITCODE_RC hdr[20];
-  r2004_ensure (dat, 20 + stored_R2004_section_size (payload->byte) + 0x20);
+  r2004_ensure (dat, 20 + stored_R2004_section_size (size) + 0x20);
   dat->byte += 20;
-  store_R2004_section (dat, payload->chain, payload->byte, &comp_size);
-  memset (hdr, 0, sizeof (hdr));
-  for (int k = 0; k < 4; k++)
-    {
-      hdr[k] = (page_type >> (8 * k)) & 0xFF;
-      hdr[4 + k] = (payload->byte >> (8 * k)) & 0xFF;
-      hdr[8 + k] = (comp_size >> (8 * k)) & 0xFF;
-      hdr[12 + k] = (2 >> (8 * k)) & 0xFF;
-    }
+  store_R2004_section (dat, payload->chain, size, &comp_size);
+  r2004_put_RL (&hdr[0], page_type);
+  r2004_put_RL (&hdr[4], size);
+  r2004_put_RL (&hdr[8], comp_size);
+  r2004_put_RL (&hdr[12], 2);
+  r2004_put_RL (&hdr[16], 0);
   checksum = r2004_checksum (0, hdr, 20);
   checksum = r2004_checksum (checksum, &dat->chain[start + 20], comp_size);
-  for (int k = 0; k < 4; k++)
-    hdr[16 + k] = (checksum >> (8 * k)) & 0xFF;
+  r2004_put_RL (&hdr[16], checksum);
   memcpy (&dat->chain[start], hdr, 20);
 }
 
@@ -2959,7 +2966,7 @@ encode_r2004_pages (Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
           // every page holds max_decomp_size bytes, zero padded: AutoCAD
           // refuses a compressed page that decompresses to less
           memset (page_buf, 0, s->max_decomp_size);
-          memcpy (page_buf, &src->chain[p->offset], chunk);
+          memcpy (page_buf, &src->chain[(size_t)p->offset], chunk);
           r2004_ensure (dat, 32 + s->max_decomp_size + 0x200);
           dat->byte += 32;
           if (s->compressed == 2)
@@ -2985,17 +2992,12 @@ encode_r2004_pages (Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
           {
             BITCODE_RC hdr[32];
             for (int n = 0; n < 8; n++)
-              for (int b = 0; b < 4; b++)
-                hdr[n * 4 + b] = (clear[n] >> (8 * b)) & 0xFF;
+              r2004_put_RL (&hdr[n * 4], clear[n]);
             clear[6] = r2004_checksum (clear[7], hdr, 32);
           }
           mask = 0x4164536b ^ (uint32_t)p->address;
           for (int n = 0; n < 8; n++)
-            {
-              uint32_t v = clear[n] ^ mask;
-              for (int b = 0; b < 4; b++)
-                dat->chain[p->address + n * 4 + b] = (v >> (8 * b)) & 0xFF;
-            }
+            r2004_put_RL (&dat->chain[p->address + n * 4], clear[n] ^ mask);
           LOG_TRACE ("page %u %s[%u] @0x%" PRIx64 " size 0x%x data 0x%x\n",
                      p->number, dwg_section_name (dwg, s->type), k,
                      (uint64_t)p->address, p->size, data_size);
@@ -3102,8 +3104,8 @@ encode_r2004_pages (Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
   _obj->x40 = 0x40;
   _obj->section_map_id = pmap_id;
   _obj->section_map_address = pmap_address - 0x100;
-  _obj->section_info_id = smap_id;
-  _obj->section_array_size = pmap_id;
+  _obj->section_info_id = (BITCODE_RLd)smap_id;
+  _obj->section_array_size = (BITCODE_RLd)pmap_id;
   _obj->gap_array_size = 0;
   memset (_obj->padding, 0, sizeof (_obj->padding));
   {
@@ -3132,8 +3134,7 @@ encode_r2004_pages (Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
     memset (&hdr[0x68], 0, 4);
     crc32 = bit_calc_CRC32 (0, hdr, 0x6c);
     _obj->crc32 = crc32;
-    for (int b = 0; b < 4; b++)
-      hdr[0x68 + b] = (crc32 >> (8 * b)) & 0xFF;
+    r2004_put_RL (&hdr[0x68], crc32);
     LOG_TRACE ("crc32: 0x%x\n", crc32);
     decrypt_R2004_header (&dat->chain[0x80], hdr, 0x80);
     // second copy at the end: a blank page map header, then the
@@ -3205,11 +3206,11 @@ link_BLOCKS_entities (Dwg_Data *restrict dwg)
               pent->next_entity
                   = dwg_add_handleref (dwg, 4, o->handle.value, NULL);
               // prev sits between handle - 1 and handle + 1
-              pent->nolinks = pent->prev_entity
+              pent->nolinks = (BITCODE_B)(pent->prev_entity
                               && pent->prev_entity->absolute_ref
                               && pent->prev_entity->absolute_ref + 1
                                      == prev->handle.value
-                              && prev->handle.value + 1 == o->handle.value;
+                              && prev->handle.value + 1 == o->handle.value);
             }
           if (!num)
             _obj->first_entity
