@@ -30,4 +30,5 @@ api_process (dwg_object *obj)
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, action_offset_x, BD);
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, action_offset_y, BD);
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, angle_offset, BD);
+  CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, xy_type, RC);
 }

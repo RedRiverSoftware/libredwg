@@ -8136,11 +8136,12 @@ typedef struct _dwg_object_CSACDOCUMENTOPTIONS
   BITCODE_BL num_deps;                          \
   BITCODE_H *deps
 
-// XY action params
+// XY action params. angle_offset is not stored in DWG files.
 #define BLOCKACTION_doubles_fields              \
   BITCODE_BD action_offset_x;                   \
   BITCODE_BD action_offset_y;                   \
-  BITCODE_BD angle_offset
+  BITCODE_BD angle_offset;                      \
+  BITCODE_RC xy_type /* DXF 280 */
 
 #define BLOCKGRIP_fields                        \
   BLOCKELEMENT_fields;                          \

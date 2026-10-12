@@ -4039,8 +4039,9 @@ bit_upconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color)
             color->method = 0xc1;
         }
       color->rgb = color->method << 0x18;
+      // ACI keeps the palette index in the low byte, as AutoCAD writes it
       if (color->method == 0xc3)
-        color->rgb |= dwg_rgb_palette_index (color->index);
+        color->rgb |= color->index & 0xFF;
       else if (color->method == 0xc2)
         color->rgb |= 0x00ffffff;
     }
@@ -4099,6 +4100,18 @@ bit_write_CMC (Bit_Chain *dat, Bit_Chain *str_dat, Dwg_Color *restrict color)
       bit_write_BS (dat, 0); // index override
       if (!color->method && color->rgb & 0xFF000000)
         color->method = color->rgb >> 0x18;
+      else if (!color->method && color->index > 0 && color->index < 256)
+        {
+          // a palette index only, as the add API sets it: ACI, with the
+          // index in the low byte as AutoCAD writes it
+          color->method = 0xc3;
+          color->rgb = 0xc3000000 | color->index;
+        }
+      else if (!color->method && color->index == 256)
+        {
+          color->method = 0xc0;
+          color->rgb = 0xc0000000;
+        }
       else if (!color->method)
         {
           // default uninitialized CMC to ByBlock

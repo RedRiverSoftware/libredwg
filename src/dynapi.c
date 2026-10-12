@@ -6239,6 +6239,8 @@ static const Dwg_DYNAPI_field _dwg_BLOCKFLIPACTION_fields[] = {
     0,0,0, 0 },
   { "angle_offset",	"BD", sizeof (BITCODE_BD),  OFF (struct _dwg_object_BLOCKFLIPACTION, angle_offset),
     0,0,0, 0 },
+  { "xy_type",	"RC", sizeof (BITCODE_RC),  OFF (struct _dwg_object_BLOCKFLIPACTION, xy_type),
+    0,0,0, 280 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_BLOCKFLIPGRIP: (sorted by offset) */
@@ -6665,6 +6667,8 @@ static const Dwg_DYNAPI_field _dwg_BLOCKMOVEACTION_fields[] = {
     0,0,0, 141 },
   { "angle_offset",	"BD", sizeof (BITCODE_BD),  OFF (struct _dwg_object_BLOCKMOVEACTION, angle_offset),
     0,0,0, 0 },
+  { "xy_type",	"RC", sizeof (BITCODE_RC),  OFF (struct _dwg_object_BLOCKMOVEACTION, xy_type),
+    0,0,0, 280 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_BLOCKPARAMDEPENDENCYBODY: (sorted by offset) */
@@ -7129,6 +7133,8 @@ static const Dwg_DYNAPI_field _dwg_BLOCKSTRETCHACTION_fields[] = {
     0,0,0, 141 },
   { "angle_offset",	"BD", sizeof (BITCODE_BD),  OFF (struct _dwg_object_BLOCKSTRETCHACTION, angle_offset),
     0,0,0, 0 },
+  { "xy_type",	"RC", sizeof (BITCODE_RC),  OFF (struct _dwg_object_BLOCKSTRETCHACTION, xy_type),
+    0,0,0, 280 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_BLOCKUSERPARAMETER: (sorted by offset) */

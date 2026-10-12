@@ -3348,11 +3348,11 @@ DWG_OBJECT_END
     FIELD_3BD (stretch_pt, 0);
   } */
 
+// AutoCAD's DXF has 140, 141 and 280 here; angle_offset is not in the file.
 #define AcDbBlockAction_doubles_fields            \
   FIELD_BD (action_offset_x, 140);                \
   FIELD_BD (action_offset_y, 141);                \
-  FIELD_BD (angle_offset, 0);                     \
-  DXF { VALUE_RC ((BITCODE_RC)1, 280); } /* Action XY type. 1? */
+  FIELD_RC (xy_type, 280)
 
 #define AcDbBlockConstraintParameter_fields                \
   AcDbBlock2PtParameter_fields;                            \
