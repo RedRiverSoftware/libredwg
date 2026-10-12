@@ -1239,10 +1239,9 @@ new_document_with_block (const Dwg_Version_Type version)
 static int
 write_and_read (Dwg_Data *dwg, const char *file, Dwg_Data *read)
 {
-  struct_stat_t attrib;
   int error;
-  if (!stat (file, &attrib))
-    unlink (file);
+  // dwg_write_file refuses to overwrite a file
+  unlink (file);
   error = dwg_write_file (file, dwg);
   dwg_free (dwg);
   free (dwg);
@@ -1266,7 +1265,8 @@ test_r2004_write (void)
 {
   const char *file = "add_r2004_write.dwg";
   Dwg_Data read;
-  struct_stat_t attrib;
+  FILE *fp;
+  long size = -1;
   unsigned lines = 0, inserts = 0, layer0 = 0, named = 1;
   BITCODE_BL widths = 0;
 
@@ -1278,10 +1278,17 @@ test_r2004_write (void)
   if (read.header.version != R_2004)
     fail ("r2004_write: version %d", (int)read.header.version);
   // pages were once padded to 1.6 MB
-  if (!stat (file, &attrib) && attrib.st_size < 64 * 1024)
-    ok ("r2004_write: size %ld", (long)attrib.st_size);
+  fp = fopen (file, "rb");
+  if (fp)
+    {
+      if (!fseek (fp, 0, SEEK_END))
+        size = ftell (fp);
+      fclose (fp);
+    }
+  if (size > 0 && size < 64 * 1024)
+    ok ("r2004_write: size %ld", size);
   else
-    fail ("r2004_write: size %ld", (long)attrib.st_size);
+    fail ("r2004_write: size %ld", size);
 
   // one empty descriptor first, then only named sections; no descriptors
   // for the section map or page map pages
