@@ -15,6 +15,7 @@ api_process (dwg_object *obj)
   BITCODE_BL num_codes;
   Dwg_BLOCKSTRETCHACTION_codes *codes;
   BLOCKACTION_doubles_fields;
+  BITCODE_RC xy_type;
 
   Dwg_Version_Type dwg_version = obj->parent->header.version;
   // #ifdef DEBUG_CLASSES

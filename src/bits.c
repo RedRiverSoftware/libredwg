@@ -4018,8 +4018,12 @@ bit_read_CMC (Bit_Chain *dat, Bit_Chain *str_dat, Dwg_Color *restrict color)
           color->method = 0xc2;
           color->rgb = 0xc2000000 | (color->rgb & 0xffffff);
         }
-      // fixup index by palette lookup
-      color->index = dwg_find_color_index (color->rgb);
+      // ACI keeps the palette index in the low byte, as AutoCAD writes it.
+      // Otherwise fixup index by palette lookup.
+      if (color->method == 0xc3)
+        color->index = color->rgb & 0xFF;
+      else
+        color->index = dwg_find_color_index (color->rgb);
     }
   return 0;
 }

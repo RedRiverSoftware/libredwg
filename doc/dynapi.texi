@@ -7439,8 +7439,6 @@ BD
 BD
 @item angle_offset
 BD
-@item xy_type
-RC
 
 @end vtable
 @end indentedblock

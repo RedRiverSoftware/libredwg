@@ -1842,13 +1842,19 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
             }
           LOG_INFO ("Page count %u in area %d\n", info->num_sections, i);
           free (info->sections);
-          info->sections = (Dwg_Section **)calloc (info->num_sections,
-                                                   sizeof (Dwg_Section *));
-          if (!info->sections)
+          info->sections = NULL;
+          // AutoCAD writes a first descriptor without pages
+          if (info->num_sections)
             {
-              free (dec.chain);
-              LOG_ERROR ("Out of memory with %u sections", info->num_sections);
-              return error | DWG_ERR_OUTOFMEM;
+              info->sections = (Dwg_Section **)calloc (
+                  info->num_sections, sizeof (Dwg_Section *));
+              if (!info->sections)
+                {
+                  free (dec.chain);
+                  LOG_ERROR ("Out of memory with %u sections",
+                             info->num_sections);
+                  return error | DWG_ERR_OUTOFMEM;
+                }
             }
           prev_address = 0;
 

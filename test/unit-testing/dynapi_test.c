@@ -37893,21 +37893,6 @@ static int test_BLOCKFLIPACTION (const Dwg_Object *obj)
     else
         fail ("BLOCKFLIPACTION.parent [struct _dwg_object_object*]");
   }
-  {
-    BITCODE_RC xy_type;
-    if (dwg_dynapi_entity_value (blockflipaction, "BLOCKFLIPACTION", "xy_type", &xy_type, NULL)
-        && xy_type == blockflipaction->xy_type)
-      pass ();
-    else
-      fail ("BLOCKFLIPACTION.xy_type [RC] %u != %u", blockflipaction->xy_type, xy_type);
-    xy_type++;
-    if (dwg_dynapi_entity_set_value (blockflipaction, "BLOCKFLIPACTION", "xy_type", &xy_type, 0)
-        && xy_type == blockflipaction->xy_type)
-      pass ();
-    else
-      fail ("BLOCKFLIPACTION.xy_type [RC] set+1 %u != %u", blockflipaction->xy_type, xy_type);
-    blockflipaction->xy_type--;
-  }
   if (failed && (is_class_unstable ("BLOCKFLIPACTION") || is_class_debugging ("BLOCKFLIPACTION")))
     {
       ok ("%s failed %d tests (TODO unstable)", "BLOCKFLIPACTION", failed);

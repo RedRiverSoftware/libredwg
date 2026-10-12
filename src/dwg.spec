@@ -5523,10 +5523,20 @@ DWG_ENTITY (LWPOLYLINE)
     SINCE (R_2010b) {
       FIELD_VECTOR (vertexids, BL, num_vertexids, 91);
     }
-    // A width pair of zero BDs takes only 4 bits, so REPEAT's check of
-    // sizeof (Dwg_LWPOLYLINE_width) bits per pair rejects valid polylines.
+    // A width pair can take only 4 bits (two BDs of 0.0 or 1.0), so
+    // REPEAT's check of sizeof (Dwg_LWPOLYLINE_width) bits per pair
+    // rejects valid polylines.
     VALUEOUTOFBOUNDS (num_widths, 20000)
-    REPEAT_C (num_widths, widths, Dwg_LWPOLYLINE_width)
+#ifdef IS_DECODER
+    if ((int64_t)FIELD_VALUE (num_widths) * 4 > AVAIL_BITS (dat))
+      {
+        LOG_ERROR ("Invalid LWPOLYLINE.num_widths %u",
+                   (unsigned)FIELD_VALUE (num_widths));
+        FIELD_VALUE (num_widths) = 0;
+        return DWG_ERR_VALUEOUTOFBOUNDS;
+      }
+#endif
+    REPEAT_CN (FIELD_VALUE (num_widths), widths, Dwg_LWPOLYLINE_width)
     REPEAT_BLOCK
         SUB_FIELD_BD (widths[rcount1],start, 40);
         SUB_FIELD_BD (widths[rcount1],end, 41);

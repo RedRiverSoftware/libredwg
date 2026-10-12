@@ -8140,8 +8140,7 @@ typedef struct _dwg_object_CSACDOCUMENTOPTIONS
 #define BLOCKACTION_doubles_fields              \
   BITCODE_BD action_offset_x;                   \
   BITCODE_BD action_offset_y;                   \
-  BITCODE_BD angle_offset;                      \
-  BITCODE_RC xy_type /* DXF 280 */
+  BITCODE_BD angle_offset
 
 #define BLOCKGRIP_fields                        \
   BLOCKELEMENT_fields;                          \
@@ -8547,6 +8546,7 @@ typedef struct _dwg_object_BLOCKMOVEACTION
   BLOCKACTION_fields;
   Dwg_BLOCKACTION_connectionpts conn_pts[2]; /*!< DXF 92-93, 301-302 */
   BLOCKACTION_doubles_fields;
+  BITCODE_RC xy_type; /* DXF 280 */
 } Dwg_Object_BLOCKMOVEACTION;
 
 typedef struct _dwg_object_BLOCKPOINTPARAMETER
@@ -8668,6 +8668,7 @@ typedef struct _dwg_object_BLOCKSTRETCHACTION
   BITCODE_BL num_codes; // 75
   Dwg_BLOCKSTRETCHACTION_codes *codes;  /*!< DXF 95, 76, 94 */
   BLOCKACTION_doubles_fields;
+  BITCODE_RC xy_type; /* DXF 280 */
 } Dwg_Object_BLOCKSTRETCHACTION;
 
 typedef struct _dwg_object_BLOCKUSERPARAMETER
