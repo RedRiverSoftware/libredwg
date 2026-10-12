@@ -1530,6 +1530,98 @@ test_viewport_vx_realloc (void)
 }
 #endif
 
+// dwg->block_control is a copy of the BLOCK_CONTROL object, which readers
+// such as out_dxf and dwg2SVG walk to find blocks. Each dwg_add_BLOCK_HEADER()
+// reallocs the control's entries, so it must refresh the copy, which must
+// also match the control after dwg_add_Document().
+static int
+test_block_control_refresh (const Dwg_Version_Type version)
+{
+  const char *vername = dwg_version_type (version);
+  Dwg_Data *dwg;
+  Dwg_Object *ctrlobj;
+  Dwg_Object_BLOCK_CONTROL *ctrl;
+  BITCODE_RLL handles[20];
+  int i, error;
+
+  failed = 0;
+  dwg = dwg_new_Document (version, 0, tracelevel);
+  if (!dwg)
+    {
+      fail ("block_control %s: dwg_new_Document failed", vername);
+      return numfailed ();
+    }
+  ctrlobj = dwg_get_first_object (dwg, DWG_TYPE_BLOCK_CONTROL);
+  if (!ctrlobj)
+    {
+      fail ("block_control %s: no BLOCK_CONTROL", vername);
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  ctrl = ctrlobj->tio.object->tio.BLOCK_CONTROL;
+  if (dwg->block_control.num_entries != ctrl->num_entries
+      || dwg->block_control.entries != ctrl->entries)
+    fail ("block_control %s: copy has %u entries, BLOCK_CONTROL %u, after "
+          "dwg_new_Document",
+          vername, (unsigned)dwg->block_control.num_entries,
+          (unsigned)ctrl->num_entries);
+
+  for (i = 0; i < 20; i++)
+    {
+      char name[16];
+      Dwg_Object_BLOCK_HEADER *blk;
+      Dwg_Object *blkobj;
+      Dwg_Object_Ref *last;
+      BITCODE_BS n;
+
+      snprintf (name, sizeof (name), "B%d", i);
+      blk = dwg_add_BLOCK_HEADER (dwg, name);
+      blkobj = blk ? dwg_obj_generic_to_object (blk, &error) : NULL;
+      if (!blkobj)
+        {
+          fail ("block_control %s: dwg_add_BLOCK_HEADER %s failed", vername,
+                name);
+          break;
+        }
+      handles[i] = blkobj->handle.value;
+      if (dwg->block_control.num_entries != ctrl->num_entries
+          || dwg->block_control.entries != ctrl->entries)
+        {
+          fail ("block_control %s: copy has %u entries, BLOCK_CONTROL %u, "
+                "after adding %s",
+                vername, (unsigned)dwg->block_control.num_entries,
+                (unsigned)ctrl->num_entries, name);
+          break;
+        }
+      n = dwg->block_control.num_entries;
+      last = n ? dwg->block_control.entries[n - 1] : NULL;
+      if (!last || last->absolute_ref != handles[i])
+        {
+          fail ("block_control %s: last entry is not %s " FORMAT_RLLx,
+                vername, name, handles[i]);
+          break;
+        }
+    }
+  // all blocks still found after the entries were realloc'ed
+  for (int j = 0; !failed && j < i; j++)
+    {
+      int found = 0;
+      for (unsigned k = 0; k < dwg->block_control.num_entries; k++)
+        if (dwg->block_control.entries[k]
+            && dwg->block_control.entries[k]->absolute_ref == handles[j])
+          found = 1;
+      if (!found)
+        fail ("block_control %s: block B%d " FORMAT_RLLx " not in entries",
+              vername, j, handles[j]);
+    }
+  if (!failed)
+    ok ("block_control %s: refreshed by dwg_add_BLOCK_HEADER", vername);
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1558,6 +1650,8 @@ main (int argc, char *argv[])
 #else
   error = test_mlinestyle_obj_realloc ();
 #endif
+  error += test_block_control_refresh (R_2000);
+  error += test_block_control_refresh (R_11);
   error += test_names ();
   error += test_api_version ();
 

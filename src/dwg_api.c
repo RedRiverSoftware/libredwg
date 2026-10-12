@@ -25324,6 +25324,7 @@ dwg_add_Document (Dwg_Data *restrict dwg, const int imperial)
   dwg->header_vars.BLOCK_RECORD_MSPACE->obj = mspaceobj;
   block_control->model_space
       = dwg_add_handleref (dwg, 3, mspaceobj->handle.value, NULL);
+  dwg->block_control = *block_control;
   if (version >= R_13b1)
     {
       // BLOCK_RECORD_PSPACE: (5.1.20)
@@ -27977,7 +27978,9 @@ dwg_add_BLOCK_CONTROL (Dwg_Data *restrict dwg, const unsigned ms,
   return _obj;
 }
 
-#define API_ADD_TABLE(record, control, ...)                                   \
+/* Leaves the new record in _record (NULL without a name), and its control in
+   _ctrl, for code that must run after it. API_ADD_TABLE returns _record. */
+#define API_ADD_TABLE_NORETURN(record, control, ...)                          \
   Dwg_Object_##record *_record = NULL; /* first check TABLE_CONTROL */        \
   Dwg_Object *ctrl = dwg_get_first_object (dwg, DWG_TYPE_##control);          \
   Dwg_Object_##control *_ctrl;                                                \
@@ -28031,15 +28034,17 @@ dwg_add_BLOCK_CONTROL (Dwg_Data *restrict dwg, const unsigned ms,
       LOG_TRACE (#record ".ownerhandle = " FORMAT_REF "\n",                  \
                  ARGS_REF (obj->tio.object->ownerhandle));                    \
       _obj->is_xref_ref = 1;                                                  \
-      return _obj;                                                            \
-    }                                                                         \
-  else                                                                        \
-    return NULL
+    }
+
+#define API_ADD_TABLE(record, control, ...)                                   \
+  API_ADD_TABLE_NORETURN (record, control, __VA_ARGS__);                      \
+  return _record
 
 EXPORT Dwg_Object_BLOCK_HEADER *
 dwg_add_BLOCK_HEADER (Dwg_Data *restrict dwg, const char *restrict name)
 {
-  API_ADD_TABLE (BLOCK_HEADER, BLOCK_CONTROL);
+  API_ADD_TABLE_NORETURN (BLOCK_HEADER, BLOCK_CONTROL);
+  // dwg->block_control is a copy, and the entries may have been realloc'ed
   dwg->block_control = *_ctrl;
   return _record;
 }
