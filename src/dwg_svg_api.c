@@ -32,10 +32,10 @@
 #include <dwg_api.h>
 #include <dwg_svg_api.h>
 
-/* dwg2SVG.c's file-scope globals (g_dwg, model_xmin/ymin/xmax/ymax,
-   page_width/height, scale, in_block_definition, block_base_x/y, mspace,
-   opts, paper_space_bg) plus this file's writer-callback pair below are
-   all thread-local, so concurrent calls to the public API don't trample
+/* dwg2SVG.c's mutable file-scope globals (the drawing, its extents and
+   page size, the options, and the block and layer state used while
+   rendering) plus this file's writer-callback pair below are all
+   thread-local, so concurrent calls to the public API don't trample
    each other's state.  Each thread gets its own copy of every variable.
 
    MSVC's default C mode has no _Thread_local; __declspec(thread) gives
