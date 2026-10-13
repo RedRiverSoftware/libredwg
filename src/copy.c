@@ -463,10 +463,12 @@ static int copy_common_object (Copy_Chain *restrict cdat,
                                const Dwg_Object *restrict srcobj);
 static int copy_fixup_before (Copy_Chain *restrict cdat,
                               Dwg_Object *restrict obj,
-                              const Dwg_Object *restrict srcobj);
+                              const Dwg_Object *restrict srcobj,
+                              const Dwg_Object_Type type);
 static int copy_fixup_after (Copy_Chain *restrict cdat,
                              Dwg_Object *restrict obj,
-                             const Dwg_Object *restrict srcobj);
+                             const Dwg_Object *restrict srcobj,
+                             const Dwg_Object_Type type);
 static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                        const Dwg_DYNAPI_field *fields, void *restrict _obj);
 
@@ -496,9 +498,9 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
     memcpy (_obj, src, sizeof (Dwg_Entity_##token));                          \
     _obj->parent = obj->tio.entity;                                           \
     obj->tio.entity->tio.token = _obj;                                        \
-    error |= copy_fixup_before (CHAIN, obj, srcobj);                          \
+    error |= copy_fixup_before (CHAIN, obj, srcobj, DWG_TYPE_##token);        \
     error |= dwg_copy_##token##_private (dat, dat, dat, obj);                 \
-    error |= copy_fixup_after (CHAIN, obj, srcobj);                           \
+    error |= copy_fixup_after (CHAIN, obj, srcobj, DWG_TYPE_##token);         \
     error |= copy_sweep (CHAIN, obj,                                          \
                          dwg_dynapi_entity_fields (DYNAPI_NAME (token)),      \
                          _obj);                                               \
@@ -543,9 +545,9 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
     memcpy (_obj, src, sizeof (Dwg_Object_##token));                          \
     _obj->parent = obj->tio.object;                                           \
     obj->tio.object->tio.token = _obj;                                        \
-    error |= copy_fixup_before (CHAIN, obj, srcobj);                          \
+    error |= copy_fixup_before (CHAIN, obj, srcobj, DWG_TYPE_##token);        \
     error |= dwg_copy_##token##_private (dat, dat, dat, obj);                 \
-    error |= copy_fixup_after (CHAIN, obj, srcobj);                           \
+    error |= copy_fixup_after (CHAIN, obj, srcobj, DWG_TYPE_##token);         \
     error |= copy_sweep (CHAIN, obj,                                          \
                          dwg_dynapi_entity_fields (DYNAPI_NAME (token)),      \
                          _obj);                                               \
@@ -1233,12 +1235,17 @@ copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
  * Fixups the specs can't express
  */
 
+/* type is the class of the generated function calling these, rather than
+   obj->fixedtype: where the compiler inlines them, it then drops the other
+   classes' cases, instead of seeing casts of the class's struct to larger
+   ones. */
 static int
 copy_fixup_before (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
-                   const Dwg_Object *restrict srcobj)
+                   const Dwg_Object *restrict srcobj,
+                   const Dwg_Object_Type type)
 {
   (void)srcobj;
-  switch (obj->fixedtype)
+  switch (type)
     {
     /* The specs free these with data_numbits / 8 bytes, which drops a
        partial last byte. */
@@ -1262,9 +1269,10 @@ copy_fixup_before (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
 
 static int
 copy_fixup_after (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
-                  const Dwg_Object *restrict srcobj)
+                  const Dwg_Object *restrict srcobj,
+                  const Dwg_Object_Type type)
 {
-  switch (obj->fixedtype)
+  switch (type)
     {
     /* The decoder points each dash's text into strings_area; point the
        copies into the copy of it. Texts held elsewhere (DXF imports) are
