@@ -1200,6 +1200,235 @@ test_mlinestyle_nonfinite_angle (void)
 }
 #endif
 
+/* A block with a line, two inserts of it, a line and a polyline with zero
+   widths in model space, for the r2000 and r2004 write tests. */
+static Dwg_Data *
+new_document_with_block (const Dwg_Version_Type version)
+{
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Entity_LWPOLYLINE *pline;
+  const dwg_point_3d p1 = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p2 = { 100.0, 50.0, 0.0 };
+  const dwg_point_3d ins = { 10.0, 10.0, 0.0 };
+  dwg_point_2d pts[8];
+
+  for (int i = 0; i < 8; i++)
+    {
+      pts[i].x = 10.0 * i;
+      pts[i].y = (i % 2) * 5.0;
+    }
+  blk = dwg_add_BLOCK_HEADER (dwg, "B1");
+  dwg_add_BLOCK (blk, "B1");
+  dwg_add_LINE (blk, &p1, &p2);
+  dwg_add_ENDBLK (blk);
+  dwg_add_INSERT (ms, &ins, "B1", 1.0, 1.0, 1.0, 0.0);
+  dwg_add_INSERT (ms, &p2, "B1", 2.0, 2.0, 1.0, 0.5);
+  dwg_add_LINE (ms, &p1, &p2);
+  pline = dwg_add_LWPOLYLINE (ms, 8, pts);
+  // zero widths: a pair then takes 4 bits
+  pline->flag |= 32;
+  pline->num_widths = 8;
+  pline->widths
+      = (Dwg_LWPOLYLINE_width *)calloc (8, sizeof (Dwg_LWPOLYLINE_width));
+  return dwg;
+}
+
+static int
+write_and_read (Dwg_Data *dwg, const char *file, Dwg_Data *read)
+{
+  int error;
+  // dwg_write_file refuses to overwrite a file
+  unlink (file);
+  error = dwg_write_file (file, dwg);
+  dwg_free (dwg);
+  free (dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("%s: dwg_write_file 0x%x", file, error);
+      return error;
+    }
+  memset (read, 0, sizeof (Dwg_Data));
+  read->opts = tracelevel;
+  error = dwg_read_file (file, read);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("%s: dwg_read_file 0x%x", file, error);
+  return error;
+}
+
+/* r2004: the page and section map layout of encode_r2004_pages, which
+   AutoCAD needs, as far as reading the file back can show it. */
+static int
+test_r2004_write (void)
+{
+  const char *file = "add_r2004_write.dwg";
+  Dwg_Data read;
+  FILE *fp;
+  long size = -1;
+  unsigned lines = 0, inserts = 0, layer0 = 0, named = 1;
+  BITCODE_BL widths = 0;
+
+  failed = 0;
+  if (write_and_read (new_document_with_block (R_2004), file, &read)
+      >= DWG_ERR_CRITICAL)
+    return numfailed ();
+
+  if (read.header.version != R_2004)
+    fail ("r2004_write: version %d", (int)read.header.version);
+  // pages were once padded to 1.6 MB
+  fp = fopen (file, "rb");
+  if (fp)
+    {
+      if (!fseek (fp, 0, SEEK_END))
+        size = ftell (fp);
+      fclose (fp);
+    }
+  if (size > 0 && size < 64 * 1024)
+    ok ("r2004_write: size %ld", size);
+  else
+    fail ("r2004_write: size %ld", size);
+
+  // one empty descriptor first, then only named sections; no descriptors
+  // for the section map or page map pages
+  if (read.header.section_infohdr.num_desc
+      && read.header.section_info[0].num_sections == 0
+      && !read.header.section_info[0].name[0])
+    ok ("r2004_write: empty first section descriptor");
+  else
+    fail ("r2004_write: no empty first section descriptor");
+  for (BITCODE_BL i = 1; i < read.header.section_infohdr.num_desc; i++)
+    {
+      Dwg_Section_Info *info = &read.header.section_info[i];
+      if (strncmp (info->name, "AcDb:", 5) != 0)
+        named = 0;
+      // every compressed page holds 0x7400 bytes when decompressed
+      if (info->compressed == 2 && info->max_decomp_size != 0x7400)
+        fail ("r2004_write: %s max_decomp_size 0x%x", info->name,
+              (unsigned)info->max_decomp_size);
+    }
+  if (named)
+    ok ("r2004_write: only named section descriptors");
+  else
+    fail ("r2004_write: unnamed section descriptor");
+
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    {
+      Dwg_Object *obj = &read.object[i];
+      if (obj->fixedtype == DWG_TYPE_LINE)
+        lines++;
+      else if (obj->fixedtype == DWG_TYPE_INSERT)
+        inserts++;
+      else if (obj->fixedtype == DWG_TYPE_LWPOLYLINE)
+        widths = obj->tio.entity->tio.LWPOLYLINE->num_widths;
+      else if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer = obj->tio.object->tio.LAYER;
+          // ACI 7, with the index in the low byte as AutoCAD writes it
+          if (layer->name && !strcmp (layer->name, "0")
+              && layer->color.index == 7 && layer->color.rgb == 0xc3000007)
+            layer0++;
+        }
+    }
+  if (lines == 2 && inserts == 2)
+    ok ("r2004_write: 2 lines, 2 inserts");
+  else
+    fail ("r2004_write: %u lines, %u inserts", lines, inserts);
+  if (widths == 8)
+    ok ("r2004_write: LWPOLYLINE zero widths read back");
+  else
+    fail ("r2004_write: LWPOLYLINE num_widths %u", (unsigned)widths);
+  if (layer0 == 1)
+    ok ("r2004_write: layer 0 colour ACI 7");
+  else
+    fail ("r2004_write: layer 0 colour");
+
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* r2000: each block's entity chain must end with an explicit null next
+   link. With nolinks set, an entity claims its neighbours are at
+   handle - 1 and handle + 1; AutoCAD refuses a last entity that does. */
+static int
+test_r2000_entity_links (void)
+{
+  const char *file = "add_r2000_links.dwg";
+  Dwg_Data read;
+  unsigned chains = 0;
+
+  failed = 0;
+  if (write_and_read (new_document_with_block (R_2000), file, &read)
+      >= DWG_ERR_CRITICAL)
+    return numfailed ();
+
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    {
+      Dwg_Object *obj = &read.object[i];
+      Dwg_Object_BLOCK_HEADER *blk;
+      BITCODE_RLL h, prev = 0;
+      unsigned n = 0;
+      if (obj->fixedtype != DWG_TYPE_BLOCK_HEADER)
+        continue;
+      blk = obj->tio.object->tio.BLOCK_HEADER;
+      if (!blk->first_entity || !blk->first_entity->absolute_ref
+          || !blk->last_entity)
+        continue;
+      h = blk->first_entity->absolute_ref;
+      while (h && n < 100)
+        {
+          Dwg_Object *o = dwg_resolve_handle (&read, h);
+          Dwg_Object_Entity *ent;
+          BITCODE_RLL linked_prev, next;
+          if (!o || o->supertype != DWG_SUPERTYPE_ENTITY)
+            {
+              fail ("r2000_links: " FORMAT_RLLx " is no entity", h);
+              break;
+            }
+          ent = o->tio.entity;
+          linked_prev = ent->nolinks ? h - 1
+                        : ent->prev_entity ? ent->prev_entity->absolute_ref
+                                           : 0;
+          next = ent->nolinks ? h + 1
+                 : ent->next_entity ? ent->next_entity->absolute_ref
+                                    : 0;
+          if (linked_prev != prev)
+            fail ("r2000_links: " FORMAT_RLLx " links back to " FORMAT_RLLx
+                  ", not " FORMAT_RLLx,
+                  h, linked_prev, prev);
+          prev = h;
+          if (h == blk->last_entity->absolute_ref)
+            {
+              if (next)
+                fail ("r2000_links: last entity " FORMAT_RLLx
+                      " links to " FORMAT_RLLx,
+                      h, next);
+              break;
+            }
+          h = next;
+          n++;
+        }
+      if (prev == blk->last_entity->absolute_ref)
+        chains++;
+      else
+        fail ("r2000_links: chain ends at " FORMAT_RLLx ", not " FORMAT_RLLx,
+              prev, blk->last_entity->absolute_ref);
+    }
+  // model space and B1
+  if (chains == 2)
+    ok ("r2000_links: 2 entity chains end with a null link");
+  else
+    fail ("r2000_links: %u entity chains", chains);
+
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
 static int
 test_names (void)
 {
@@ -1560,6 +1789,8 @@ main (int argc, char *argv[])
 #endif
   error += test_names ();
   error += test_api_version ();
+  error += test_r2004_write ();
+  error += test_r2000_entity_links ();
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

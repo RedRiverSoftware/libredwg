@@ -9,6 +9,7 @@ api_process (dwg_object *obj)
   BITCODE_BL i;
   BLOCKACTION_fields;
   BLOCKACTION_doubles_fields;
+  BITCODE_RC xy_type;
 
   Dwg_Version_Type dwg_version = obj->parent->header.version;
   dwg_obj_blockmoveaction *_obj = dwg_object_to_BLOCKMOVEACTION (obj);
@@ -30,4 +31,5 @@ api_process (dwg_object *obj)
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, action_offset_x, BD);
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, action_offset_y, BD);
   CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, angle_offset, BD);
+  CHK_ENTITY_TYPE (_obj, BLOCKMOVEACTION, xy_type, RC);
 }

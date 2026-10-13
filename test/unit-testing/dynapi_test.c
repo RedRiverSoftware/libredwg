@@ -40225,6 +40225,21 @@ static int test_BLOCKMOVEACTION (const Dwg_Object *obj)
     else
         fail ("BLOCKMOVEACTION.parent [struct _dwg_object_object*]");
   }
+  {
+    BITCODE_RC xy_type;
+    if (dwg_dynapi_entity_value (blockmoveaction, "BLOCKMOVEACTION", "xy_type", &xy_type, NULL)
+        && xy_type == blockmoveaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKMOVEACTION.xy_type [RC] %u != %u", blockmoveaction->xy_type, xy_type);
+    xy_type++;
+    if (dwg_dynapi_entity_set_value (blockmoveaction, "BLOCKMOVEACTION", "xy_type", &xy_type, 0)
+        && xy_type == blockmoveaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKMOVEACTION.xy_type [RC] set+1 %u != %u", blockmoveaction->xy_type, xy_type);
+    blockmoveaction->xy_type--;
+  }
   if (failed && (is_class_unstable ("BLOCKMOVEACTION") || is_class_debugging ("BLOCKMOVEACTION")))
     {
       ok ("%s failed %d tests (TODO unstable)", "BLOCKMOVEACTION", failed);
@@ -42766,6 +42781,21 @@ static int test_BLOCKSTRETCHACTION (const Dwg_Object *obj)
       pass ();
     else
       fail ("BLOCKSTRETCHACTION.pts [2RD*] * %u num_pts", count);
+  }
+  {
+    BITCODE_RC xy_type;
+    if (dwg_dynapi_entity_value (blockstretchaction, "BLOCKSTRETCHACTION", "xy_type", &xy_type, NULL)
+        && xy_type == blockstretchaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKSTRETCHACTION.xy_type [RC] %u != %u", blockstretchaction->xy_type, xy_type);
+    xy_type++;
+    if (dwg_dynapi_entity_set_value (blockstretchaction, "BLOCKSTRETCHACTION", "xy_type", &xy_type, 0)
+        && xy_type == blockstretchaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKSTRETCHACTION.xy_type [RC] set+1 %u != %u", blockstretchaction->xy_type, xy_type);
+    blockstretchaction->xy_type--;
   }
   if (failed && (is_class_unstable ("BLOCKSTRETCHACTION") || is_class_debugging ("BLOCKSTRETCHACTION")))
     {

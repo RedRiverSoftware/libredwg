@@ -1842,13 +1842,19 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
             }
           LOG_INFO ("Page count %u in area %d\n", info->num_sections, i);
           free (info->sections);
-          info->sections = (Dwg_Section **)calloc (info->num_sections,
-                                                   sizeof (Dwg_Section *));
-          if (!info->sections)
+          info->sections = NULL;
+          // AutoCAD writes a first descriptor without pages
+          if (info->num_sections)
             {
-              free (dec.chain);
-              LOG_ERROR ("Out of memory with %u sections", info->num_sections);
-              return error | DWG_ERR_OUTOFMEM;
+              info->sections = (Dwg_Section **)calloc (
+                  info->num_sections, sizeof (Dwg_Section *));
+              if (!info->sections)
+                {
+                  free (dec.chain);
+                  LOG_ERROR ("Out of memory with %u sections",
+                             info->num_sections);
+                  return error | DWG_ERR_OUTOFMEM;
+                }
             }
           prev_address = 0;
 
@@ -2384,10 +2390,10 @@ read_2004_section_classes (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                      dwg->dwg_class[i].item_class_id);
 
           dwg->dwg_class[i].num_instances = bit_read_BL (&sec_dat);
-          dwg->dwg_class[i].dwg_version = bit_read_BS (&sec_dat);
-          dwg->dwg_class[i].maint_version = bit_read_BS (&sec_dat);
+          dwg->dwg_class[i].dwg_version = bit_read_BL (&sec_dat);
+          dwg->dwg_class[i].maint_version = bit_read_BL (&sec_dat);
           dwg->dwg_class[i].unknown_1 = bit_read_BL (&sec_dat);
-          dwg->dwg_class[i].unknown_1 = bit_read_BL (&sec_dat);
+          dwg->dwg_class[i].unknown_2 = bit_read_BL (&sec_dat);
           LOG_TRACE ("num_instances:    %u\n",
                      dwg->dwg_class[i].num_instances);
           LOG_HANDLE ("dwg version:      %u (%u)\n",
