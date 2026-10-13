@@ -106,6 +106,17 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   if(NOT MSVC)
     add_test(add_test ${TARGET_SYSTEM_EMULATOR} add_test${CMAKE_EXECUTABLE_SUFFIX})
   endif()
+  add_executable(dynblocks_test
+    dynblocks_test.c
+    ../../src/logging.c
+    ../../src/classes.c
+    tests_common.h)
+  if(NOT MSVC)
+    add_test(dynblocks_test ${TARGET_SYSTEM_EMULATOR} dynblocks_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds test/test-data/2004/Dynblocks.dwg
+    set_tests_properties(dynblocks_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  endif()
   add_executable(summaryinfo_test
     summaryinfo_test.c
     ../../src/bits.c

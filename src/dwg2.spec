@@ -3205,22 +3205,30 @@ DWG_OBJECT (ASSOCNETWORK)
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
-#define AcDbBlockElement_fields                 \
-  AcDbEvalExpr_fields;                          \
-  SUBCLASS (AcDbBlockElement);                  \
-  FIELD_T (name, 300);                          \
-  DECODER {                                     \
-    FIELD_BL (be_major, 98);                    \
-    FIELD_BL (be_minor, 99);                    \
-  } else {                                      \
-    PRE (R_2007a) {                             \
-      VALUE_BL (25, 98);                        \
-      VALUE_BL (104, 99);                       \
-    } LATER_VERSIONS {                          \
-      VALUE_BL (33, 98);                        \
-      VALUE_BL (29, 99);                        \
-    }                                           \
-  }                                             \
+// be_major/be_minor: the DWG version and maintenance release a block element
+// was saved with: 25/76 from AutoCAD 2006 and 25/104 from AutoCAD 2027 in
+// r2004 files, 33/29 in r2018 files. DWG output writes them back when
+// be_major is the output version's default major: 25 before r2007, 33 from
+// r2007 on. New elements (0/0), elements of another DWG version, and DXF
+// output get the output version's defaults.
+#define BLOCK_ELEMENT_MAJOR (dat->version < R_2007a ? 25 : 33)
+#define BLOCK_ELEMENT_MINOR (dat->version < R_2007a ? 104 : 29)
+
+#define AcDbBlockElement_fields                                       \
+  AcDbEvalExpr_fields;                                                \
+  SUBCLASS (AcDbBlockElement);                                        \
+  FIELD_T (name, 300);                                                \
+  if (IF_IS_DXF                                                       \
+      || (IF_IS_ENCODER && _obj->be_major != BLOCK_ELEMENT_MAJOR))    \
+    {                                                                 \
+      VALUE_BL (BLOCK_ELEMENT_MAJOR, 98);                             \
+      VALUE_BL (BLOCK_ELEMENT_MINOR, 99);                             \
+    }                                                                 \
+  else                                                                \
+    {                                                                 \
+      FIELD_BL (be_major, 98);                                        \
+      FIELD_BL (be_minor, 99);                                        \
+    }                                                                 \
   FIELD_BL (eed1071, 1071)
 
 #define AcDbBlockGrip_fields                    \
