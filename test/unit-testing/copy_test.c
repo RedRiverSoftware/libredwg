@@ -2063,28 +2063,32 @@ write_unread_eed_drawing (const char *file)
                                  'g',  'n',  'C',  'e',  'n', 't', 'e', 'r',
                                  ' ',  'D',  'a',  't',  'a' };
   char path[256];
-  struct stat st;
-  unsigned char *data;
-  size_t bit;
+  unsigned char *data = NULL;
+  size_t size = 0, bit;
+  long end;
   FILE *fp;
   int found = 0, written = 0;
 
-  if (!test_file ("example_2000.dwg", path, sizeof (path))
-      || stat (path, &st) || (size_t)st.st_size <= sizeof (item))
+  if (!test_file ("example_2000.dwg", path, sizeof (path)))
     return 0;
-  data = (unsigned char *)malloc ((size_t)st.st_size);
   fp = fopen (path, "rb");
-  if (!data || !fp
-      || fread (data, 1, (size_t)st.st_size, fp) != (size_t)st.st_size)
+  if (!fp)
+    return 0;
+  end = fseek (fp, 0, SEEK_END) ? -1 : ftell (fp);
+  if (end > (long)sizeof (item) && !fseek (fp, 0, SEEK_SET))
     {
-      if (fp)
-        fclose (fp);
+      size = (size_t)end;
+      data = (unsigned char *)malloc (size);
+    }
+  if (!data || fread (data, 1, size, fp) != size)
+    {
+      fclose (fp);
       free (data);
       return 0;
     }
   fclose (fp);
   // an object's EED can start at any bit of the file
-  for (bit = 0; bit / 8 + sizeof (item) < (size_t)st.st_size; bit++)
+  for (bit = 0; bit / 8 + sizeof (item) < size; bit++)
     {
       size_t k = 0;
       while (k < sizeof (item) && byte_at_bit (data, bit + k * 8) == item[k])
@@ -2098,12 +2102,10 @@ write_unread_eed_drawing (const char *file)
   if (found)
     {
       set_byte_at_bit (data, bit + 8, 0xFF);
-      unlink (file);
       fp = fopen (file, "wb");
       if (fp)
         {
-          written = fwrite (data, 1, (size_t)st.st_size, fp)
-                    == (size_t)st.st_size;
+          written = fwrite (data, 1, size, fp) == size;
           written &= !fclose (fp);
         }
     }
