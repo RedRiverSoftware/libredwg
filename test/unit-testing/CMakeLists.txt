@@ -103,6 +103,8 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   endif()
   add_executable(summaryinfo_test
     summaryinfo_test.c
+    ../../src/bits.c
+    ../../src/codepages.c
     ../../src/logging.c
     ../../src/classes.c
     tests_common.h)

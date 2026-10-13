@@ -31,6 +31,7 @@ static int test_loglevel;
 #include "dwg.h"
 #include "tests_common.h"
 #include "dwg_api.h"
+#include "bits.h"
 
 /* The most characters of a T16 string that AutoCAD reads: it takes the
    length, which counts the NUL, as signed. */
@@ -269,6 +270,38 @@ test_appinfohistory (void)
   return numfailed ();
 }
 
+/* bit_write_T16 trims a string to fit INT16_MAX as the length: before
+   r2007 the length counts the NUL, from r2007 on it doesn't. */
+static int
+test_write_T16 (const Dwg_Version_Type version, const size_t length,
+                const unsigned expected)
+{
+  const unsigned unit = version >= R_2007 ? 2 : 1;
+  char *text = offset_text (length);
+  Bit_Chain dat = { 0 };
+  unsigned written;
+
+  failed = 0;
+  dat.size = 2 * length + 16;
+  dat.chain = (unsigned char *)calloc (dat.size, 1);
+  dat.version = version;
+  dat.from_version = R_2004;
+  dat.codepage = 30; // ANSI_1252
+  bit_write_T16 (&dat, text);
+  loglevel = test_loglevel;
+  written = (unsigned)(dat.chain[0] | (dat.chain[1] << 8));
+  if (written == expected && dat.byte == 2 + (size_t)unit * expected)
+    ok ("write_T16 %s %u: length %u", dwg_version_type (version),
+        (unsigned)length, written);
+  else
+    fail ("write_T16 %s %u: length %u, %u bytes, expected %u",
+          dwg_version_type (version), (unsigned)length, written,
+          (unsigned)dat.byte, expected);
+  free (dat.chain);
+  free (text);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -289,5 +322,12 @@ main (int argc, char *argv[])
   error += test_title (70000);
   error += test_appinfo ();
   error += test_appinfohistory ();
+  // the length counts the NUL: 32766 characters
+  error += test_write_T16 (R_2004, INT16_MAX - 1, INT16_MAX);
+  error += test_write_T16 (R_2004, INT16_MAX, INT16_MAX);
+  error += test_write_T16 (R_2004, 40000, INT16_MAX);
+  // the length doesn't count the NUL: 32767 characters
+  error += test_write_T16 (R_2007, INT16_MAX, INT16_MAX);
+  error += test_write_T16 (R_2007, 40000, INT16_MAX);
   return error ? 1 : 0;
 }

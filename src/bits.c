@@ -2763,6 +2763,11 @@ void
 bit_write_T16 (Bit_Chain *restrict dat, BITCODE_T16 restrict chain)
 {
   size_t length;
+  // AutoCAD reads the RS length as signed, and refuses a file with a longer
+  // string: trim so that the length fits INT16_MAX, with the NUL it counts
+  // before r2007
+  const size_t max_length
+      = dat->version >= R_2007 ? INT16_MAX : INT16_MAX - 1;
   if (chain)
     {
       if (IS_FROM_TU (dat))
@@ -2772,14 +2777,11 @@ bit_write_T16 (Bit_Chain *restrict dat, BITCODE_T16 restrict chain)
     }
   else
     length = 0;
-  // AutoCAD reads the RS length as signed, and refuses a file with a longer
-  // string: trim so that the length fits INT16_MAX with the NUL it counts
-  // before r2007
-  if (length > INT16_MAX - 1)
+  if (length > max_length)
     {
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
       LOG_WARN ("Overlong string truncated (len=%" PRIuSIZE ")", length);
-      length = INT16_MAX - 1;
+      length = max_length;
     }
   if (length == 0)
     bit_write_RS (dat, 0);
