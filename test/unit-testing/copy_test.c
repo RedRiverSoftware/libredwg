@@ -1017,6 +1017,7 @@ test_clone (const char *name, Dwg_Version_Type version)
   BITCODE_BL num_unresolved = 0, num_handles = 0, header_unresolved;
   BITCODE_RLL *handles, first;
   unsigned skipped = 0, to_skipped = 0, dangling = 0, relative, wrong;
+  BITCODE_BL num_entities = 0;
   Compare c;
   int error;
 
@@ -1044,7 +1045,11 @@ test_clone (const char *name, Dwg_Version_Type version)
     {
       const Dwg_Object *obj = &src.object[i];
       if (is_copyable (obj))
-        handles[num_handles++] = obj->handle.value;
+        {
+          handles[num_handles++] = obj->handle.value;
+          if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+            num_entities++;
+        }
       else
         skipped++;
     }
@@ -1052,13 +1057,18 @@ test_clone (const char *name, Dwg_Version_Type version)
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &src, handles, num_handles, map, &unresolved,
                             &num_unresolved);
-  if (error < DWG_ERR_CRITICAL && dst->num_objects == num_handles)
-    OK ("%s: copied %u objects, left out %u (error 0x%x)", what,
-        (unsigned)num_handles, skipped, (unsigned)error);
+  if (error < DWG_ERR_CRITICAL && dst->num_objects == num_handles
+      && dst->num_entities == num_entities)
+    OK ("%s: copied %u objects, %u of them entities, left out %u (error "
+        "0x%x)",
+        what, (unsigned)num_handles, (unsigned)num_entities, skipped,
+        (unsigned)error);
   else
     {
-      FAIL ("%s: copy error 0x%x, %u of %u objects", what, (unsigned)error,
-            (unsigned)dst->num_objects, (unsigned)num_handles);
+      FAIL ("%s: copy error 0x%x, %u of %u objects, %u of %u entities",
+            what, (unsigned)error, (unsigned)dst->num_objects,
+            (unsigned)num_handles, (unsigned)dst->num_entities,
+            (unsigned)num_entities);
       free_dwg (&src);
       goto cleanup;
     }
@@ -1253,7 +1263,7 @@ test_same_document (const char *name)
   Dwg_Data dwg, readback;
   Dwg_Copy_Map *map;
   Dwg_Copy_Unresolved *unresolved = NULL;
-  BITCODE_BL num_unresolved = 0, num_handles, num_objects;
+  BITCODE_BL num_unresolved = 0, num_handles, num_objects, num_entities;
   BITCODE_RLL *handles;
   unsigned relative, wrong, owners = 0;
   Compare c;
@@ -1268,13 +1278,15 @@ test_same_document (const char *name)
       return 1;
     }
   num_objects = dwg.num_objects;
+  num_entities = dwg.num_entities;
   handles = model_space_entities (&dwg, &num_handles);
   map = dwg_copy_map_new ();
   loglevel = tracelevel;
   error = dwg_copy_objects (&dwg, &dwg, handles, num_handles, map,
                             &unresolved, &num_unresolved);
   if (error < DWG_ERR_CRITICAL && !num_unresolved
-      && dwg.num_objects == num_objects + num_handles)
+      && dwg.num_objects == num_objects + num_handles
+      && dwg.num_entities == num_entities + num_handles)
     OK ("%s: copied %u entities, none unresolved (error 0x%x)", what,
         (unsigned)num_handles, (unsigned)error);
   else
@@ -1321,6 +1333,7 @@ test_same_document (const char *name)
 
   snprintf (file, sizeof (file), "copy_within_%s",
             strrchr (name, '/') ? strrchr (name, '/') + 1 : name);
+  memset (&readback, 0, sizeof (readback));
   loglevel = tracelevel;
   error = write_dwg (file, &dwg);
   if (error < DWG_ERR_CRITICAL)
@@ -1605,6 +1618,7 @@ test_eed (void)
 
   free_dwg (src);
   free (src);
+  memset (&readback, 0, sizeof (readback));
   error = write_dwg (file, dst);
   if (error < DWG_ERR_CRITICAL)
     error = read_dwg (file, &readback);

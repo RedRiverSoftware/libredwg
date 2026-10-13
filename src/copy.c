@@ -1635,6 +1635,8 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
         goto done;
       obj = &dst->object[idx];
       obj->supertype = srcobj->supertype;
+      if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+        dst->num_entities++;
       obj->fixedtype = srcobj->fixedtype;
       obj->type = type;
       obj->has_strings = srcobj->has_strings;
