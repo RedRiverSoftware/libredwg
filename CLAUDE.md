@@ -46,10 +46,11 @@ ask first.
 
 ## Test
 
-SVG-renderer tests live in **cableflow's test project**, not in
-`rr-fork/test/unit-testing/`. The latter is libredwg's own API-level
-test suite (round-trip parse correctness) and does not exercise SVG
-output.
+SVG-renderer tests live in **cableflow's test project**.
+`rr-fork/test/unit-testing/` is libredwg's own API-level test suite
+(round-trip parse correctness); of its tests only `svg_api_test.c`
+renders SVG, through `dwg_data_to_svg`, for renderer fixes that need a
+test in the fork itself.
 
 Renderer tests:
 
