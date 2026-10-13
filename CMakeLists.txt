@@ -275,6 +275,7 @@ set(libredwg_SOURCES
     src/dynapi.c
     src/dxfclasses.c
     src/free.c
+    src/copy.c
     src/geom.c
     src/out_dxf.c
     ${outjson_SOURCES}
