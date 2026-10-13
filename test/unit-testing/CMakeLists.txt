@@ -101,4 +101,12 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   if(NOT MSVC)
     add_test(add_test ${TARGET_SYSTEM_EMULATOR} add_test${CMAKE_EXECUTABLE_SUFFIX})
   endif()
+  add_executable(summaryinfo_test
+    summaryinfo_test.c
+    ../../src/logging.c
+    ../../src/classes.c
+    tests_common.h)
+  if(NOT MSVC)
+    add_test(summaryinfo_test ${TARGET_SYSTEM_EMULATOR} summaryinfo_test${CMAKE_EXECUTABLE_SUFFIX})
+  endif()
 endif(NOT LIBREDWG_DISABLE_WRITE)

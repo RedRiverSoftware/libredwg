@@ -392,6 +392,7 @@ check_minimal = \
 	dxf_test$(EXEEXT)
 if USE_WRITE
 check_minimal += add_test$(EXEEXT)
+check_minimal += summaryinfo_test$(EXEEXT)
 endif
 if !HAVE_MINGW
 check_minimal += decode_test$(EXEEXT)
