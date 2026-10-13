@@ -3343,9 +3343,9 @@ dwg_color_method_name (unsigned m)
     case 0xc1:
       return "ByBlock";
     case 0xc2:
-      return "entity (default)";
-    case 0xc3:
       return "Truecolor";
+    case 0xc3:
+      return "ACI";
     case 0xc5:
       return "Foreground";
     case 0xc8:

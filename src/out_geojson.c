@@ -448,8 +448,7 @@ dwg_geojson_feature (Bit_Chain *restrict dat, Dwg_Object *restrict obj,
 
       // See #95: index as int or rgb as hexstring
       if (dat->version >= R_2004
-          && (obj->tio.entity->color.method == 0xc3     // Truecolor
-              || obj->tio.entity->color.method == 0xc2) // Entity
+          && obj->tio.entity->color.method == 0xc2 // Truecolor
           && obj->tio.entity->color.index == 256)
         {
           snprintf (tmp, sizeof (tmp), "#%06X",

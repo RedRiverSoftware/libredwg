@@ -1300,9 +1300,9 @@ dxf_set_CMC_index (BITCODE_CMC *restrict color, const int index)
     } // ByBlock
   else if (index == 256)
     {
-      color->method = 0xc2;
-      color->rgb = 0xc2000000;
-    } // entity/ByLayer
+      color->method = 0xc0;
+      color->rgb = 0xc0000000;
+    } // ByLayer
   else if (index == 257)
     {
       color->method = 0xc8;
@@ -1310,8 +1310,10 @@ dxf_set_CMC_index (BITCODE_CMC *restrict color, const int index)
     } // None
   else
     {
+      // ACI. The DXF index is negative for a layer that is off, and arrives
+      // here as an unsigned 16-bit value; color->index has its sign.
       color->method = 0xc3;
-      color->rgb = 0xc3000000 | dwg_rgb_palette_index ((BITCODE_BS)index);
+      color->rgb = bit_CMC_aci_rgb (color->index);
     }
 }
 
@@ -1331,46 +1333,18 @@ dxf_read_CMC (const Dwg_Data *restrict dwg, Bit_Chain *restrict dat,
     }
   if ((pair->code < 90 || pair->code > 99) && dxf == pair->code)
     {
-      color->index = pair->value.i;
-      if (pair->value.i == 256) // bylayer
-        color->method = 0xc2;
-      else if (pair->value.i == 0) // byblock
-        color->method = 0xc1;
-      else if (pair->value.i == 257) // none
-        color->method = 0xc8;
-      else if (dwg->header.version >= R_2004)
-        {
-          color->index = 256;
-          color->rgb = pair->value.l;
-          color->rgb |= 0xc2000000;
-          LOG_TRACE ("%s.rgb = 0x%08x [%s %d]\n", fieldname, color->rgb, "CMC",
-                     pair->code);
-        }
+      dxf_set_CMC_index (color, pair->value.i);
       LOG_TRACE ("%s.index = %d [%s %d]\n", fieldname, color->index, "CMC",
                  pair->code);
       // optional 420, 430, 440 fields
       pos = bit_position (dat);
       error = dxf_read_CMC (dwg, dat, color, fieldname, dxf);
-      // Set default method/rgb for CMTC fields (R_2004 CMC format in
-      // pre-R_2004 files)
-      if (!color->rgb)
-        {
-          if (!color->method)
-            {
-              if (pair->value.i == 0)
-                color->method = 0xc1; // ByBlock
-              else
-                color->method = 0xc3; // palette index
-            }
-          color->rgb = ((BITCODE_BL)color->method << 24);
-          if (color->method == 0xc3)
-            color->rgb |= dwg_rgb_palette_index (color->index);
-        }
     }
   else if (pair->code < 430 && pair->code == (dxf + 420 - 62)) // truecolor
     {
+      color->method = 0xc2;
       color->rgb = pair->value.l;
-      color->rgb |= 0xc3000000;
+      color->rgb |= 0xc2000000;
       LOG_TRACE ("%s.rgb = 0x%08x [%s %d]\n", fieldname, color->rgb, "CMC",
                  pair->code);
       error = 0;
@@ -12862,8 +12836,8 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                           else if (pair->code >= 420 && pair->code < 430)
                             {
                               // DXF code 420-429: true 24-bit RGB color
-                              color.rgb = pair->value.l | 0xc3000000;
-                              color.method = 0xc3;
+                              color.rgb = pair->value.l | 0xc2000000;
+                              color.method = 0xc2;
                               LOG_TRACE ("%s.%s.rgb = %08X [%s %d]\n", name,
                                          f->name, color.rgb, "CMC",
                                          pair->code);
@@ -12873,7 +12847,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                               // Some objects (e.g. MULTILEADER codes 91/92/93)
                               // store a color index in a code >= 90 range.
                               // Detect by value: real RGB values are always
-                              // > 257 (high byte set, e.g. 0xc3rrggbb).
+                              // > 257 (high byte set, e.g. 0xc2rrggbb).
                               if (pair->value.l <= 257)
                                 {
                                   dxf_set_CMC_index (&color,
@@ -13200,9 +13174,9 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                             {
                               // a plain 420 RGB has an empty top byte; 0 is
                               // an invalid CMC method the encoder discards,
-                              // losing the true color. It is method 0xc3.
-                              color.method = 0xc3;
-                              color.rgb |= 0xc3000000;
+                              // losing the true color. It is method 0xc2.
+                              color.method = 0xc2;
+                              color.rgb |= 0xc2000000;
                             }
                           // the r2004+ entity color encoding writes the rgb
                           // only when the 0x80 rgb-present flag is set, as

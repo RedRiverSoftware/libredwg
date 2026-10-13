@@ -606,7 +606,7 @@ field_cmc (Bit_Chain *dat, const char *restrict key,
       else
         {
           BITCODE_BS index = 0;
-          if (_obj->method == DWG_COLOR_METHOD_TRUECOLOR)
+          if (_obj->method == DWG_COLOR_METHOD_ACI)
             index = (BITCODE_BS)(_obj->rgb & 0xFF); /* first byte */
           else if (_obj->method == DWG_COLOR_METHOD_BYLAYER
                    || _obj->method == DWG_COLOR_METHOD_BYBLOCK)

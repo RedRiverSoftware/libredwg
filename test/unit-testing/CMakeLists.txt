@@ -89,6 +89,11 @@ add_executable(dynapi_test
 add_test(dynapi_test ${TARGET_SYSTEM_EMULATOR} dynapi_test${CMAKE_EXECUTABLE_SUFFIX})
 
 if(NOT LIBREDWG_DISABLE_WRITE)
+  add_executable(color_test color_test.c ../../src/bits.c ../../src/codepages.c
+    ../../src/logging.c ../../src/classes.c tests_common.h)
+  if(NOT MSVC)
+    add_test(color_test ${TARGET_SYSTEM_EMULATOR} color_test${CMAKE_EXECUTABLE_SUFFIX})
+  endif()
   add_executable(add_test
     add_test.c
     ../../src/bits.c
