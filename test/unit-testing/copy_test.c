@@ -18,6 +18,7 @@
    - copies within one document;
    - references to objects outside the copy, reported and then resolved;
    - EED;
+   - linetype dash texts in the linetype's strings_area;
    - refused copies. */
 
 #include <stdio.h>
@@ -232,6 +233,11 @@ typedef struct _compare
      example_2004.dwg shows too. Copies must match exactly. */
   int dd_tolerance;
   int is_tu;
+  /* the documents' version, which sizes LTYPE.strings_area */
+  Dwg_Version_Type version;
+  /* PROXY data last bytes left out of a read-back comparison, see
+     unwritten_last_byte () */
+  unsigned unwritten;
   const char *what;
   int failed;
 } Compare;
@@ -352,15 +358,46 @@ scalar_size (const char *type)
   {
     const char *type;
     size_t size;
-  } sizes[] = { { "B", 1 },   { "BB", 1 },   { "3B", 1 },   { "RC", 1 },
-                { "RCd", 1 }, { "RCx", 1 },  { "BS", 2 },   { "BSd", 2 },
-                { "BSx", 2 }, { "RS", 2 },   { "RSd", 2 },  { "RSx", 2 },
-                { "BL", 4 },  { "BLd", 4 },  { "BLx", 4 },  { "RL", 4 },
-                { "RLd", 4 }, { "RLx", 4 },  { "MS", 4 },   { "BLL", 8 },
-                { "RLL", 8 }, { "RLLd", 8 }, { "BD", 8 },   { "RD", 8 },
-                { "2RD", 16 }, { "2BD", 16 }, { "2DPOINT", 16 },
-                { "3BD", 24 }, { "3RD", 24 }, { "3DPOINT", 24 },
-                { "BE", 24 }, { NULL, 0 } };
+  } sizes[] = { { "B", 1 },
+                { "BB", 1 },
+                { "3B", 1 },
+                { "4BITS", 1 },
+                { "RC", 1 },
+                { "RCd", 1 },
+                { "RCx", 1 },
+                { "BS", 2 },
+                { "BSd", 2 },
+                { "BSx", 2 },
+                { "RS", 2 },
+                { "RSd", 2 },
+                { "RSx", 2 },
+                { "BL", 4 },
+                { "BLd", 4 },
+                { "BLx", 4 },
+                { "RL", 4 },
+                { "RLd", 4 },
+                { "RLx", 4 },
+                { "MS", 4 },
+                { "int", sizeof (int) },
+                { "int32_t", sizeof (int32_t) },
+                { "unsigned long", sizeof (unsigned long) },
+                { "BLL", 8 },
+                { "RLL", 8 },
+                { "RLLd", 8 },
+                { "BD", 8 },
+                { "RD", 8 },
+                { "BT", 8 },
+                { "DD", 8 },
+                { "2RD", 16 },
+                { "2BD", 16 },
+                { "2BD_1", 16 },
+                { "2DPOINT", 16 },
+                { "3BD", 24 },
+                { "3BD_1", 24 },
+                { "3RD", 24 },
+                { "3DPOINT", 24 },
+                { "BE", 24 },
+                { NULL, 0 } };
   for (int i = 0; sizes[i].type; i++)
     if (strEQ (type, sizes[i].type))
       return sizes[i].size;
@@ -405,10 +442,19 @@ compare_color (Compare *c, const char *name, const Dwg_Color *a,
   compare_ref (c, sub, a->handle, b->handle);
 }
 
+/* A struct being compared, a with b: for the fields of the structs inside
+   it, whose lengths it may hold. */
+typedef struct _outer
+{
+  const Dwg_DYNAPI_field *fields;
+  const void *a;
+  const void *b;
+} Outer;
+
 static void compare_fields (Compare *c, const char *prefix,
                             const char *structname,
                             const Dwg_DYNAPI_field *fields, const void *a,
-                            const void *b);
+                            const void *b, const Outer *outer);
 
 static const Dwg_DYNAPI_field *
 find_field (const Dwg_DYNAPI_field *fields, const char *name)
@@ -513,31 +559,50 @@ inactive_member (const char *structname, const Dwg_DYNAPI_field *fields,
 /* The union MLEADER_AnnotContext.content holds text or a block, as its
    flags say: compares that member only. */
 static void
-compare_mleader_content (Compare *c, const char *name,
-                         const Dwg_DYNAPI_field *fields, const void *a,
+compare_mleader_content (Compare *c, const char *name, const Outer *self,
                          const void *pa, const void *pb)
 {
   char member[180];
-  if (int_value (fields, "has_content_txt", a))
+  if (int_value (self->fields, "has_content_txt", self->a))
     {
       snprintf (member, sizeof (member), "%s.txt", name);
       compare_fields (c, member, "MLEADER_Content_MText",
                       dwg_dynapi_subclass_fields ("MLEADER_Content_MText"),
-                      pa, pb);
+                      pa, pb, self);
     }
-  else if (int_value (fields, "has_content_blk", a))
+  else if (int_value (self->fields, "has_content_blk", self->a))
     {
       snprintf (member, sizeof (member), "%s.blk", name);
       compare_fields (c, member, "MLEADER_Content_Block",
                       dwg_dynapi_subclass_fields ("MLEADER_Content_Block"),
-                      pa, pb);
+                      pa, pb, self);
     }
 }
 
-/* An element of an array, or an inlined struct, of the given type. */
+/* The dynapi fields of a struct type named after its Dwg_ prefix: a
+   subclass, or an object embedded in another (LAYOUT's PLOTSETTINGS), whose
+   name without Object_ or Entity_ goes to *structnamep. */
+static const Dwg_DYNAPI_field *
+struct_fields (const char *name, const char **structnamep)
+{
+  const Dwg_DYNAPI_field *fields = dwg_dynapi_subclass_fields (name);
+  *structnamep = name;
+  if (fields)
+    return fields;
+  if (memBEGINc (name, "Object_"))
+    *structnamep = &name[strlen ("Object_")];
+  else if (memBEGINc (name, "Entity_"))
+    *structnamep = &name[strlen ("Entity_")];
+  else
+    return NULL;
+  return dwg_dynapi_entity_fields (*structnamep);
+}
+
+/* A value of the given type: a field, an element of an array, or an
+   inlined struct, which outer holds. */
 static void
 compare_value (Compare *c, const char *name, const char *type, const void *a,
-               const void *b)
+               const void *b, const Outer *outer)
 {
   if (strEQc (type, "H"))
     compare_ref (c, name, *(const BITCODE_H *)a, *(const BITCODE_H *)b);
@@ -557,25 +622,19 @@ compare_value (Compare *c, const char *name, const char *type, const void *a,
     }
   else if (memBEGINc (type, "Dwg_"))
     {
-      const Dwg_DYNAPI_field *sub = dwg_dynapi_subclass_fields (&type[4]);
+      const char *structname;
+      const Dwg_DYNAPI_field *sub = struct_fields (&type[4], &structname);
       if (sub)
-        compare_fields (c, name, &type[4], sub, a, b);
+        compare_fields (c, name, structname, sub, a, b, outer);
+      else
+        compare_fail (c, "%s [%s]: no dynapi fields to compare", name, type);
     }
+  else
+    compare_fail (c, "%s [%s]: a type the test can't compare", name, type);
 }
 
-/* The element count of an array field: its num_ field, when it has one. */
-static const Dwg_DYNAPI_field *
-count_field (const Dwg_DYNAPI_field *fields, const char *name)
-{
-  char count_name[80];
-  snprintf (count_name, sizeof (count_name), "num_%s", name);
-  for (const Dwg_DYNAPI_field *f = fields; f->name; f++)
-    if (strEQ (f->name, count_name))
-      return f;
-  return NULL;
-}
-
-static BITCODE_BL
+/* The value of an unsigned count field. */
+static uint64_t
 count_value (const Dwg_DYNAPI_field *f, const void *base)
 {
   const char *p = (const char *)base + f->offset;
@@ -587,9 +646,211 @@ count_value (const Dwg_DYNAPI_field *f, const void *base)
       return *(const uint16_t *)p;
     case 4:
       return *(const uint32_t *)p;
+    case 8:
+      return *(const uint64_t *)p;
     default:
       return 0;
     }
+}
+
+/* The field named like name with prefix before its last component:
+   cellstyle.borders has cellstyle.num_borders. */
+static const Dwg_DYNAPI_field *
+prefixed_field (const Dwg_DYNAPI_field *fields, const char *name,
+                const char *prefix, const char *suffix)
+{
+  char field[120];
+  const char *dot = strrchr (name, '.');
+  const int head = dot ? (int)(dot - name + 1) : 0;
+  snprintf (field, sizeof (field), "%.*s%s%s%s", head, name, prefix,
+            &name[head], suffix);
+  return find_field (fields, field);
+}
+
+/* Binary chunks, compared byte by byte. */
+static int
+is_binary_type (const char *type)
+{
+  return strEQc (type, "TF") || strEQc (type, "RC*");
+}
+
+/* How an array or binary chunk whose length is not in a num_<name> or
+   <name>_size field of its struct gets it. */
+typedef enum LENGTH_RULE
+{
+  LENGTH_FIELD,       /* elements, in count */
+  LENGTH_OUTER_FIELD, /* elements, in count of the struct holding it */
+  LENGTH_BITS,        /* bits, in count */
+  LENGTH_FIXED,       /* fixed elements */
+  LENGTH_STRING,      /* a NUL-terminated string in a binary field */
+  LENGTH_STRINGS_AREA /* LTYPE's: 256 bytes, 512 from r2007 */
+} Length_Rule;
+
+typedef struct _array_length
+{
+  const char *structname; /* NULL for any */
+  const char *field;
+  Length_Rule rule;
+  const char *count;
+  unsigned fixed;
+} Array_Length;
+
+/* The arrays and binary chunks of dwg.spec and dwg2.spec whose length is
+   not in a num_<name> or <name>_size field: as the specs read them. The
+   ACIS data of 3DSOLID and the like is in acis_length (). */
+static const Array_Length array_lengths[] = {
+  { "BLOCK_HEADER", "entities", LENGTH_FIELD, "num_owned", 0 },
+  { "INSERT", "attribs", LENGTH_FIELD, "num_owned", 0 },
+  { "MINSERT", "attribs", LENGTH_FIELD, "num_owned", 0 },
+  { "TABLE", "attribs", LENGTH_FIELD, "num_owned", 0 },
+  { "POLYLINE_2D", "vertex", LENGTH_FIELD, "num_owned", 0 },
+  { "POLYLINE_3D", "vertex", LENGTH_FIELD, "num_owned", 0 },
+  { "POLYLINE_MESH", "vertex", LENGTH_FIELD, "num_owned", 0 },
+  { "POLYLINE_PFACE", "vertex", LENGTH_FIELD, "num_owned", 0 },
+  { "DICTIONARY", "texts", LENGTH_FIELD, "numitems", 0 },
+  { "DICTIONARY", "itemhandles", LENGTH_FIELD, "numitems", 0 },
+  { "DICTIONARYWDFLT", "texts", LENGTH_FIELD, "numitems", 0 },
+  { "DICTIONARYWDFLT", "itemhandles", LENGTH_FIELD, "numitems", 0 },
+  { "SORTENTSTABLE", "sort_ents", LENGTH_FIELD, "num_ents", 0 },
+  { "LTYPE", "dashes", LENGTH_FIELD, "numdashes", 0 },
+  { "LTYPE", "strings_area", LENGTH_STRINGS_AREA, NULL, 0 },
+  { "TABLE", "col_widths", LENGTH_FIELD, "num_cols", 0 },
+  { "TABLE", "row_heights", LENGTH_FIELD, "num_rows", 0 },
+  { "BLOCKLOOKUPACTION", "lut", LENGTH_FIELD, "numelems", 0 },
+  { "BLOCKLOOKUPACTION", "exprs", LENGTH_FIELD, "numelems", 0 },
+  { "BLOCKPOLARSTRETCHACTION", "shorts", LENGTH_FIELD, "num_hdls", 0 },
+  /* one or the other, as the path's flag says */
+  { "HATCH_Path", "segs", LENGTH_FIELD, "num_segs_or_paths", 0 },
+  { "HATCH_Path", "polyline_paths", LENGTH_FIELD, "num_segs_or_paths", 0 },
+  { "DATATABLE_column", "rows", LENGTH_OUTER_FIELD, "num_rows", 0 },
+  { "PROXY_ENTITY", "data", LENGTH_BITS, "data_numbits", 0 },
+  { "PROXY_OBJECT", "data", LENGTH_BITS, "data_numbits", 0 },
+  { "OLE2FRAME", "oleclient", LENGTH_STRING, NULL, 0 },
+  { "DIMASSOC", "ref", LENGTH_FIXED, NULL, 6 },
+  { "SPATIAL_FILTER", "inverse_transform", LENGTH_FIXED, NULL, 12 },
+  { "SPATIAL_FILTER", "transform", LENGTH_FIXED, NULL, 12 },
+  { "MLEADER_Content_Block", "transform", LENGTH_FIXED, NULL, 16 },
+  { "ACSH_HistoryNode", "trans", LENGTH_FIXED, NULL, 16 },
+  { NULL, "prop_states", LENGTH_FIXED, NULL, 4 },
+  { NULL, "transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "rel_transform", LENGTH_FIXED, NULL, 16 },
+  { NULL, "sweep_entity_transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "path_entity_transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "sweep_transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "loft_entity_transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "revolved_entity_transmatrix", LENGTH_FIXED, NULL, 16 },
+  { NULL, "sweepentity_transform", LENGTH_FIXED, NULL, 16 },
+  { NULL, "pathentity_transform", LENGTH_FIXED, NULL, 16 },
+  { NULL, NULL, LENGTH_FIXED, NULL, 0 }
+};
+
+static const Array_Length *
+find_length_rule (const char *structname, const char *field)
+{
+  const Array_Length *any = NULL;
+  for (const Array_Length *r = array_lengths; r->field; r++)
+    if (strEQ (r->field, field))
+      {
+        if (r->structname && strEQ (r->structname, structname))
+          return r;
+        if (!r->structname)
+          any = r;
+      }
+  return any;
+}
+
+/* The ACIS data of 3DSOLID and the classes that share its fields. Version 1
+   has num_blocks encrypted blocks, of block_size[i] bytes, and an empty one
+   after them, and acis_data holds their decrypted text; version 2 has a
+   block_size of 2 and sab_size bytes of acis_data. */
+static int
+is_acis_struct (const Dwg_DYNAPI_field *fields)
+{
+  return find_field (fields, "num_blocks") && find_field (fields, "sab_size")
+         && find_field (fields, "encr_sat_data");
+}
+
+static int64_t
+acis_length (const Dwg_DYNAPI_field *fields, const char *field,
+             const void *base)
+{
+  const char *p = (const char *)base;
+  const uint64_t version = count_value (find_field (fields, "version"), p);
+  const uint64_t num_blocks
+      = count_value (find_field (fields, "num_blocks"), p);
+  const BITCODE_BL *block_size = *(
+      BITCODE_BL *const *)(p + find_field (fields, "block_size")->offset);
+  const unsigned char *acis_data = *(
+      unsigned char *const *)(p + find_field (fields, "acis_data")->offset);
+  int64_t size = 0;
+  if (strEQc (field, "block_size"))
+    return version == 2 ? 2 : (int64_t)num_blocks + 1;
+  if (strEQc (field, "encr_sat_data"))
+    return (int64_t)num_blocks + 1;
+  if (strNE (field, "acis_data"))
+    return -1;
+  if (version == 2)
+    size = (int64_t)count_value (find_field (fields, "sab_size"), p);
+  else if (block_size)
+    for (uint64_t i = 0; i < num_blocks; i++)
+      size += block_size[i];
+  if (!size && acis_data)
+    size = (int64_t)strlen ((const char *)acis_data);
+  return size;
+}
+
+/* The length of array or binary field f of the struct at base, in elements
+   or bytes, or -1 when the test has no rule for it. outer_base is the
+   struct holding it, if any. */
+static int64_t
+field_length (const Compare *c, const char *structname,
+              const Dwg_DYNAPI_field *fields, const Dwg_DYNAPI_field *f,
+              const void *base, const Outer *outer, const void *outer_base)
+{
+  const Array_Length *rule = find_length_rule (structname, f->name);
+  const Dwg_DYNAPI_field *count;
+  if (is_acis_struct (fields)
+      && (strEQc (f->name, "block_size") || strEQc (f->name, "encr_sat_data")
+          || strEQc (f->name, "acis_data")))
+    return acis_length (fields, f->name, base);
+  if (rule)
+    {
+      const void *field_base = base;
+      const Dwg_DYNAPI_field *count_fields = fields;
+      if (rule->rule == LENGTH_FIXED)
+        return rule->fixed;
+      if (rule->rule == LENGTH_STRINGS_AREA)
+        return c->version <= R_2004 ? 256 : 512;
+      if (rule->rule == LENGTH_STRING)
+        {
+          const char *str
+              = *(const char *const *)((const char *)base + f->offset);
+          return str ? (int64_t)strlen (str) : 0;
+        }
+      if (rule->rule == LENGTH_OUTER_FIELD)
+        {
+          if (!outer)
+            return -1;
+          field_base = outer_base;
+          count_fields = outer->fields;
+        }
+      count = find_field (count_fields, rule->count);
+      if (!count)
+        return -1;
+      if (rule->rule == LENGTH_BITS)
+        return (int64_t)((count_value (count, field_base) + 7) / 8);
+      return (int64_t)count_value (count, field_base);
+    }
+  count = prefixed_field (fields, f->name, "num_", "");
+  if (count)
+    return (int64_t)count_value (count, base);
+  if (is_binary_type (f->type))
+    {
+      count = prefixed_field (fields, f->name, "", "_size");
+      if (count)
+        return (int64_t)count_value (count, base);
+    }
+  return -1;
 }
 
 static size_t
@@ -605,21 +866,158 @@ element_size (const char *type)
 }
 
 static void
-compare_fields (Compare *c, const char *prefix, const char *structname,
-                const Dwg_DYNAPI_field *fields, const void *a, const void *b)
+compare_bytes (Compare *c, const char *name, const unsigned char *a,
+               const unsigned char *b, const size_t len)
 {
+  for (size_t i = 0; i < len; i++)
+    if (a[i] != b[i])
+      {
+        compare_fail (c, "%s: byte %" PRIuSIZE " of %" PRIuSIZE
+                      " is 0x%02x, expected 0x%02x",
+                      name, i, len, b[i], a[i]);
+        return;
+      }
+}
+
+/* bit_write_bits writes the bits of a partial last byte in the reverse of
+   the order bit_read_bits reads them into it, so the data_numbits % 8 last
+   bits of PROXY_ENTITY and PROXY_OBJECT data don't read back as written,
+   in a plain rewrite of a drawing too. Read back, that byte is left out of
+   the comparison, and counted. */
+static int
+unwritten_last_byte (const Compare *c, const char *structname,
+                     const Dwg_DYNAPI_field *f, const Outer *self)
+{
+  const Dwg_DYNAPI_field *numbits;
+  if (c->map || strNE (f->name, "data")
+      || (strNE (structname, "PROXY_ENTITY")
+          && strNE (structname, "PROXY_OBJECT")))
+    return 0;
+  numbits = find_field (self->fields, "data_numbits");
+  return numbits && count_value (numbits, self->a) % 8;
+}
+
+/* An array, or a binary chunk, held by pointer: compared up to the length
+   its struct gives it. */
+static void
+compare_array (Compare *c, const char *name, const char *structname,
+               const Dwg_DYNAPI_field *f, const Outer *self,
+               const Outer *outer)
+{
+  const void *va = *(void *const *)((const char *)self->a + f->offset);
+  const void *vb = *(void *const *)((const char *)self->b + f->offset);
+  const int binary = is_binary_type (f->type);
+  const size_t len = strlen (f->type);
+  int64_t la, lb;
+  char etype[80];
+  size_t esize;
+
+  // The reader points OLE2FRAME.oleclient at a string constant.
+  if (c->map && va && va == vb
+      && !(strEQc (structname, "OLE2FRAME") && strEQc (f->name, "oleclient")))
+    {
+      compare_fail (c, "%s: shares its %s with the source", name,
+                    binary ? "data" : "array");
+      return;
+    }
+  la = field_length (c, structname, self->fields, f, self->a, outer,
+                     outer ? outer->a : NULL);
+  lb = field_length (c, structname, self->fields, f, self->b, outer,
+                     outer ? outer->b : NULL);
+  if (la < 0 || lb < 0)
+    {
+      if (va || vb)
+        compare_fail (c, "%s [%s]: no length to compare it by", name,
+                      f->type);
+      return;
+    }
+  if (la != lb)
+    {
+      compare_fail (c, "%s: length %" PRId64 ", expected %" PRId64, name, lb,
+                    la);
+      return;
+    }
+  if (!la)
+    return;
+  if (!va || !vb)
+    {
+      // a length without data: a field the reader failed on
+      if (!va != !vb)
+        compare_fail (c, "%s: %s data of length %" PRId64, name,
+                      va ? "no" : "unexpected", la);
+      return;
+    }
+  if (binary)
+    {
+      size_t n = (size_t)la;
+      if (unwritten_last_byte (c, structname, f, self))
+        {
+          n--;
+          c->unwritten++;
+        }
+      compare_bytes (c, name, (const unsigned char *)va,
+                     (const unsigned char *)vb, n);
+      return;
+    }
+  if (strEQc (f->type, "char **"))
+    {
+      // ACIS blocks, of block_size bytes each, which compare on their own
+      const Dwg_DYNAPI_field *bs = find_field (self->fields, "block_size");
+      const BITCODE_BL *sizes
+          = *(const BITCODE_BL *const *)((const char *)self->a + bs->offset);
+      for (int64_t i = 0; i < la; i++)
+        {
+          const unsigned char *ba = ((unsigned char *const *)va)[i];
+          const unsigned char *bb = ((unsigned char *const *)vb)[i];
+          char ename[180];
+          snprintf (ename, sizeof (ename), "%s[%u]", name, (unsigned)i);
+          if (c->map && ba && ba == bb)
+            compare_fail (c, "%s: shares its data with the source", ename);
+          else if (sizes && sizes[i] && (!ba || !bb))
+            compare_fail (c, "%s: %s data", ename, ba ? "no" : "unexpected");
+          else if (sizes && sizes[i])
+            compare_bytes (c, ename, ba, bb, sizes[i]);
+        }
+      return;
+    }
+  snprintf (etype, sizeof (etype), "%.*s", (int)(len - 1), f->type);
+  esize = element_size (etype);
+  if (!esize)
+    {
+      compare_fail (c, "%s [%s]: elements the test can't compare", name,
+                    f->type);
+      return;
+    }
+  for (int64_t i = 0; i < la; i++)
+    {
+      char ename[180];
+      snprintf (ename, sizeof (ename), "%s[%u]", name, (unsigned)i);
+      compare_value (c, ename, etype, (const char *)va + i * esize,
+                     (const char *)vb + i * esize, self);
+    }
+}
+
+static void
+compare_fields (Compare *c, const char *prefix, const char *structname,
+                const Dwg_DYNAPI_field *fields, const void *a, const void *b,
+                const Outer *outer)
+{
+  const Outer self = { fields, a, b };
   for (const Dwg_DYNAPI_field *f = fields; f->name; f++)
     {
       const char *type = f->type;
       const size_t len = strlen (type);
       const char *pa = (const char *)a + f->offset;
       const char *pb = (const char *)b + f->offset;
+      size_t esize;
       char name[160];
-      // links into the document and its memory, not data
+      // links into the document and its memory, not data. handleref is
+      // unused by the library, and the copy clears it.
       if (strEQc (f->name, "parent") || strEQc (f->name, "dwg")
           || strEQc (f->name, "objid") || strEQc (f->name, "__iterator")
           || strEQc (f->name, "eed") || strEQc (f->name, "num_eed")
-          || strEQc (f->name, "xdata") || memBEGINc (type, "struct "))
+          || strEQc (f->name, "xdata") || strEQc (f->name, "handleref")
+          || memBEGINc (type, "struct "))
         continue;
       if (inactive_member (structname, fields, f->name, a))
         continue;
@@ -628,57 +1026,27 @@ compare_fields (Compare *c, const char *prefix, const char *structname,
       if (strEQc (structname, "MLEADER_AnnotContext")
           && strEQc (f->name, "content"))
         {
-          compare_mleader_content (c, name, fields, a, pa, pb);
+          compare_mleader_content (c, name, &self, pa, pb);
           continue;
         }
-      if (len && type[len - 1] == '*' && !is_string_type (type))
+      if (is_binary_type (type)
+          || (len && type[len - 1] == '*' && !is_string_type (type)))
         {
-          char etype[80];
-          const Dwg_DYNAPI_field *count = count_field (fields, f->name);
-          const void *va = *(void *const *)pa;
-          const void *vb = *(void *const *)pb;
-          size_t esize;
-          BITCODE_BL n;
-          if (c->map && va && va == vb)
-            {
-              compare_fail (c, "%s: shares its array with the source", name);
-              continue;
-            }
-          snprintf (etype, sizeof (etype), "%.*s", (int)(len - 1), type);
-          esize = element_size (etype);
-          if (!count || !esize)
-            continue;
-          n = count_value (count, a);
-          if (n != count_value (count, b))
-            continue; // the count field fails on its own
-          if (!va || !vb)
-            {
-              // a count without an array: a field the reader failed on
-              if (n && !va != !vb)
-                compare_fail (c, "%s: %s array of %u", name,
-                              va ? "no" : "an unexpected", (unsigned)n);
-              continue;
-            }
-          for (BITCODE_BL i = 0; i < n; i++)
-            {
-              char ename[180];
-              snprintf (ename, sizeof (ename), "%s[%u]", name, (unsigned)i);
-              compare_value (c, ename, etype, (const char *)va + i * esize,
-                             (const char *)vb + i * esize);
-            }
+          compare_array (c, name, structname, f, &self, outer);
+          continue;
         }
-      else if (f->is_malloc && !is_string_type (type))
-        {
-          // binary chunks: TF, of a length the spec walk knows. The reader
-          // points OLE2FRAME.oleclient at a string constant.
-          if (c->map && *(void *const *)pa
-              && *(void *const *)pa == *(void *const *)pb
-              && !(strEQc (structname, "OLE2FRAME")
-                   && strEQc (f->name, "oleclient")))
-            compare_fail (c, "%s: shares its data with the source", name);
-        }
+      // an array held in the struct: dynapi gives the size of all of it
+      esize = element_size (type);
+      if (esize && f->size > esize && f->size % esize == 0)
+        for (size_t i = 0; i < f->size / esize; i++)
+          {
+            char ename[180];
+            snprintf (ename, sizeof (ename), "%s[%u]", name, (unsigned)i);
+            compare_value (c, ename, type, pa + i * esize, pb + i * esize,
+                           &self);
+          }
       else
-        compare_value (c, name, type, pa, pb);
+        compare_value (c, name, type, pa, pb, &self);
     }
 }
 
@@ -837,14 +1205,14 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
     {
       const Dwg_Object_Entity *ea = a->tio.entity, *eb = b->tio.entity;
       compare_fields (c, "", "Entity", dwg_dynapi_common_entity_fields (), ea,
-                      eb);
+                      eb, NULL);
       compare_eed (c, ea->eed, ea->num_eed, eb->eed, eb->num_eed);
       if (!ea->tio.UNUSED || !eb->tio.UNUSED)
         return;
       fields = dwg_dynapi_entity_fields (a->name);
       if (fields)
         compare_fields (c, "", a->name, fields, ea->tio.UNUSED,
-                        eb->tio.UNUSED);
+                        eb->tio.UNUSED, NULL);
       else
         compare_fail (c, "no dynapi fields for %s", a->name);
     }
@@ -852,14 +1220,14 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
     {
       const Dwg_Object_Object *oa = a->tio.object, *ob = b->tio.object;
       compare_fields (c, "", "Object", dwg_dynapi_common_object_fields (), oa,
-                      ob);
+                      ob, NULL);
       compare_eed (c, oa->eed, oa->num_eed, ob->eed, ob->num_eed);
       if (!oa->tio.APPID || !ob->tio.APPID)
         return;
       fields = dwg_dynapi_entity_fields (a->name);
       if (fields)
         compare_fields (c, "", a->name, fields, oa->tio.APPID,
-                        ob->tio.APPID);
+                        ob->tio.APPID, NULL);
       else
         compare_fail (c, "no dynapi fields for %s", a->name);
       if (a->fixedtype == DWG_TYPE_XRECORD)
@@ -1057,7 +1425,7 @@ test_clone (const char *name, Dwg_Version_Type version)
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &src, handles, num_handles, map, &unresolved,
                             &num_unresolved);
-  if (error < DWG_ERR_CRITICAL && dst->num_objects == num_handles
+  if (!error && num_handles && dst->num_objects == num_handles
       && dst->num_entities == num_entities)
     OK ("%s: copied %u objects, %u of them entities, left out %u (error "
         "0x%x)",
@@ -1114,6 +1482,7 @@ test_clone (const char *name, Dwg_Version_Type version)
   memset (&c, 0, sizeof (c));
   c.map = map;
   c.is_tu = src.header.from_version >= R_2007 && !(src.opts & DWG_OPTS_IN);
+  c.version = src.header.from_version;
   for (BITCODE_BL i = 0; i < num_handles; i++)
     {
       const Dwg_Object *a = dwg_resolve_handle (&src, handles[i]);
@@ -1177,6 +1546,7 @@ test_clone (const char *name, Dwg_Version_Type version)
       memset (&c, 0, sizeof (c));
       c.dd_tolerance = 1;
       c.is_tu = IS_FROM_TU_DWG (dst);
+      c.version = dst->header.from_version;
       for (BITCODE_BL i = 0; i < dst->num_objects; i++)
         {
           const Dwg_Object *a = &dst->object[i];
@@ -1198,8 +1568,8 @@ test_clone (const char *name, Dwg_Version_Type version)
         }
       if (!c.failed)
         OK ("%s: every object reads back with the fields written, but %u "
-            "misread from the source",
-            what, misread);
+            "misread from the source and %u PROXY data last bytes",
+            what, misread, c.unwritten);
       else
         FAIL ("%s: %d field differences read back", what, c.failed);
     }
@@ -1284,7 +1654,7 @@ test_same_document (const char *name)
   loglevel = tracelevel;
   error = dwg_copy_objects (&dwg, &dwg, handles, num_handles, map,
                             &unresolved, &num_unresolved);
-  if (error < DWG_ERR_CRITICAL && !num_unresolved
+  if (!error && num_handles && !num_unresolved
       && dwg.num_objects == num_objects + num_handles
       && dwg.num_entities == num_entities + num_handles)
     OK ("%s: copied %u entities, none unresolved (error 0x%x)", what,
@@ -1297,6 +1667,7 @@ test_same_document (const char *name)
   c.map = map;
   c.same_document = 1;
   c.is_tu = (dwg.header.from_version >= R_2007 && !(dwg.opts & DWG_OPTS_IN));
+  c.version = dwg.header.from_version;
   for (BITCODE_BL i = 0; i < num_handles; i++)
     {
       const Dwg_Object *a = dwg_resolve_handle (&dwg, handles[i]);
@@ -1345,6 +1716,7 @@ test_same_document (const char *name)
       memset (&c, 0, sizeof (c));
       c.dd_tolerance = 1;
       c.is_tu = (dwg.header.from_version >= R_2007 && !(dwg.opts & DWG_OPTS_IN));
+      c.version = dwg.header.from_version;
       for (BITCODE_BL i = num_objects; i < dwg.num_objects; i++)
         {
           const Dwg_Object *a = &dwg.object[i];
@@ -1360,8 +1732,9 @@ test_same_document (const char *name)
             compare_object (&c, &dwg, a, &readback, b);
         }
       if (readback.num_objects == dwg.num_objects && !c.failed)
-        OK ("%s: %u objects read back, the copies with their fields", what,
-            (unsigned)readback.num_objects);
+        OK ("%s: %u objects read back, the copies with their fields, but "
+            "%u PROXY data last bytes",
+            what, (unsigned)readback.num_objects, c.unwritten);
       else
         FAIL ("%s: %u objects read back of %u, %d field differences", what,
               (unsigned)readback.num_objects, (unsigned)dwg.num_objects,
@@ -1649,6 +2022,131 @@ test_eed (void)
   return numfailed ();
 }
 
+/* A linetype's dash texts, which the decoder points into the linetype's
+   strings_area: the copy's point into the copy's strings_area, at the same
+   offsets. None of the public drawings has a linetype with text, so a
+   linetype of example_2004.dwg gets two text dashes, laid out as the
+   decoder lays them out. */
+static int
+test_ltype_text (void)
+{
+  const char *what = "LTYPE dash texts";
+  const char *file = "copy_ltype_text.dwg";
+  char path[256];
+  Dwg_Data dwg, readback;
+  Dwg_Object_LTYPE *ltype = NULL;
+  const Dwg_Object_LTYPE *copy = NULL;
+  const Dwg_Object *obj, *copy_obj;
+  BITCODE_H style;
+  BITCODE_RLL handle = 0;
+  Dwg_Copy_Map *map;
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0;
+  Compare c;
+  int error;
+
+  failed = 0;
+  if (!test_file ("example_2004.dwg", path, sizeof (path))
+      || read_dwg (path, &dwg) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: read failed", what);
+      return 1;
+    }
+  style = dwg_find_tablehandle (&dwg, "Standard", "STYLE");
+  for (BITCODE_BL i = 0; i < dwg.num_objects && !ltype; i++)
+    if (dwg.object[i].fixedtype == DWG_TYPE_LTYPE
+        && dwg.object[i].tio.object->tio.LTYPE->strings_area
+        && !dwg.object[i].tio.object->tio.LTYPE->numdashes)
+      {
+        ltype = dwg.object[i].tio.object->tio.LTYPE;
+        handle = dwg.object[i].handle.value;
+      }
+  if (!ltype || !style)
+    {
+      FAIL ("%s: no linetype without dashes, or no Standard style", what);
+      free_dwg (&dwg);
+      return 1;
+    }
+  free (ltype->dashes);
+  ltype->numdashes = 2;
+  ltype->dashes = (Dwg_LTYPE_dash *)calloc (2, sizeof (Dwg_LTYPE_dash));
+  ltype->pattern_len = 0.75;
+  ltype->has_strings_area = 1;
+  memset (ltype->strings_area, 0, 256);
+  memcpy (ltype->strings_area, "AB", 3);
+  memcpy (ltype->strings_area + 3, "CDE", 4);
+  for (int i = 0; i < 2; i++)
+    {
+      ltype->dashes[i].parent = ltype;
+      ltype->dashes[i].length = i ? -0.25 : 0.5;
+      ltype->dashes[i].shape_flag = 2;
+      ltype->dashes[i].scale = 1.0;
+      ltype->dashes[i].style
+          = dwg_add_handleref (&dwg, 5, style->absolute_ref, NULL);
+      ltype->dashes[i].text = (char *)ltype->strings_area + (i ? 3 : 0);
+    }
+
+  map = dwg_copy_map_new ();
+  loglevel = tracelevel;
+  error = dwg_copy_objects (&dwg, &dwg, &handle, 1, map, &unresolved,
+                            &num_unresolved);
+  copy_obj = dwg_resolve_handle (&dwg, dwg_copy_map_get (map, handle));
+  if (copy_obj && copy_obj->fixedtype == DWG_TYPE_LTYPE)
+    copy = copy_obj->tio.object->tio.LTYPE;
+  if (!error && copy && copy->numdashes == 2 && copy->dashes
+      && copy->strings_area && copy->strings_area != ltype->strings_area
+      && copy->dashes[0].text == (char *)copy->strings_area
+      && copy->dashes[1].text == (char *)copy->strings_area + 3)
+    OK ("%s: copied into the copy's strings_area, at offsets 0 and 3", what);
+  else
+    FAIL ("%s: error 0x%x, copy %p, texts not in the copy's strings_area",
+          what, (unsigned)error, (void *)copy);
+
+  memset (&c, 0, sizeof (c));
+  c.map = map;
+  c.same_document = 1;
+  c.version = dwg.header.from_version;
+  c.what = what;
+  obj = dwg_resolve_handle (&dwg, handle);
+  if (copy)
+    compare_object (&c, &dwg, obj, &dwg, copy_obj);
+  if (copy && !c.failed)
+    OK ("%s: the copy has its source's fields", what);
+  else
+    FAIL ("%s: %d field differences between copy and source", what,
+          c.failed);
+
+  memset (&readback, 0, sizeof (readback));
+  error = write_dwg (file, &dwg);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (file, &readback);
+  if (error >= DWG_ERR_CRITICAL || !copy)
+    FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+  else
+    {
+      const Dwg_Object *read
+          = dwg_resolve_handle (&readback, copy_obj->handle.value);
+      memset (&c, 0, sizeof (c));
+      c.dd_tolerance = 1;
+      c.version = dwg.header.from_version;
+      c.what = "read back LTYPE";
+      if (read)
+        compare_object (&c, &dwg, copy_obj, &readback, read);
+      if (read && !c.failed)
+        OK ("%s: read back the same", what);
+      else
+        FAIL ("%s: %s, %d differences", what, read ? "read" : "not read",
+              c.failed);
+    }
+  free_dwg (&readback);
+  if (!numfailed ())
+    unlink (file);
+  free_dwg (&dwg);
+  dwg_copy_map_free (map);
+  free (unresolved);
+  return numfailed ();
+}
+
 /* A refused copy returns an error from DWG_ERR_CRITICAL up and adds
    nothing to dst. */
 static void
@@ -1779,6 +2277,7 @@ main (int argc, char *argv[])
   error += test_same_document ("example_2000.dwg");
   error += test_unresolved ();
   error += test_eed ();
+  error += test_ltype_text ();
   error += test_refused ();
   return error ? 1 : 0;
 }
