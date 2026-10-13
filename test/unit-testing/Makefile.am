@@ -27,6 +27,9 @@ add_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo
 color_test_LDADD = $(add_test_LDADD)
+summaryinfo_test_LDADD = $(LDADD) \
+	$(top_builddir)/src/codepages.lo \
+	$(top_builddir)/src/bits.lo
 bits_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo
@@ -393,6 +396,7 @@ check_minimal = \
 	dxf_test$(EXEEXT)
 if USE_WRITE
 check_minimal += add_test$(EXEEXT)
+check_minimal += summaryinfo_test$(EXEEXT)
 endif
 if !HAVE_MINGW
 check_minimal += decode_test$(EXEEXT)
