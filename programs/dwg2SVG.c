@@ -131,13 +131,13 @@ strcasestr_compat (const char *haystack, const char *needle)
   return NULL;
 #endif
 }
-static DWG_SVG_THREAD_LOCAL double block_base_x = 0.0, block_base_y = 0.0; // current block's base_pt
 /* Block-local origin shift applied while emitting a block's symbol contents,
    so that path coords stay in a precision-safe range (≲ 1e6) even when the
    block's entities live in million-scale block-local coords (a common DWG
    authoring pattern: blocks of contents pre-positioned at world coords with
    the INSERT compensating).  When in_block_definition is set, transform_X/Y
-   subtract these.  output_INSERT adds R·S·offset to its <use> translate so
+   subtract these.  output_INSERT adds R·S·(offset - base_pt) to its <use>
+   translate, which places the block's base point and undoes the shift, so
    the final on-canvas position is unchanged.  Zero by default ⇒ no-op for
    normal small-coord blocks. */
 static DWG_SVG_THREAD_LOCAL double current_block_offset_x = 0.0;
@@ -357,9 +357,11 @@ typedef struct
   char *eff_layer;                /* HTML-escaped effective layer name (heap) */
   char *eff_layer_safe_id;        /* sanitised for use as XML id suffix (heap) */
   double offset_x;                /* origin shift baked into the symbol's path
-                                     coords; output_INSERT adds R·S·offset to
-                                     its <use> translate so the final on-canvas
-                                     position is unchanged. 0 ⇒ no shift. */
+                                     coords; output_INSERT adds
+                                     R·S·(offset - base_pt) to its <use>
+                                     translate, whose offset term undoes the
+                                     shift, so the final on-canvas position
+                                     is unchanged. 0 ⇒ no shift. */
   double offset_y;
 } BlockCombo;
 
@@ -406,17 +408,29 @@ help (void)
 }
 #endif /* !DWG2SVG_NO_MAIN */
 
+/* A DWG angle in degrees (counter-clockwise, Y-up) as an SVG rotation in
+   the current output frame.  At the top level the output is Y-down, which
+   negates angles.  Inside block definitions and paper-space viewports the
+   coordinates are still Y-up and the parent transform does the flip, so
+   the DWG angle is used as is.  output_INSERT, transform_ANGLE and the
+   TEXT/MTEXT output all rotate through this. */
+static double
+frame_angle (double angle)
+{
+  if (in_block_definition)
+    return angle;
+  return -angle;
+}
+
 /* Angle in degrees for an SVG rotate() of a point-symmetric shape (an
-   ellipse).  At the top level the output is Y-down, which negates angles;
-   180 - angle is the same rotation as -angle for such a shape.  Inside
-   block definitions and viewports the coordinates are still Y-up and the
-   parent transform does the flip, so the DWG angle is used as is. */
+   ellipse).  At the top level it adds 180 to frame_angle, as upstream's
+   180 - angle does; for such a shape that is the same rotation. */
 static double
 transform_ANGLE (double angle)
 {
   if (in_block_definition)
-    return angle;
-  return 180 - angle;
+    return frame_angle (angle);
+  return 180 + frame_angle (angle);
 }
 
 static double
@@ -885,6 +899,7 @@ output_text_element (Dwg_Object *obj, double x, double y,
 {
   int has_rotation = fabs (rotation_deg) > 0.001;
   int has_scale = fabs (width_factor - 1.0) > 0.001;
+  double frame_rotation = frame_angle (rotation_deg);
   double tx = has_scale ? x / width_factor : x;
   /* When inside a block definition the INSERT transform applies a Y-flip
      (matrix with -sy) which mirrors text.  Counter this by rendering text
@@ -913,7 +928,7 @@ output_text_element (Dwg_Object *obj, double x, double y,
            T = translate(x, y) * rotate(α) * scale(wf, -1)
                  * translate(-x/wf, y)
          which simplifies to the matrix below. */
-      double rot_rad = rotation_deg * M_PI / 180.0;
+      double rot_rad = frame_rotation * M_PI / 180.0;
       double c = cos (rot_rad);
       double s = sin (rot_rad);
       double wf = has_scale ? width_factor : 1.0;
@@ -924,9 +939,9 @@ output_text_element (Dwg_Object *obj, double x, double y,
     }
   else if (has_rotation && has_scale)
     printf (" transform=\"rotate(%f %f %f) scale(%f %d)\"",
-            -rotation_deg, tx, render_y, width_factor, ys);
+            frame_rotation, tx, render_y, width_factor, ys);
   else if (has_rotation)
-    printf (" transform=\"rotate(%f %f %f)\"", -rotation_deg, tx, render_y);
+    printf (" transform=\"rotate(%f %f %f)\"", frame_rotation, tx, render_y);
   else if (has_scale)
     printf (" transform=\"scale(%f %d)\"", width_factor, ys);
   else if (in_block_definition)
@@ -1934,6 +1949,7 @@ output_MTEXT (Dwg_Object *obj)
       const char *anchor = get_text_anchor (horiz);
       const char *baseline = get_dominant_baseline (vert);
       int has_rotation = fabs (rotation_deg) > 0.001;
+      double frame_rotation = frame_angle (rotation_deg);
       size_t i;
 
       printf ("\t<text id=\"dwg-object-%d\" x=\"%f\" y=\"%f\" "
@@ -1945,7 +1961,7 @@ output_MTEXT (Dwg_Object *obj)
 
       if (has_rotation && in_block_definition)
         {
-          double rot_rad = rotation_deg * M_PI / 180.0;
+          double rot_rad = frame_rotation * M_PI / 180.0;
           double c = cos (rot_rad);
           double s = sin (rot_rad);
           printf (" transform=\"matrix(%f %f %f %f %f %f)\"",
@@ -1955,7 +1971,7 @@ output_MTEXT (Dwg_Object *obj)
         }
       else if (has_rotation)
         printf (" transform=\"rotate(%f %f %f)\"",
-                -rotation_deg, tx, render_y);
+                frame_rotation, tx, render_y);
       else if (in_block_definition)
         printf (" transform=\"scale(1 -1)\"");
 
@@ -2554,9 +2570,8 @@ output_ELLIPSE (Dwg_Object *obj)
      for those; we used to draw the full ellipse.  Three cases:
        • arc_span ≈ 0    → degenerate, emit nothing (matches TrueView)
        • arc_span ≈ 2π   → full ellipse, keep the existing <ellipse> emit
-       • else            → partial arc, emit <path> with elliptical-arc
-                           A-command using the same large_arc/sweep/rotation
-                           conventions as output_ARC. */
+       • else            → partial arc, tessellated into a <path> polyline
+                           (see below). */
   {
     double arc_span = ell->end_angle - ell->start_angle;
     while (arc_span < 0.0)         arc_span += 2.0 * M_PI;
@@ -2590,14 +2605,14 @@ output_ELLIPSE (Dwg_Object *obj)
     else
       {
         /* Partial elliptical arc.  We tessellate into a polyline rather
-           than emit SVG's <path A> elliptical-arc command — the rotation
-           offset we apply (180°, point-symmetric for full ellipses) makes
-           SVG's sweep/large-arc selection give wrong results that aren't
-           straightforward to derive analytically, so we compute every
-           sample point ourselves in C and emit them directly.  Same
-           approach as output_SPLINE.  N is chosen to give ~32 samples per
-           half-revolution (smooth at engineering-print zoom), with a
-           floor of 16 for small arcs. */
+           than emit SVG's <path A> elliptical-arc command.  The 180°
+           offset transform_ANGLE adds at the top level is only the same
+           rotation for a point-symmetric shape, so it can't rotate a
+           partial arc.  Rather than derive <path A>'s sweep/large-arc
+           flags for each frame, we compute every sample point ourselves
+           in C and emit them directly.  Same approach as output_SPLINE.
+           N is chosen to give ~32 samples per half-revolution (smooth at
+           engineering-print zoom), with a floor of 16 for small arcs. */
         double ca = cos (angle_rad);
         double sa = sin (angle_rad);
         /* For mirrored entities (extrusion.z < 0) the OCS→WCS transform is
@@ -3373,13 +3388,9 @@ output_INSERT (Dwg_Object *obj)
         return;
       transform_OCS (&ins_pt, insert->ins_pt, insert->extrusion);
 
-      /* At the top level the output is in Y-down page coordinates and
-         this INSERT does the y-flip itself (y_scale below), so the angle
-         is negated.  Inside block definitions and paper-space viewports
-         the coordinates are still Y-up and the parent transform does the
-         flip, so the DWG angle is used as is. */
-      rotation_deg = (in_block_definition ? 1.0 : -1.0) * (180.0 / M_PI)
-                     * insert->rotation;
+      /* At the top level this INSERT does the y-flip itself (y_scale
+         below), and frame_angle negates the angle to match. */
+      rotation_deg = frame_angle ((180.0 / M_PI) * insert->rotation);
 
       /* An INSERT draws a block point g at ins_pt + R·S·(g - base_pt).  The
          <use> below applies translate(tx, ty) · rotate · scale to the
@@ -3470,8 +3481,8 @@ output_INSERT (Dwg_Object *obj)
             }
           else
             {
-              /* SVG rotate uses rotation_deg (computed above, with
-                 its sign depending on in_block_definition).  Matrix is
+              /* SVG rotate uses rotation_deg (computed above with
+                 frame_angle).  Matrix is
                    [cos -sin]
                    [sin  cos]
                  applied to (dx, dy). */
@@ -4411,10 +4422,8 @@ output_BLOCK_HEADER (Dwg_Object_Ref *ref)
           const char *suffix
               = current_eff_layer_safe ? current_eff_layer_safe : "_0";
           is_g = 1;
-          // Set block definition mode with block's base point
+          // Set block definition mode
           in_block_definition = 1;
-          block_base_x = hdr->base_pt.x;
-          block_base_y = hdr->base_pt.y;
           printf ("\t<g id=\"symbol-" FORMAT_HV "-%s\" >\n\t\t<!-- %s -->\n",
                   ref->absolute_ref, suffix, escaped ? escaped : "");
         }
