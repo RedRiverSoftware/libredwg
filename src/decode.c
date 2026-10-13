@@ -1901,16 +1901,17 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
                 }
 #endif
               info->sections[j] = find_section (dwg, page.number);
-              // an uncompressed page: its 32-byte header and data in the file
-              if (info->compressed == 1 && info->sections[j]
-                  && info->sections[j]->address + 32 + info->max_decomp_size
+              // an uncompressed section's pages must lie within the file
+              if (info->compressed == 1 && info->max_decomp_size
+                  && info->sections[j]
+                  && info->sections[j]->address + info->sections[j]->size
                          > file_size)
                 {
                   LOG_ERROR ("Skip section %s with page %" PRId32
                              " @0x%" PRIx64 " + 0x%x past the end of the file",
                              info->name, page.number,
                              info->sections[j]->address,
-                             info->max_decomp_size);
+                             (unsigned)info->sections[j]->size);
                   info->max_decomp_size = info->size = 0;
                   error |= DWG_ERR_VALUEOUTOFBOUNDS;
                 }

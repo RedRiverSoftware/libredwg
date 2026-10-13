@@ -2773,7 +2773,8 @@ bit_write_T16 (Bit_Chain *restrict dat, BITCODE_T16 restrict chain)
   else
     length = 0;
   // AutoCAD reads the RS length as signed, and refuses a file with a longer
-  // string: trim to INT16_MAX, with the NUL it counts before r2007
+  // string: trim so that the length fits INT16_MAX with the NUL it counts
+  // before r2007
   if (length > INT16_MAX - 1)
     {
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
