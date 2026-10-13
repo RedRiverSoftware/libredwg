@@ -111,6 +111,8 @@ test_upconvert_CMC (void)
     { 257, 0, 0xc8000000, "None" },
     // e.g. from a DXF 420 group
     { 148, 0xc2123456, 0xc2123456, "true colour" },
+    { 256, 0xc3000100, 0xc3000100, "ACI form of ByLayer" },
+    { 257, 0xc3000101, 0xc3000101, "ACI form of None" },
   };
   for (unsigned i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
     {

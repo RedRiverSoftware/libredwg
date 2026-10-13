@@ -3992,12 +3992,16 @@ bit_CMC_aci_index (const BITCODE_BL rgb)
   return (BITCODE_BSd)(rgb & 0xFF);
 }
 
-/* An ACI colour (method 0xc3) from a palette index, as AutoCAD writes it.
+/* An ACI colour (method 0xc3) from a palette index, as AutoCAD writes it,
+   or from 256 (ByLayer) or 257 (None); the inverse of bit_CMC_aci_index.
    The index is negative for a layer that is off. */
 BITCODE_BL
 bit_CMC_aci_rgb (const BITCODE_BSd index)
 {
-  return 0xc3000000 | ((BITCODE_BL)abs (index) & 0xFF);
+  const BITCODE_BL value = (BITCODE_BL)abs (index);
+  if (value == 0x100 || value == 0x101)
+    return 0xc3000000 | value;
+  return 0xc3000000 | (value & 0xFF);
 }
 
 /** Read color
