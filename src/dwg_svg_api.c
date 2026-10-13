@@ -71,6 +71,7 @@ static int
 dwg_svg_printf(const char *fmt, ...)
 {
   char buf[8192];
+  char *out = buf;
   va_list ap;
   int n;
 
@@ -81,17 +82,32 @@ dwg_svg_printf(const char *fmt, ...)
   if (n < 0)
     return n;
 
+  /* vsnprintf returns the length the whole write needs.  One that doesn't
+     fit the stack buffer (a long TEXT value, say) is formatted again into
+     a buffer of that size. */
+  if ((size_t)n >= sizeof(buf))
+    {
+      size_t size = (size_t)n + 1;
+      out = (char *)malloc(size);
+      if (!out)
+        return -1;
+      va_start(ap, fmt);
+      n = vsnprintf(out, size, fmt, ap);
+      va_end(ap);
+      if (n < 0 || (size_t)n >= size)
+        {
+          free(out);
+          return -1;
+        }
+    }
+
   if (g_svg_writer)
-    {
-      size_t len = (size_t)n;
-      if (len >= sizeof(buf))
-        len = sizeof(buf) - 1;
-      g_svg_writer(buf, len, g_svg_writer_user);
-    }
+    g_svg_writer(out, (size_t)n, g_svg_writer_user);
   else
-    {
-      fwrite(buf, 1, (size_t)n, stdout);
-    }
+    fwrite(out, 1, (size_t)n, stdout);
+
+  if (out != buf)
+    free(out);
   return n;
 }
 

@@ -14,7 +14,9 @@
 /* SVG output of in-memory drawings through dwg_data_to_svg, the library API
    to dwg2SVG's renderer:
    - a rotated TEXT with a width factor is anchored at its insertion point,
-     at the top level and in a block. */
+     at the top level and in a block;
+   - one write longer than dwg_svg_printf's 8 KB stack buffer (a long TEXT
+     value) reaches the SVG whole. */
 
 #define SVG_API_TEST_C
 #include <math.h>
@@ -301,11 +303,74 @@ test_rotated_text_anchor (void)
   loglevel = test_loglevel;
 }
 
+/* "A&" escapes to "A&amp;", so 2000 of them make the TEXT one write of about
+   12 KB: more than dwg_svg_printf's 8 KB stack buffer, from a value that
+   fits in it. */
+#define LONG_REPEAT 2000
+
+static void
+test_long_write (void)
+{
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, 0);
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_model_space_object (dwg)->tio.object->tio.BLOCK_HEADER;
+  dwg_point_3d ins_pt = { 10.0, 10.0, 0.0 };
+  char *value = (char *)malloc (2 * LONG_REPEAT + 1);
+  char *expected = (char *)malloc (6 * LONG_REPEAT + sizeof ("</text>"));
+  char *svg;
+  size_t len;
+
+  if (!value || !expected)
+    {
+      fail ("out of memory");
+      free (value);
+      free (expected);
+      dwg_free (dwg);
+      free (dwg);
+      return;
+    }
+  for (int i = 0; i < LONG_REPEAT; i++)
+    {
+      memcpy (value + 2 * i, "A&", 2);
+      memcpy (expected + 6 * i, "A&amp;", 6);
+    }
+  value[2 * LONG_REPEAT] = '\0';
+  strcpy (expected + 6 * LONG_REPEAT, "</text>");
+  dwg_add_TEXT (ms, value, &ins_pt, 2.5);
+
+  svg = render_mspace (dwg, &len);
+  if (svg)
+    {
+      if (len == strlen (svg))
+        ok ("long write: svg_len %lu is the string's length",
+            (unsigned long)len);
+      else
+        fail ("long write: svg_len %lu, the string is %lu long",
+              (unsigned long)len, (unsigned long)strlen (svg));
+      if (strstr (svg, expected))
+        ok ("long write: the escaped TEXT value is whole, then </text>");
+      else
+        fail ("long write: the escaped TEXT value of %d bytes is cut short",
+              6 * LONG_REPEAT);
+      if (strstr (svg, "</svg>"))
+        ok ("long write: the SVG is closed");
+      else
+        fail ("long write: no </svg>");
+      dwg_free_svg (svg);
+    }
+  free (value);
+  free (expected);
+  dwg_free (dwg);
+  free (dwg);
+  loglevel = test_loglevel;
+}
+
 int
 main (void)
 {
   loglevel = test_loglevel = is_make_silent () ? 0 : 2;
 
   test_rotated_text_anchor ();
+  test_long_write ();
   return numfailed ();
 }
