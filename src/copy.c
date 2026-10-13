@@ -877,15 +877,17 @@ copy_ref (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
     cdat->error |= DWG_ERR_OUTOFMEM;
 }
 
-/* A handle value in EED or XRECORD data. */
+/* A handle value in EED or XRECORD data. EED data is packed, which leaves
+   its handles unaligned, so slot is only ever accessed with memcpy. */
 static void
 copy_handle_value (Copy_Chain *restrict cdat,
-                   const Dwg_Object *restrict holder,
-                   BITCODE_RLL *restrict slot)
+                   const Dwg_Object *restrict holder, void *restrict slot)
 {
   int unresolved;
-  const BITCODE_RLL target = *slot;
-  *slot = copy_target (cdat, target, &unresolved);
+  BITCODE_RLL target, mapped;
+  memcpy (&target, slot, sizeof (target));
+  mapped = copy_target (cdat, target, &unresolved);
+  memcpy (slot, &mapped, sizeof (mapped));
   if (unresolved)
     add_unresolved (cdat, holder, DWG_COPY_SLOT_HANDLE, slot, target, 0);
 }
@@ -1748,7 +1750,8 @@ dwg_copy_resolve (Dwg_Data *restrict dst, const Dwg_Copy_Map *restrict map,
           }
           break;
         case DWG_COPY_SLOT_HANDLE:
-          *(BITCODE_RLL *)u->slot = mapped;
+          // may be unaligned, in packed EED data
+          memcpy (u->slot, &mapped, sizeof (mapped));
           break;
         default:
           unresolved[j++] = *u;
