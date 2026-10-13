@@ -80,6 +80,7 @@ TESTDATA = \
     test-data/2004/Donut.dwg \
     test-data/2004/Donut.jpg \
     test-data/2004/Donut.txt \
+    test-data/2004/Dynblocks.dwg \
     test-data/2004/Ellipse.dwg \
     test-data/2004/Ellipse.jpg \
     test-data/2004/Ellipse.txt \
