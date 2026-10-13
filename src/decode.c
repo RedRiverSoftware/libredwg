@@ -1650,7 +1650,8 @@ read_R2004_section_map (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
   return error;
 }
 
-/* R2004+ only */
+/* R2004+ only, for compressed sections: read_R2004_section_info bounds
+   uncompressed ones by the file */
 unsigned int
 section_max_decomp_size (const Dwg_Data *dwg, const Dwg_Section_Type id)
 {
@@ -1686,6 +1687,7 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
   Bit_Chain dec = { 0 };
   BITCODE_BL i, j;
   int error;
+  const size_t file_size = dat->size;
 
   if (decomp_data_size > 0x2f000000 && // 790Mb
       (decomp_data_size > 8 * comp_data_size || comp_data_size > dat->size))
@@ -1795,8 +1797,16 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
       //     LOG_ERROR ("read_R2004_section_info out of range");
       //     return DWG_ERR_INVALIDDWG;
       //   }
-      //  max_decomp_size is the decompressed block size
-      max_decomp_size = section_max_decomp_size (dwg, info->fixedtype);
+      //  max_decomp_size is the decompressed block size.
+      //  An uncompressed page holds that many bytes of the file as they are,
+      //  so the file bounds it, not a per-type cap: AutoCAD writes such
+      //  sections (SummaryInfo, AppInfo, AppInfoHistory, ...) as one page
+      //  sized to their data, rounded up to 0x80. Each page must also lie
+      //  within the file, checked below.
+      if (info->compressed == 1)
+        max_decomp_size = (unsigned)MIN (file_size, 0xFFFFFFFF);
+      else
+        max_decomp_size = section_max_decomp_size (dwg, info->fixedtype);
       if (info->max_decomp_size > max_decomp_size)
         {
           LOG_ERROR ("Skip section %s with max decompression size 0x%x > 0x%x",
@@ -1891,6 +1901,20 @@ read_R2004_section_info (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
                 }
 #endif
               info->sections[j] = find_section (dwg, page.number);
+              // an uncompressed section's pages must lie within the file
+              if (info->compressed == 1 && info->max_decomp_size
+                  && info->sections[j]
+                  && info->sections[j]->address + info->sections[j]->size
+                         > file_size)
+                {
+                  LOG_ERROR ("Skip section %s with page %" PRId32
+                             " @0x%" PRIx64 " + 0x%x past the end of the file",
+                             info->name, page.number,
+                             info->sections[j]->address,
+                             (unsigned)info->sections[j]->size);
+                  info->max_decomp_size = info->size = 0;
+                  error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                }
               if (info->sections[j])
                 {
                   LOG_HANDLE ("     section[%d].info[%d]: %s type %d => ", i,
