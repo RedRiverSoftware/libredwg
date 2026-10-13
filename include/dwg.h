@@ -1647,9 +1647,9 @@ typedef enum DWG_COLOR_METHOD
   DWG_COLOR_METHOD_VOID = 0,
   DWG_COLOR_METHOD_BYLAYER = 0xc0, /* (also c3 and rgb of 0x100) */
   DWG_COLOR_METHOD_BYBLOCK = 0xc1, /* (also c3 and rgb of 0) */
-  DWG_COLOR_METHOD_ACI = 0xc2,     /* Color index, for entities (default),
-                                      with names with an additional name flag RC */
-  DWG_COLOR_METHOD_TRUECOLOR = 0xc3,
+  DWG_COLOR_METHOD_TRUECOLOR = 0xc2, /* rgb in the low 24 bits. A color book
+                                        color has names, with flag 1 and 2 */
+  DWG_COLOR_METHOD_ACI = 0xc3,       /* Color index in the low byte */
   DWG_COLOR_METHOD_FGCOLOR = 0xc5,
   DWG_COLOR_METHOD_NONE = 0xc8, /* (also c3 and rgb of 0x101) */
 } Dwg_Color_Method;

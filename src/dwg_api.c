@@ -29351,8 +29351,8 @@ dwg_init_ACSH_CLASS (Dwg_Data *restrict dwg, Dwg_Object *restrict obj,
   _obj->history_node.major = 27;
   _obj->history_node.minor = 52;
   _obj->history_node.color.index = 256;
-  _obj->history_node.color.rgb = 0xc3000001;
-  _obj->history_node.color.method = 0xc3;
+  _obj->history_node.color.rgb = 0xc0000000;
+  _obj->history_node.color.method = 0xc0;
   _obj->history_node.color.flag = 0x0;
   _obj->history_node.step_id = 97;    //?
   _obj->history_node.material = NULL; // => MATERIAL of LAYER "0"

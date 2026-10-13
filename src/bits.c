@@ -3980,6 +3980,30 @@ bit_write_TIMERLL (Bit_Chain *restrict dat, BITCODE_TIMERLL date)
   bit_write_RL (dat, date.ms);
 }
 
+/* The index of an ACI colour (method 0xc3): the palette index in the low
+   byte, as AutoCAD writes it, or 0x100 (256) for ByLayer and 0x101 (257) for
+   None. */
+BITCODE_BSd
+bit_CMC_aci_index (const BITCODE_BL rgb)
+{
+  const BITCODE_BL value = rgb & 0x00FFFFFF;
+  if (value == 0x100 || value == 0x101)
+    return (BITCODE_BSd)value;
+  return (BITCODE_BSd)(rgb & 0xFF);
+}
+
+/* An ACI colour (method 0xc3) from a palette index, as AutoCAD writes it,
+   or from 256 (ByLayer) or 257 (None); the inverse of bit_CMC_aci_index.
+   The index is negative for a layer that is off. */
+BITCODE_BL
+bit_CMC_aci_rgb (const BITCODE_BSd index)
+{
+  const BITCODE_BL value = (BITCODE_BL)abs (index);
+  if (value == 0x100 || value == 0x101)
+    return 0xc3000000 | value;
+  return 0xc3000000 | (value & 0xFF);
+}
+
 /** Read color
  */
 int
@@ -4018,12 +4042,25 @@ bit_read_CMC (Bit_Chain *dat, Bit_Chain *str_dat, Dwg_Color *restrict color)
           color->method = 0xc2;
           color->rgb = 0xc2000000 | (color->rgb & 0xffffff);
         }
-      // ACI keeps the palette index in the low byte, as AutoCAD writes it.
-      // Otherwise fixup index by palette lookup.
-      if (color->method == 0xc3)
-        color->index = color->rgb & 0xFF;
-      else
-        color->index = dwg_find_color_index (color->rgb);
+      // Fixup the index. A true colour gets the palette entry with its rgb.
+      switch (color->method)
+        {
+        case 0xc0: // ByLayer
+          color->index = 256;
+          break;
+        case 0xc1: // ByBlock
+          color->index = 0;
+          break;
+        case 0xc3: // ACI
+          color->index = bit_CMC_aci_index (color->rgb);
+          break;
+        case 0xc8: // None
+          color->index = 257;
+          break;
+        default:
+          color->index = dwg_find_color_index (color->rgb);
+          break;
+        }
     }
   return 0;
 }
@@ -4041,13 +4078,17 @@ bit_upconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color)
             color->method = 0xc0;
           else if (color->index == 0)
             color->method = 0xc1;
+          else if (color->index == 257)
+            color->method = 0xc8;
         }
-      color->rgb = color->method << 0x18;
-      // ACI keeps the palette index in the low byte, as AutoCAD writes it
+      // ACI keeps the palette index in the low byte, as AutoCAD writes it,
+      // and a true colour its rgb
       if (color->method == 0xc3)
-        color->rgb |= color->index & 0xFF;
+        color->rgb = bit_CMC_aci_rgb (color->index);
       else if (color->method == 0xc2)
-        color->rgb |= 0x00ffffff;
+        color->rgb = 0xc2000000 | (color->rgb & 0x00FFFFFF);
+      else
+        color->rgb = (BITCODE_BL)color->method << 24;
     }
 }
 
@@ -4069,8 +4110,7 @@ bit_downconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color)
         case 0xc1:
           color->index = 0;
           break;   // ByBlock
-        case 0xc2: // Entity
-        case 0xc3: // TrueColor
+        case 0xc2: // TrueColor
           // Keep an existing palette index whose rgb round-trips: several
           // palette entries share one rgb (e.g. 1 and 10, 5 and 170), and
           // dwg_find_color_index returns the first match, silently
@@ -4082,6 +4122,11 @@ bit_downconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color)
           color->index = dwg_find_color_index (color->rgb);
           if (color->index == 256)
             color->index = color->rgb & 0xff;
+          break;
+        case 0xc3: // ACI
+          color->index = bit_CMC_aci_index (color->rgb);
+          if (color->index == 257) // None, as for 0xc8
+            color->index = 0;
           break;
         case 0xc8:
           color->index = 0;
@@ -4104,17 +4149,23 @@ bit_write_CMC (Bit_Chain *dat, Bit_Chain *str_dat, Dwg_Color *restrict color)
       bit_write_BS (dat, 0); // index override
       if (!color->method && color->rgb & 0xFF000000)
         color->method = color->rgb >> 0x18;
-      else if (!color->method && color->index > 0 && color->index < 256)
+      else if (!color->method && color->index != 0
+               && abs (color->index) < 256)
         {
           // a palette index only, as the add API sets it: ACI, with the
           // index in the low byte as AutoCAD writes it
           color->method = 0xc3;
-          color->rgb = 0xc3000000 | color->index;
+          color->rgb = bit_CMC_aci_rgb (color->index);
         }
       else if (!color->method && color->index == 256)
         {
           color->method = 0xc0;
           color->rgb = 0xc0000000;
+        }
+      else if (!color->method && color->index == 257)
+        {
+          color->method = 0xc8;
+          color->rgb = 0xc8000000;
         }
       else if (!color->method)
         {
@@ -4126,7 +4177,7 @@ bit_write_CMC (Bit_Chain *dat, Bit_Chain *str_dat, Dwg_Color *restrict color)
         color->rgb
             = ((BITCODE_BL)color->method << 24) | (color->rgb & 0x00FFFFFF);
       bit_write_BL (dat, color->rgb);
-      if (color->method == 0xc2) // for entity
+      if (color->method == 0xc2) // true colour; a color book colour has names
         {
           if (color->name && !bit_empty_T (dat, color->name))
             color->flag |= 1;

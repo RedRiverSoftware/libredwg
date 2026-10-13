@@ -863,7 +863,12 @@ dxfb_CMC (Bit_Chain *restrict dat, Dwg_Color *restrict color, const int dxf,
         }
       else if (color->method == 0xc3)
         {
-          if (abs (color->index) > 0 && abs (color->index) < 256)
+          const BITCODE_BSd aci = bit_CMC_aci_index (color->rgb);
+          if (aci == 256 || aci == 257) // ByLayer, None
+            {
+              VALUE_RS (aci, dxf);
+            }
+          else if (abs (color->index) > 0 && abs (color->index) < 256)
             {
               VALUE_RSd (color->index, dxf);
             }

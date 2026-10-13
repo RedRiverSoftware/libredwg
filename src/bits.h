@@ -336,6 +336,9 @@ void bit_write_CMC (Bit_Chain *dat, Bit_Chain *str_dat,
 // Convert from truecolor (r2004+) to palette (-r2000)
 void bit_downconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color);
 void bit_upconvert_CMC (Bit_Chain *dat, Dwg_Color *restrict color);
+// ACI colours (method 0xc3), as AutoCAD writes them
+BITCODE_BSd bit_CMC_aci_index (const BITCODE_BL rgb);
+BITCODE_BL bit_CMC_aci_rgb (const BITCODE_BSd index);
 
 void bit_read_ENC (Bit_Chain *dat, Bit_Chain *hdl_dat, Bit_Chain *str_dat,
                    Dwg_Color *restrict color);

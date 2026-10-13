@@ -26,6 +26,7 @@ LDADD = $(top_builddir)/src/libredwg.la \
 add_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo
+color_test_LDADD = $(add_test_LDADD)
 summaryinfo_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo
@@ -402,6 +403,9 @@ check_minimal += decode_test$(EXEEXT)
 if USE_WRITE
 check_minimal += encode_test$(EXEEXT)
 endif
+endif
+if USE_WRITE
+check_minimal += color_test$(EXEEXT)
 endif
 
 if CHECK_LESS
