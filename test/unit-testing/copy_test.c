@@ -17,7 +17,7 @@
      read back and compared again;
    - copies within one document;
    - references to objects outside the copy, reported and then resolved;
-   - EED;
+   - EED, also a string the decoder left unread;
    - linetype dash texts in the linetype's strings_area;
    - refused copies. */
 
@@ -2022,6 +2022,289 @@ test_eed (void)
   return numfailed ();
 }
 
+/* The byte that starts at bit of data, which a bit chain reads most
+   significant bit first. */
+static unsigned char
+byte_at_bit (const unsigned char *data, const size_t bit)
+{
+  const size_t byte = bit / 8;
+  const unsigned shift = (unsigned)(bit % 8);
+  if (!shift)
+    return data[byte];
+  return (unsigned char)((data[byte] << shift)
+                         | (data[byte + 1] >> (8 - shift)));
+}
+
+static void
+set_byte_at_bit (unsigned char *data, const size_t bit,
+                 const unsigned char value)
+{
+  const size_t byte = bit / 8;
+  const unsigned shift = (unsigned)(bit % 8);
+  if (!shift)
+    {
+      data[byte] = value;
+      return;
+    }
+  data[byte] = (unsigned char)((data[byte] & (0xFF << (8 - shift)))
+                               | (value >> shift));
+  data[byte + 1] = (unsigned char)((data[byte + 1] & (0xFF >> shift))
+                                   | (value << (8 - shift)));
+}
+
+/* Writes example_2000.dwg to file with the length of its first "DesignCenter
+   Data" EED string set to 255, more than its group holds. Returns 0 when
+   the drawing or the string isn't found. */
+static int
+write_unread_eed_drawing (const char *file)
+{
+  // code 0, length 17, codepage 30 (big-endian), then the string
+  const unsigned char item[] = { 0x00, 0x11, 0x00, 0x1E, 'D', 'e', 's', 'i',
+                                 'g',  'n',  'C',  'e',  'n', 't', 'e', 'r',
+                                 ' ',  'D',  'a',  't',  'a' };
+  char path[256];
+  struct stat st;
+  unsigned char *data;
+  size_t bit;
+  FILE *fp;
+  int found = 0, written = 0;
+
+  if (!test_file ("example_2000.dwg", path, sizeof (path))
+      || stat (path, &st) || (size_t)st.st_size <= sizeof (item))
+    return 0;
+  data = (unsigned char *)malloc ((size_t)st.st_size);
+  fp = fopen (path, "rb");
+  if (!data || !fp
+      || fread (data, 1, (size_t)st.st_size, fp) != (size_t)st.st_size)
+    {
+      if (fp)
+        fclose (fp);
+      free (data);
+      return 0;
+    }
+  fclose (fp);
+  // an object's EED can start at any bit of the file
+  for (bit = 0; bit / 8 + sizeof (item) < (size_t)st.st_size; bit++)
+    {
+      size_t k = 0;
+      while (k < sizeof (item) && byte_at_bit (data, bit + k * 8) == item[k])
+        k++;
+      if (k == sizeof (item))
+        {
+          found = 1;
+          break;
+        }
+    }
+  if (found)
+    {
+      set_byte_at_bit (data, bit + 8, 0xFF);
+      unlink (file);
+      fp = fopen (file, "wb");
+      if (fp)
+        {
+          written = fwrite (data, 1, (size_t)st.st_size, fp)
+                    == (size_t)st.st_size;
+          written &= !fclose (fp);
+        }
+    }
+  free (data);
+  return written;
+}
+
+static const Dwg_Eed *
+object_eed (const Dwg_Object *obj, BITCODE_BL *num_eedp)
+{
+  *num_eedp = 0;
+  if (obj->supertype == DWG_SUPERTYPE_ENTITY && obj->tio.entity)
+    {
+      *num_eedp = obj->tio.entity->num_eed;
+      return obj->tio.entity->eed;
+    }
+  if (obj->supertype == DWG_SUPERTYPE_OBJECT && obj->tio.object)
+    {
+      *num_eedp = obj->tio.object->num_eed;
+      return obj->tio.object->eed;
+    }
+  return NULL;
+}
+
+/* The index of the EED string in obj that write_unread_eed_drawing ()
+   changed, as the decoder left it: unread, with zero bytes and the length
+   255. -1 if obj has none. */
+static int
+unread_eed_string (const Dwg_Object *obj)
+{
+  BITCODE_BL num_eed;
+  const Dwg_Eed *eed = object_eed (obj, &num_eed);
+  for (BITCODE_BL i = 0; eed && i < num_eed; i++)
+    {
+      const Dwg_Eed_Data *data = eed[i].data;
+      if (data && data->code == 0 && !data->u.eed_0.is_tu
+          && data->u.eed_0.length == 255 && !data->u.eed_0.string[0])
+        return (int)i;
+    }
+  return -1;
+}
+
+/* An EED string that claims more bytes than its group holds. For r13 to
+   r2004 the decoder keeps it unread: the item has the claimed length,
+   zero bytes, and only the room its group's size gives it. The encoder
+   writes a string that starts with NUL as the empty string, and the copy
+   copies it as that, reading only the item's first string byte. First an
+   item built as the decoder leaves it, then the one the decoder leaves in
+   example_2000.dwg with one length byte changed. */
+static int
+test_eed_unread_string (void)
+{
+  const char *what = "EED string left unread";
+  const char *file = "copy_eed_unread.dwg";
+  const char *drawing = "copy_eed_unread_source.dwg";
+  const dwg_point_3d p0 = { 0.0, 0.0, 0.0 }, p1 = { 10.0, 0.0, 0.0 };
+  const BITCODE_BS group_size = 31;
+  Dwg_Data *src = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Data *dst = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Data readback, drawn;
+  Dwg_Object_BLOCK_HEADER *mspace
+      = dwg_model_space_object (src)->tio.object->tio.BLOCK_HEADER;
+  Dwg_Object_APPID *appid = dwg_add_APPID (src, "COPY_TEST");
+  Dwg_Entity_LINE *line = dwg_add_LINE (mspace, &p0, &p1);
+  const Dwg_Object *obj = &src->object[line->parent->objid];
+  const Dwg_Object *copy;
+  const Dwg_Eed_Data *data;
+  Dwg_Object_Entity *ent = obj->tio.entity;
+  BITCODE_RLL handle = obj->handle.value;
+  Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0;
+  int error, index = -1;
+
+  failed = 0;
+  ent->num_eed = 1;
+  ent->eed = (Dwg_Eed *)calloc (1, sizeof (Dwg_Eed));
+  ent->eed[0].size = group_size;
+  ent->eed[0].handle.code = 5;
+  ent->eed[0].handle.value = src->object[appid->parent->objid].handle.value;
+  dwg_set_handle_size (&ent->eed[0].handle);
+  // allocated as the decoder allocates an item of its group
+  ent->eed[0].data = (Dwg_Eed_Data *)calloc (group_size + 8, 1);
+  ent->eed[0].data->code = 0;
+  ent->eed[0].data->u.eed_0.length = 255;
+  ent->eed[0].data->u.eed_0.codepage = src->header.codepage;
+
+  loglevel = tracelevel;
+  error = dwg_copy_objects (dst, src, &handle, 1, map, &unresolved,
+                            &num_unresolved);
+  copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
+  data = copy && copy->tio.entity->num_eed == 1
+             ? copy->tio.entity->eed[0].data
+             : NULL;
+  if (!error && data && data->code == 0 && !data->u.eed_0.is_tu
+      && data->u.eed_0.length == 0 && !data->u.eed_0.string[0]
+      && data->u.eed_0.codepage == src->header.codepage
+      && copy->tio.entity->eed[0].size)
+    OK ("%s: copied as the empty string", what);
+  else
+    FAIL ("%s: error 0x%x, copied with length %d", what, (unsigned)error,
+          data ? (int)data->u.eed_0.length : -1);
+
+  dwg_add_APPID (dst, "COPY_TEST");
+  for (BITCODE_BL i = 0; i < num_unresolved; i++)
+    {
+      const BITCODE_RLL mapped
+          = match_by_name (dst, src, unresolved[i].target);
+      if (mapped)
+        dwg_copy_map_set (map, unresolved[i].target, mapped);
+    }
+  dwg_copy_resolve (dst, map, unresolved, &num_unresolved);
+  memset (&readback, 0, sizeof (readback));
+  error = write_dwg (file, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (file, &readback);
+  if (error >= DWG_ERR_CRITICAL || !copy)
+    FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+  else
+    {
+      const Dwg_Object *read
+          = dwg_resolve_handle (&readback, copy->handle.value);
+      data = read && read->tio.entity->num_eed == 1
+                 ? read->tio.entity->eed[0].data
+                 : NULL;
+      if (data && data->code == 0 && data->u.eed_0.length == 0
+          && !data->u.eed_0.string[0])
+        OK ("%s: read back as the empty string", what);
+      else
+        FAIL ("%s: %s, length %d", what, read ? "read" : "not read",
+              data ? (int)data->u.eed_0.length : -1);
+    }
+  free_dwg (&readback);
+  free_dwg (src);
+  free (src);
+  free_dwg (dst);
+  free (dst);
+  dwg_copy_map_free (map);
+  free (unresolved);
+  unresolved = NULL;
+  num_unresolved = 0;
+
+  if (!write_unread_eed_drawing (drawing)
+      || read_dwg (drawing, &drawn) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: no drawing made from example_2000.dwg's \"DesignCenter "
+            "Data\" string",
+            what);
+      unlink (drawing);
+      unlink (file);
+      return numfailed ();
+    }
+  obj = NULL;
+  for (BITCODE_BL i = 0; i < drawn.num_objects && index < 0; i++)
+    {
+      obj = &drawn.object[i];
+      index = unread_eed_string (obj);
+    }
+  dst = new_document_like (&drawn);
+  map = dwg_copy_map_new ();
+  copy = NULL;
+  data = NULL;
+  if (index >= 0)
+    {
+      BITCODE_BL num_eed, num_copied;
+      const Dwg_Eed *copied;
+      handle = obj->handle.value;
+      loglevel = tracelevel;
+      error = dwg_copy_objects (dst, &drawn, &handle, 1, map, &unresolved,
+                                &num_unresolved);
+      copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
+      object_eed (obj, &num_eed);
+      copied = copy ? object_eed (copy, &num_copied) : NULL;
+      if (copied && num_copied == num_eed)
+        data = copied[index].data;
+    }
+  if (index < 0)
+    FAIL ("%s: no EED string left unread in the changed drawing", what);
+  else if (!error && data && data->code == 0 && data->u.eed_0.length == 0
+           && !data->u.eed_0.string[0])
+    OK ("%s: %s " FORMAT_HV " EED[%d] in example_2000.dwg copied as the "
+        "empty string",
+        what, obj->name, obj->handle.value, index);
+  else
+    FAIL ("%s: %s " FORMAT_HV " EED[%d]: error 0x%x, copied with length %d",
+          what, obj->name, obj->handle.value, index, (unsigned)error,
+          data ? (int)data->u.eed_0.length : -1);
+
+  free_dwg (&drawn);
+  free_dwg (dst);
+  free (dst);
+  dwg_copy_map_free (map);
+  free (unresolved);
+  if (!numfailed ())
+    {
+      unlink (file);
+      unlink (drawing);
+    }
+  return numfailed ();
+}
+
 /* A linetype's dash texts, which the decoder points into the linetype's
    strings_area: the copy's point into the copy's strings_area, at the same
    offsets. None of the public drawings has a linetype with text, so a
@@ -2277,6 +2560,7 @@ main (int argc, char *argv[])
   error += test_same_document ("example_2000.dwg");
   error += test_unresolved ();
   error += test_eed ();
+  error += test_eed_unread_string ();
   error += test_ltype_text ();
   error += test_refused ();
   return error ? 1 : 0;

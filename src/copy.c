@@ -896,6 +896,16 @@ copy_handle_value (Copy_Chain *restrict cdat,
  * EED and XRECORD data
  */
 
+/* The length of an EED string as the encoder writes it: a string that
+   starts with NUL as the empty string. The decoder leaves a string that
+   claims more bytes than its group holds unread, with that length and zero
+   bytes, in an item sized by its group, so its length can't be trusted. */
+static BITCODE_RS
+eed_string_length (const Dwg_Eed_Data *restrict data)
+{
+  return data->u.eed_0.string[0] ? data->u.eed_0.length : 0;
+}
+
 /* The bytes an EED item uses, which may be fewer than sizeof (Dwg_Eed_Data):
    the decoder sizes each item by what is left of its group. Strings and
    binary chunks are inline. */
@@ -909,7 +919,7 @@ eed_data_size (const Dwg_Eed_Data *restrict data)
         return offsetof (Dwg_Eed_Data, u.eed_0_r2007.string)
                + ((size_t)data->u.eed_0_r2007.length + 1) * 2;
       return offsetof (Dwg_Eed_Data, u.eed_0.string)
-             + (size_t)data->u.eed_0.length + 1;
+             + (size_t)eed_string_length (data) + 1;
     case 1:
       return offsetof (Dwg_Eed_Data, u) + sizeof (data->u.eed_1);
     case 2:
@@ -992,6 +1002,8 @@ copy_eed (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
           break;
         }
       memcpy (copy->data, e->data, size);
+      if (copy->data->code == 0 && !copy->data->u.eed_0.is_tu)
+        copy->data->u.eed_0.length = eed_string_length (e->data);
       copy->size = e->size;
       copy->handle = e->handle;
       copy->raw = NULL;
