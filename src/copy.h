@@ -45,15 +45,19 @@ typedef enum DWG_COPY_SLOT
 } Dwg_Copy_Slot;
 
 /* A reference in a copy to a source object that was neither copied nor in
-   the map. The copy holds a NULL handle in its place until
-   dwg_copy_resolve () fills it in. */
+   the map. Until dwg_copy_resolve () fills it in, the copy holds a NULL
+   handle in its place, or 0 for a handle value in EED or XRECORD data. A
+   handle with code 0 is a value, and keeps its source value instead. */
 typedef struct _dwg_copy_unresolved
 {
   BITCODE_RLL holder; /* the copy holding the reference, in dst */
   BITCODE_RLL target; /* the handle it referred to, in src */
   BITCODE_RC code;    /* the reference's handle code */
   Dwg_Copy_Slot kind;
-  void *slot; /* inside the holder's data */
+  /* Inside the holder's data, maybe in one of its arrays (reactors, a
+     block's entities, EED): valid until that is reallocated, so resolve
+     before changing the copies. */
+  void *slot;
 } Dwg_Copy_Unresolved;
 
 /* Copies the objects with the given handles from src into dst, appending
@@ -69,21 +73,41 @@ typedef struct _dwg_copy_unresolved
    (SORTENTSTABLE's sort keys): it is mapped when it names a copied object,
    and otherwise keeps its value and, between documents, is reported too.
 
+   The same goes for a copy's owner, reactors and extension dictionary when
+   they are not copied. Within one document a copy keeps its original's, so
+   it shares the original's extension dictionary. Between documents an
+   extension dictionary left out becomes a NULL handle while
+   is_xdic_missing stays 0. The caller copies the dictionary as well, or
+   drops it: a NULL handle and, from r2004, is_xdic_missing set.
+
    Raw bits that the encoder would write unchanged (unknown bits, raw EED)
    are cleared, so the copies are encoded from their fields. Variable-type
    classes the copies need are added to dst. Adding the copies to their
    owners (a block's entity list, a dictionary) is the caller's, and so is
    the r13-r2000 entity chain (prev_entity, next_entity) of copied entities
-   whose neighbours were not copied.
+   whose neighbours were not copied. The copies keep their sources'
+   nolinks, and while it is set the encoder writes no prev_entity and
+   next_entity, so a caller that links a copy into a chain clears it.
+
+   The copy walks the specs, and so runs their unguarded statements again,
+   some of which derive fields from others: from r2000, LAYER's frozen, off,
+   frozen_in_new, locked, plotflag, linewt and flag are derived from flag0.
+   The sources need their fields as decoded from a DWG file. A LAYER made
+   with the add API (flag0 0) loses its plotflag and linewt in the copy, and
+   one imported from DXF its frozen and locked.
 
    src and dst must be r13 to r2004 documents of the same version and
    codepage. Objects whose class LibreDWG cannot decode (UNKNOWN_ENT,
    UNKNOWN_OBJ) are refused, as is a handle that is already in map. A
    refusal changes nothing.
 
-   Returns 0, or DWG_ERR_* bits: DWG_ERR_CRITICAL or above for a refusal, or
-   for an allocation failure, after which dst keeps the copies made so
-   far. */
+   Returns 0, or DWG_ERR_* bits. From DWG_ERR_CRITICAL up: a refusal, also
+   of a NULL dst, src, map or handles (DWG_ERR_INTERNALERROR), or an
+   allocation failure, after which dst keeps the copies made so far. Below
+   it, the copies are made with some data left out:
+   DWG_ERR_VALUEOUTOFBOUNDS for an array, or 3DSOLID ACIS data, that could
+   not be copied and is NULL in the copy, and DWG_ERR_INVALIDEED for an EED
+   group, whose items could not be decoded, left out of a copy. */
 int dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
                       const BITCODE_RLL *restrict handles,
                       const BITCODE_BL num_handles, Dwg_Copy_Map *restrict map,
@@ -92,7 +116,8 @@ int dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
 
 /* Points each unresolved reference whose target is now in map at the mapped
    handle, and moves the ones still unresolved to the front of the array.
-   Returns 0, or DWG_ERR_OUTOFMEM. */
+   Returns 0, DWG_ERR_OUTOFMEM, or DWG_ERR_INTERNALERROR for a NULL dst, map
+   or num_unresolvedp. */
 int dwg_copy_resolve (Dwg_Data *restrict dst, const Dwg_Copy_Map *restrict map,
                       Dwg_Copy_Unresolved *restrict unresolved,
                       BITCODE_BL *restrict num_unresolvedp);
