@@ -47,6 +47,9 @@ static int test_loglevel;
    representations and purge preventers. */
 #define NUM_DYNBLOCK_OBJECTS 117
 #define NUM_BLOCK_ELEMENTS 48
+/* Those LibreDWG keeps the raw bits of: 9 stretch actions, 6 evaluation
+   graphs, 23 block representations and 6 purge preventers. */
+#define NUM_RAW_BITS_OBJECTS 44
 
 /* The element version AutoCAD 2027 writes into r2004 files. */
 #define R2004_BE_MAJOR 25
@@ -605,12 +608,16 @@ test_roundtrip (void)
                   src->name, src->handle);
         }
     }
-  if (num_size + num_size_gap == num_source)
+  if (num_source != NUM_DYNBLOCK_OBJECTS)
+    fail ("roundtrip: %u dynamic-block objects, expected %u", num_source,
+          NUM_DYNBLOCK_OBJECTS);
+  else if (num_size + num_size_gap == num_source)
     ok ("roundtrip: %u objects with AutoCAD's sizes", num_size);
-  if (num_raw && num_same_raw == num_raw)
+  if (num_raw != NUM_RAW_BITS_OBJECTS)
+    fail ("roundtrip: %u objects with raw bits, expected %u", num_raw,
+          NUM_RAW_BITS_OBJECTS);
+  else if (num_same_raw == num_raw)
     ok ("roundtrip: %u objects encoded to AutoCAD's bits", num_raw);
-  else if (!num_raw)
-    fail ("roundtrip: no objects with raw bits");
 
 #ifndef DISABLE_JSON
   json_b = write_json (json_written, &read);
