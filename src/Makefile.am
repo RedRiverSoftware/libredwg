@@ -45,6 +45,7 @@ libredwg_la_SOURCES = \
 	free.c \
 	copy.c \
 	dynblock_copy.c \
+	dynblock_eval.c \
 	hash.c \
 	dynapi.c \
 	classes.c \
