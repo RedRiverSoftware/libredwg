@@ -208,36 +208,9 @@ run ()
     then
         rm "./$log"
     else
-        todo=
-        case $bprog in
-            dwgwrite)
-                case "$(uname -s)" in
-                    CYGWIN*) todo=1 ;;
-                    *) ;;
-                esac
-                ;;
-            dwgrewrite)
-                case "$(uname -s)" in
-                    MINGW*) test -f core && rm core
-                            todo=1
-                            ;;
-                    *) ;;
-                esac
-                ;;
-            *)  ;;
-        esac
-
-        if [ -z $todo ]
-        then
-            i=$((i+1))
-            echo "$prog failure $?"
-            tail -n100 "$log"
-        else
-            tmpnum=$((i+1))
-            echo "$(basename "$0"): TODO $prog $tmpnum failures"
-            ls -l "$log"
-            tail -n100 "$log"
-        fi
+        i=$((i+1))
+        echo "$prog failure $?"
+        tail -n100 "$log"
     fi
 }
 

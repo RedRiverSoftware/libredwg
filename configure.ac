@@ -499,6 +499,7 @@ AC_ARG_ENABLE([dxf],AS_HELP_STRING([--disable-dxf],[
 AM_CONDITIONAL([DISABLE_DXF], [test x$enable_dxf = xno])
 AS_IF([test x$enable_dxf = xno],
   AC_DEFINE([DISABLE_DXF],1,[Define to disable DXF, JSON and other in/out modules.])
+  AC_SUBST(DISABLE_DXF, 1)
   AC_MSG_RESULT([yes]),
   AC_MSG_RESULT([no (default)]))
 
