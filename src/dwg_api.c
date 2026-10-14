@@ -25651,6 +25651,18 @@ dwg_add_entity_defaults (Dwg_Data *restrict dwg,
   return 0;
 }
 
+/* Sets *refp to ref. The decoder keeps NULL handles out of dwg->object_ref
+   (see dwg_decode_handleref_with_code), so in a document read from a file the
+   field owns its NULL ref and dwg_free frees it only through that field. Free
+   the replaced ref unless it is global. */
+static void
+replace_entity_link (Dwg_Object_Ref **restrict refp, Dwg_Object_Ref *ref)
+{
+  if (*refp && *refp != ref && !(*refp)->handleref.is_global)
+    free (*refp);
+  *refp = ref;
+}
+
 /* Insert new entity into the block.
    We have two entity chains, one in the BLOCK_HEADER (not relative, obj always
    NULL) and the 2nd in the entities itself, these are always relative, so
@@ -25714,9 +25726,9 @@ dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
                    || !_owner->first_entity->absolute_ref)
                && !_owner->num_owned && !dwg_obj_is_subentity (obj))
         {
-          BITCODE_H ref;
-          _owner->first_entity = _owner->last_entity
-              = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+          BITCODE_H ref = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+          replace_entity_link (&_owner->first_entity, ref);
+          replace_entity_link (&_owner->last_entity, ref);
           LOG_TRACE ("%s.{first,last}_entity = " FORMAT_REF "\n", owner->name,
                      ARGS_REF (_owner->first_entity));
           ref = dwg_add_handleref (dwg, 3, obj->handle.value, NULL);
@@ -25741,8 +25753,9 @@ dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
             {
               BITCODE_H ref = _owner->last_entity;
               prev = ref ? dwg_ref_object (dwg, ref) : NULL; // may fail!
-              _owner->last_entity
-                  = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+              replace_entity_link (
+                  &_owner->last_entity,
+                  dwg_add_handleref (dwg, 4, obj->handle.value, NULL));
               LOG_TRACE ("%s.last_entity = " FORMAT_REF "\n", owner->name,
                          ARGS_REF (_owner->last_entity));
               ref = dwg_add_handleref (dwg, 3, obj->handle.value, NULL);
@@ -25761,11 +25774,15 @@ dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
                 {
                   // is next and is not first
                   prev->tio.entity->nolinks = 1;
+                  // the next link is implied now, and dwg_free skips the
+                  // links of an entity with nolinks
+                  replace_entity_link (&prev->tio.entity->next_entity, NULL);
                 }
               else
                 {
-                  prev->tio.entity->next_entity
-                      = dwg_add_handleref (dwg, 4, obj->handle.value, prev);
+                  replace_entity_link (
+                      &prev->tio.entity->next_entity,
+                      dwg_add_handleref (dwg, 4, obj->handle.value, prev));
                   LOG_TRACE ("prev.next_entity = " FORMAT_REF "\n",
                              ARGS_REF (prev->tio.entity->next_entity));
                   ent->prev_entity
@@ -25782,8 +25799,9 @@ dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
                   && (!_owner->first_entity
                       || !_owner->first_entity->absolute_ref))
                 {
-                  _owner->first_entity
-                      = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+                  replace_entity_link (
+                      &_owner->first_entity,
+                      dwg_add_handleref (dwg, 4, obj->handle.value, NULL));
                   LOG_TRACE ("%s.first_entity = " FORMAT_REF "\n", owner->name,
                              ARGS_REF (_owner->first_entity));
                 }

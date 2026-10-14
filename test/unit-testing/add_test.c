@@ -1429,6 +1429,99 @@ test_r2000_entity_links (void)
   return numfailed ();
 }
 
+/* r2000: a POINT added to the model space of a document read from a file,
+   with num_points POINTs there. The read document's NULL entity links belong
+   to their fields, not to dwg->object_ref, so dwg_insert_entity frees the
+   ones it replaces: ASan fails a wrong free here, and examples/dwgadd_test.sh,
+   which runs with leak detection, fails a link replaced without one. The
+   links it sets must reach the new POINT. 2 POINTs take the branch that sets
+   nolinks on the last one read. */
+static int
+test_r2000_insert_into_read (const int num_points)
+{
+  char file[32], label[32];
+  Dwg_Data read;
+  Dwg_Data *dwg;
+  Dwg_Object_BLOCK_HEADER *ms;
+  Dwg_Object *last = NULL, *obj;
+  Dwg_Entity_POINT *point;
+  const dwg_point_3d pt = { 10.0, 0.0, 0.0 };
+  int error;
+
+  failed = 0;
+  snprintf (file, sizeof (file), "add_r2000_read%d.dwg", num_points);
+  snprintf (label, sizeof (label), "r2000_insert %d", num_points);
+  dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  if (!dwg)
+    {
+      fail ("%s: dwg_new_Document failed", label);
+      return numfailed ();
+    }
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  for (int i = 0; i < num_points; i++)
+    {
+      const dwg_point_3d p = { (double)i, 0.0, 0.0 };
+      dwg_add_POINT (ms, &p);
+    }
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (&read));
+  if (!ms)
+    {
+      fail ("%s: no model space read", label);
+      dwg_free (&read);
+      return numfailed ();
+    }
+  if (num_points)
+    {
+      last = ms->last_entity ? dwg_ref_object (&read, ms->last_entity) : NULL;
+      if (!last || last->fixedtype != DWG_TYPE_POINT)
+        {
+          fail ("%s: model space last_entity is no POINT", label);
+          last = NULL;
+        }
+    }
+  point = dwg_add_POINT (ms, &pt);
+  obj = point ? dwg_obj_generic_to_object (point, &error) : NULL;
+  if (!obj)
+    {
+      fail ("%s: dwg_add_POINT failed", label);
+      dwg_free (&read);
+      return numfailed ();
+    }
+  if (!ms->last_entity || ms->last_entity->absolute_ref != obj->handle.value)
+    fail ("%s: model space last_entity is not the new POINT " FORMAT_RLLx,
+          label, (BITCODE_RLL)obj->handle.value);
+  if (!num_points
+      && (!ms->first_entity
+          || ms->first_entity->absolute_ref != obj->handle.value))
+    fail ("%s: model space first_entity is not the new POINT " FORMAT_RLLx,
+          label, (BITCODE_RLL)obj->handle.value);
+  if (last)
+    {
+      const Dwg_Object_Entity *ent = last->tio.entity;
+      BITCODE_RLL next = 0;
+      // with nolinks, the next entity is at handle + 1
+      if (ent->nolinks)
+        next = last->handle.value + 1;
+      else if (ent->next_entity)
+        next = ent->next_entity->absolute_ref;
+      if (next != obj->handle.value)
+        fail ("%s: the read POINT " FORMAT_RLLx " links to " FORMAT_RLLx
+              ", not to the new POINT " FORMAT_RLLx,
+              label, (BITCODE_RLL)last->handle.value, next,
+              (BITCODE_RLL)obj->handle.value);
+    }
+  if (!failed)
+    ok ("%s: the model space links reach the new POINT", label);
+
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
 static int
 test_names (void)
 {
@@ -1885,6 +1978,9 @@ main (int argc, char *argv[])
   error += test_api_version ();
   error += test_r2004_write ();
   error += test_r2000_entity_links ();
+  error += test_r2000_insert_into_read (0);
+  error += test_r2000_insert_into_read (1);
+  error += test_r2000_insert_into_read (2);
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)
