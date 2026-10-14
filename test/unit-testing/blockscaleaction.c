@@ -6,6 +6,7 @@ api_process (dwg_object *obj)
 {
   int error, isnew;
   BLOCKACTION_WITHBASEPT_fields (5);
+  BITCODE_RC xy_type;
   BITCODE_BL i;
 
   Dwg_Version_Type dwg_version = obj->parent->header.version;
@@ -37,4 +38,5 @@ api_process (dwg_object *obj)
       CHK_SUBCLASS_UTF8TEXT (_obj->conn_pts[i], BLOCKACTION_connectionpts,
                              name);
     }
+  CHK_ENTITY_TYPE (_obj, BLOCKSCALEACTION, xy_type, RC);
 }

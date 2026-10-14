@@ -214,15 +214,6 @@ same_bits_but_padding (const BITCODE_TF autocad, const BITCODE_TF libredwg,
   return 1;
 }
 
-/* BLOCKSCALEACTION reads its two connection points from
-   AcDbBlockActionWithBasePt over again with its own three, and leaves 8 bits
-   of its data stream unread, so its encoding is shorter than AutoCAD's. */
-static int
-is_known_size_gap (const char *name)
-{
-  return !strcmp (name, "BLOCKSCALEACTION");
-}
-
 static int
 is_read_error (int error)
 {
@@ -513,7 +504,7 @@ test_roundtrip (void)
   unsigned num_fields = 0, num_json_elements = 0, num_json_versions = 0;
 #endif
   Source_Object source[NUM_DYNBLOCK_OBJECTS];
-  unsigned num_source = 0, num_size = 0, num_size_gap = 0;
+  unsigned num_source = 0, num_size = 0;
   unsigned num_raw = 0, num_same_raw = 0;
   Dwg_Data dwg, read;
   int error;
@@ -579,15 +570,6 @@ test_roundtrip (void)
         }
       if (obj->size == src->size && obj->bitsize == src->bitsize)
         num_size++;
-      else if (is_known_size_gap (src->name))
-        {
-          num_size_gap++;
-          todo ("roundtrip: %s " FORMAT_HV " size %u bitsize %u, AutoCAD's "
-                "%u and %u",
-                src->name, src->handle, (unsigned)obj->size,
-                (unsigned)obj->bitsize, (unsigned)src->size,
-                (unsigned)src->bitsize);
-        }
       else
         fail ("roundtrip: %s " FORMAT_HV " size %u bitsize %u, AutoCAD's "
               "%u and %u",
@@ -611,7 +593,7 @@ test_roundtrip (void)
   if (num_source != NUM_DYNBLOCK_OBJECTS)
     fail ("roundtrip: %u dynamic-block objects, expected %u", num_source,
           NUM_DYNBLOCK_OBJECTS);
-  else if (num_size + num_size_gap == num_source)
+  else if (num_size == num_source)
     ok ("roundtrip: %u objects with AutoCAD's sizes", num_size);
   if (num_raw != NUM_RAW_BITS_OBJECTS)
     fail ("roundtrip: %u objects with raw bits, expected %u", num_raw,
