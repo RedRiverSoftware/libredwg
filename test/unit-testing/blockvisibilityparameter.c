@@ -36,7 +36,10 @@ api_process (dwg_object *obj)
   // AcDbBlock1PtParameter
   CHK_ENTITY_3RD (_obj, BLOCKVISIBILITYPARAMETER, def_pt);
   CHK_ENTITY_TYPE (_obj, BLOCKVISIBILITYPARAMETER, num_propinfos, BL);
-  CHK_ENTITY_MAX (_obj, BLOCKVISIBILITYPARAMETER, num_propinfos, BL, 2);
+  // num_propinfos can exceed 2: AutoCAD's 2018/Dynblocks.dxf writes 93 = 15
+  // and 47 for B907 and BAD5, the values the DWGs store. Only an implausible
+  // value fails.
+  CHK_ENTITY_MAX (_obj, BLOCKVISIBILITYPARAMETER, num_propinfos, BL, 10000);
   BLOCKPARAMETER_PropInfo (prop1) BLOCKPARAMETER_PropInfo (prop2)
       // AcDbBlockVisibilityParameter
       CHK_ENTITY_TYPE (_obj, BLOCKVISIBILITYPARAMETER, is_initialized, B);

@@ -5,6 +5,8 @@ top_builddir="@top_builddir@"
 EXEEXT="@EXEEXT@"
 TESTS_ENVIRONMENT="@AM_TESTS_ENVIRONMENT@"
 HAVE_ASAN="@HAVE_ASAN@"
+DISABLE_DXF="@DISABLE_DXF@"
+DISABLE_JSON="@DISABLE_JSON@"
 HAVE_ODA="@HAVE_ODA@"
 ODAFileConverter="@ODAFILECONVERTER@"
 srcdir="@abs_srcdir@"
@@ -172,37 +174,47 @@ echo "point (10 0 0)" >>$tmp
 cat $tmp
 dwgaddtest AC1015 r2000 $tmp
 
-if [ -f "$abs_builddir"/../dxf ]; then
+if [ -z "$DISABLE_DXF" ]; then
     cd "$abs_builddir"/.. || exit 1
+    rm -f examples/dwgadd_test.dxf
     ./dxf -o examples/dwgadd_test.dxf examples/dwgadd_test.dwg
     rm -f -- ./dwgadd_test_examples.log
     cd "$abs_builddir" || exit 1
-    if [ -f dwgadd_test.dxf ]; then
-        echo "readdxf \"dwgadd_test.dxf\"" >$tmp
-        echo "point (10 0 0)" >>$tmp
-        cat $tmp
-        if [ "$HAVE_ASAN" = "yes" ]
-        then
-            env ASAN_OPTIONS=detect_leaks=0 dwgaddtest AC1015 r2000 $tmp
-        else
-            dwgaddtest AC1015 r2000 $tmp
-        fi
+    if [ ! -f dwgadd_test.dxf ]; then
+        echo "FAIL: dxf did not convert dwgadd_test.dwg"
+        exit 1
+    fi
+    echo "readdxf \"dwgadd_test.dxf\"" >$tmp
+    echo "point (10 0 0)" >>$tmp
+    cat $tmp
+    if [ "$HAVE_ASAN" = "yes" ]
+    then
+        # indxf still leaks, GH #151. env cannot run the dwgaddtest function,
+        # so set ASAN_OPTIONS in a subshell, which dwgaddtest's exit 1 leaves.
+        ( ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
+          export ASAN_OPTIONS
+          dwgaddtest AC1015 r2000 $tmp ) || exit 1
+    else
+        dwgaddtest AC1015 r2000 $tmp
     fi
 fi
 
-if [ -f "$abs_builddir"/../json ]; then
+if [ -z "$DISABLE_DXF" ] && [ -z "$DISABLE_JSON" ]; then
     cd "$abs_builddir"/.. || exit 1
     cp examples/dwgadd_test.dwg .
+    rm -f dwgadd_test.json examples/dwgadd_test.json
     ./json dwgadd_test.dwg
+    if [ ! -f dwgadd_test.json ]; then
+        echo "FAIL: json did not convert dwgadd_test.dwg"
+        exit 1
+    fi
     mv dwgadd_test.json examples/
     rm -f dwgadd_test.dwg dwgadd_test.log
     cd "$abs_builddir" || exit 1
-    if [ -f dwgadd_test.json ]; then
-        echo "readjson \"dwgadd_test.json\"" >$tmp
-        echo "point (20 0 0)" >>$tmp
-        cat $tmp
-        dwgaddtest AC1015 r2000 $tmp
-    fi
+    echo "readjson \"dwgadd_test.json\"" >$tmp
+    echo "point (20 0 0)" >>$tmp
+    cat $tmp
+    dwgaddtest AC1015 r2000 $tmp
 fi
 
 # cleanup

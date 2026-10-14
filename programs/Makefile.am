@@ -94,9 +94,7 @@ if HAVE_JQ
 TESTS += json.test dwgfilter.test
 endif
 endif
-if HAVE_JING
 TESTS += svg.test
-endif
 endif
 
 check-minimal: $(bin_PROGRAMS)

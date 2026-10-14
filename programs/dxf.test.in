@@ -94,15 +94,24 @@ check_subentity() {
         grep -A8 ^VERTEX "$dxf" >tmp1
         grep -A8 ^VERTEX "$tgt" >tmp2
         d="$(diff -b -U1 tmp1 tmp2)"
-        test -z "$d" || echo "VERTEX $tgt $d"
+        if [ -n "$d" ]; then
+            echo "VERTEX $tgt $d"
+            i=$((i+1))
+        fi
         grep -A8 ^SEQEND "$dxf" >tmp1
         grep -A8 ^SEQEND "$tgt" >tmp2
         d="$(diff -b -U1 tmp1 tmp2)"
-        test -z "$d" || echo "SEQEND $tgt $d"
+        if [ -n "$d" ]; then
+            echo "SEQEND $tgt $d"
+            i=$((i+1))
+        fi
         grep -A8 ^POLYLINE "$dxf" >tmp1
         grep -A8 ^POLYLINE "$tgt" >tmp2
         d="$(diff -b -U1 tmp1 tmp2)"
-        test -z "$d" || echo "POLYLINE $tgt $d"
+        if [ -n "$d" ]; then
+            echo "POLYLINE $tgt $d"
+            i=$((i+1))
+        fi
         rm tmp1 tmp2
         if [ -n "$HAVE_ODA" ]; then
             base="$(basename "$tgt" .dxf)"
@@ -116,7 +125,7 @@ check_subentity() {
                 if test -f "$base.dwg.err"; then
                     cat "$base.dwg.err"
                     echo FAIL "$baseFileConverter" "$tgt" "$year"
-                    return 1
+                    i=$((i+1))
                 fi
             else
                 echo empty $year

@@ -101,7 +101,7 @@ main (int argc, char *argv[])
   // #endif
   skip = getenv ("LESS_TESTS");
   if (skip && atoi (skip))
-    return 0;
+    return 77; // skipped
 
 #ifdef DWG_TYPE
   if (is_type_stable (DWG_TYPE))
@@ -1040,14 +1040,19 @@ main (int argc, char *argv[])
             }
         }
 #ifdef DWG_TYPE
-      if (cov && !numpassed () && !numfailed ())
-        printf ("TODO no coverage for %s\n", dwg_type_name (DWG_TYPE));
+      /* No test DWG has this object, so nothing was checked: report the test
+         as skipped (77 for automake), not as passed. */
+      if (cov && !error && !numpassed () && !numfailed ())
+        {
+          printf ("SKIP: no %s in the test DWGs\n", dwg_type_name (DWG_TYPE));
+          return 77;
+        }
 #endif
     }
   else
     error = test_code (NULL, input, cov);
 
-  return error;
+  return error ? 1 : 0;
 }
 
 /// test all DWG's in all subdirs. not on windows yet
@@ -1156,24 +1161,6 @@ test_code (const char *dir, const char *filename, int cov)
   /* This value is the return value for `main',
      so clamp it to either 0 or 1.  */
   error = (error >= DWG_ERR_CRITICAL || numfailed () > 0) ? 1 : 0;
-#ifdef DWG_TYPE
-  if (is_type_unstable (DWG_TYPE) || is_type_debugging (DWG_TYPE))
-    {
-      if (cov && error)
-        LOG_INFO ("%s failed (TODO: unstable)\n", path);
-      return 0;
-    }
-  else // some exceptions, because we dont want to publish all our test-cases.
-       // test-data is already too big.
-    if (DWG_TYPE == DWG_TYPE_IDBUFFER || DWG_TYPE == DWG_TYPE_ACSH_SPHERE_CLASS
-        || DWG_TYPE == DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT
-        || DWG_TYPE == DWG_TYPE_BLOCKBASEPOINTPARAMETER)
-      {
-        if (cov && error)
-          LOG_INFO ("%s failed (TODO: skipped)\n", path);
-        return 0;
-      }
-#endif
   if (cov && error)
     LOG_WARN ("%s failed", path);
   return error;
