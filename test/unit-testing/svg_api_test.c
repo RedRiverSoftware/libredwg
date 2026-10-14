@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// the library sets loglevel from the document's opts; ok and fail need ours
+// the library sets loglevel from the document's opts; ok needs ours
 static unsigned int test_loglevel;
 
 #include "config.h"
@@ -208,12 +208,35 @@ render_mspace (Dwg_Data *dwg, size_t *len)
   return svg;
 }
 
+/* The model space of a new document, or NULL, after a failed check. Sets
+   *dwgp in both cases, to the document or NULL, for the caller to free. */
+static Dwg_Object_BLOCK_HEADER *
+new_document (Dwg_Data **dwgp)
+{
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, 0);
+  const Dwg_Object *ms = dwg ? dwg_model_space_object (dwg) : NULL;
+  loglevel = test_loglevel;
+  *dwgp = dwg;
+  if (!ms)
+    {
+      fail ("dwg_new_Document: %s", dwg ? "no model space" : "no document");
+      return NULL;
+    }
+  return ms->tio.object->tio.BLOCK_HEADER;
+}
+
 static Dwg_Entity_TEXT *
 add_text (Dwg_Object_BLOCK_HEADER *bh, const char *value,
           const dwg_point_3d *ins_pt, double rotation_deg,
           double width_factor)
 {
   Dwg_Entity_TEXT *text = dwg_add_TEXT (bh, value, ins_pt, 2.5);
+  loglevel = test_loglevel;
+  if (!text)
+    {
+      fail ("dwg_add_TEXT \"%s\" failed", value);
+      return NULL;
+    }
   text->rotation = rotation_deg * M_PI / 180.0;
   text->width_factor = width_factor;
   return text;
@@ -222,8 +245,9 @@ add_text (Dwg_Object_BLOCK_HEADER *bh, const char *value,
 #define NUM_CASES 4
 
 /* TEXTs at one insertion point: a plain one, which the others must be
-   anchored with, then the rotation and width factor cases. */
-static void
+   anchored with, then the rotation and width factor cases. Returns 0 when
+   one isn't added. */
+static int
 add_texts (Dwg_Object_BLOCK_HEADER *bh, const dwg_point_3d *ins_pt,
            Dwg_Entity_TEXT **plain, Dwg_Entity_TEXT **cases)
 {
@@ -232,6 +256,7 @@ add_texts (Dwg_Object_BLOCK_HEADER *bh, const dwg_point_3d *ins_pt,
   cases[1] = add_text (bh, "WIDE", ins_pt, 0.0, 0.8);
   cases[2] = add_text (bh, "ROTATED WIDE", ins_pt, 30.0, 0.8);
   cases[3] = add_text (bh, "ROTATED STRETCHED", ins_pt, 135.0, 1.5);
+  return *plain && cases[0] && cases[1] && cases[2] && cases[3];
 }
 
 static void
@@ -268,9 +293,8 @@ check_anchors (const char *svg, const char *frame,
 static void
 test_rotated_text_anchor (void)
 {
-  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, 0);
-  Dwg_Object_BLOCK_HEADER *ms
-      = dwg_model_space_object (dwg)->tio.object->tio.BLOCK_HEADER;
+  Dwg_Data *dwg;
+  Dwg_Object_BLOCK_HEADER *ms = new_document (&dwg);
   Dwg_Object_BLOCK_HEADER *blk;
   Dwg_Entity_TEXT *top_plain, *top_cases[NUM_CASES];
   Dwg_Entity_TEXT *blk_plain, *blk_cases[NUM_CASES];
@@ -280,14 +304,24 @@ test_rotated_text_anchor (void)
   char *svg;
   size_t len;
 
+  if (!ms)
+    goto done;
   // the extents start at the origin, so the insertion point is far from
   // the SVG's origin and a wrong pivot moves the text visibly
   dwg_add_LINE (ms, &p0, &p1);
-  add_texts (ms, &ins_pt, &top_plain, top_cases);
+  if (!add_texts (ms, &ins_pt, &top_plain, top_cases))
+    goto done;
 
   blk = dwg_add_BLOCK_HEADER (dwg, "LABELS");
+  loglevel = test_loglevel;
+  if (!blk)
+    {
+      fail ("dwg_add_BLOCK_HEADER \"LABELS\" failed");
+      goto done;
+    }
   dwg_add_BLOCK (blk, "LABELS");
-  add_texts (blk, &blk_pt, &blk_plain, blk_cases);
+  if (!add_texts (blk, &blk_pt, &blk_plain, blk_cases))
+    goto done;
   dwg_add_ENDBLK (blk);
   dwg_add_INSERT (ms, &insert_pt, "LABELS", 1.0, 1.0, 1.0, 0.0);
 
@@ -298,8 +332,12 @@ test_rotated_text_anchor (void)
       check_anchors (svg, "block", blk_plain, blk_cases);
       dwg_free_svg (svg);
     }
-  dwg_free (dwg);
-  free (dwg);
+done:
+  if (dwg)
+    {
+      dwg_free (dwg);
+      free (dwg);
+    }
   loglevel = test_loglevel;
 }
 
@@ -311,24 +349,23 @@ test_rotated_text_anchor (void)
 static void
 test_long_write (void)
 {
-  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, 0);
-  Dwg_Object_BLOCK_HEADER *ms
-      = dwg_model_space_object (dwg)->tio.object->tio.BLOCK_HEADER;
-  dwg_point_3d ins_pt = { 10.0, 10.0, 0.0 };
+  // before any check, so that done: frees both whichever check fails
   char *value = (char *)malloc (2 * LONG_REPEAT + 1);
   char *expected = (char *)malloc (6 * LONG_REPEAT + sizeof ("</text>"));
+  Dwg_Data *dwg = NULL;
+  Dwg_Object_BLOCK_HEADER *ms;
+  dwg_point_3d ins_pt = { 10.0, 10.0, 0.0 };
   char *svg;
   size_t len;
 
   if (!value || !expected)
     {
       fail ("out of memory");
-      free (value);
-      free (expected);
-      dwg_free (dwg);
-      free (dwg);
-      return;
+      goto done;
     }
+  ms = new_document (&dwg);
+  if (!ms)
+    goto done;
   for (int i = 0; i < LONG_REPEAT; i++)
     {
       memcpy (value + 2 * i, "A&", 2);
@@ -336,7 +373,12 @@ test_long_write (void)
     }
   value[2 * LONG_REPEAT] = '\0';
   strcpy (expected + 6 * LONG_REPEAT, "</text>");
-  dwg_add_TEXT (ms, value, &ins_pt, 2.5);
+  if (!dwg_add_TEXT (ms, value, &ins_pt, 2.5))
+    {
+      loglevel = test_loglevel;
+      fail ("dwg_add_TEXT of %d bytes failed", 2 * LONG_REPEAT);
+      goto done;
+    }
 
   svg = render_mspace (dwg, &len);
   if (svg)
@@ -358,10 +400,14 @@ test_long_write (void)
         fail ("long write: no </svg>");
       dwg_free_svg (svg);
     }
+done:
   free (value);
   free (expected);
-  dwg_free (dwg);
-  free (dwg);
+  if (dwg)
+    {
+      dwg_free (dwg);
+      free (dwg);
+    }
   loglevel = test_loglevel;
 }
 
