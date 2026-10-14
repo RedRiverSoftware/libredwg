@@ -455,6 +455,11 @@ test_refusals (Dwg_Data *dwg)
   failures += test_refusal (dwg, DOOR_ELEVATION, NULL, 0,
                             REFUSED (DWG_ERR_NOTYETSUPPORTED),
                             "a constraint-based block");
+  v[0].name = (char *)"Window Width";
+  v[0].value = NAN;
+  failures += test_refusal (dwg, WINDOW, v, 1,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a value that isn't finite");
   v[0].name = (char *)"Width";
   v[0].value = 36.0;
   failures += test_refusal (dwg, WINDOW, v, 1,
@@ -481,6 +486,11 @@ test_refusals (Dwg_Data *dwg)
     failures += test_refusal (dwg, WINDOW, NULL, 0,
                               REFUSED (DWG_ERR_INVALIDHANDLE),
                               "an entity the definition lists twice");
+    // and an entity that doesn't resolve
+    window->entities[1] = dwg_add_handleref (dwg, 3, 0xFFFFFF, NULL);
+    failures += test_refusal (dwg, WINDOW, NULL, 0,
+                              REFUSED (DWG_ERR_INVALIDHANDLE),
+                              "an entity that doesn't resolve");
     window->entities[1] = second;
   }
   return failures;
@@ -804,6 +814,9 @@ test_check_finds (Dwg_Data *dwg)
     _e->start_angle += M_PI;
     _e->end_angle += M_PI;
   }
+  // C17F's block: an entity reference that doesn't resolve
+  block_header (dwg, 0xBBDC)->entities[0]
+      = dwg_add_handleref (dwg, 3, 0xFFFFFF, NULL);
   // BFD8's block: its base point
   block_header (dwg, 0xAC8C)->base_pt.x += 1.0;
   // C145's block: entity 0's transparency
@@ -846,6 +859,16 @@ test_check_finds (Dwg_Data *dwg)
   else
     {
       fail ("check of a visibility flag: status %d, %s",
+            c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC17F, 0xBBDC);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->reason
+      && strstr (c->reason, "doesn't resolve"))
+    ok ("check finds an entity that doesn't resolve: %s", c->reason);
+  else
+    {
+      fail ("check of an entity that doesn't resolve: status %d, %s",
             c ? (int)c->status : -1, c && c->reason ? c->reason : "");
       failures++;
     }
@@ -898,9 +921,9 @@ test_check_finds (Dwg_Data *dwg)
       fail ("check of an unplaced block: status %d", c ? (int)c->status : -1);
       failures++;
     }
-  if (report->num_match == 4 && report->num_mismatch == 4
+  if (report->num_match == 3 && report->num_mismatch == 5
       && report->num_no_values == 2 && report->num_unsupported == 13)
-    ok ("check finds: 4 match, 4 mismatch, 2 no values, 13 unsupported");
+    ok ("check finds: 3 match, 5 mismatch, 2 no values, 13 unsupported");
   else
     {
       fail ("check finds: %u match, %u mismatch, %u no values, %u "

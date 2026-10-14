@@ -996,7 +996,13 @@ definition_entities (const Dwg_Data *dwg,
       BITCODE_H *owned = NULL;
       BITCODE_H seqend = NULL;
       if (!ent)
-        continue;
+        {
+          set_reason (reason, reason_size,
+                      "the definition's entity " FORMAT_HV " doesn't resolve",
+                      ref_handle (_def->entities[i]));
+          free (handles);
+          return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+        }
       if (ent->supertype != DWG_SUPERTYPE_ENTITY
           || ent->fixedtype == DWG_TYPE_UNKNOWN_ENT)
         {
@@ -1175,6 +1181,13 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
             error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
             goto done;
           }
+      if (p->kind != DWG_DYNPARAM_VISIBILITY && !isfinite (v->value))
+        {
+          set_reason (reason, reason_size, "property '%s' is given %g",
+                      p->name, v->value);
+          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+          goto done;
+        }
       switch (p->kind)
         {
         case DWG_DYNPARAM_VISIBILITY:
@@ -1476,6 +1489,9 @@ scalar_size (const char *type)
                 { "2RD", 16 },     { "2BD", 16 },    { "2BD_1", 16 },
                 { "2DPOINT", 16 }, { "3BD", 24 },    { "3BD_1", 24 },
                 { "3RD", 24 },     { "3DPOINT", 24 }, { "BE", 24 },
+                { "int", sizeof (int) },
+                { "int32_t", sizeof (int32_t) },
+                { "unsigned long", sizeof (unsigned long) },
                 { NULL, 0 } };
   for (int i = 0; sizes[i].type; i++)
     if (strEQ (type, sizes[i].type))
@@ -1845,7 +1861,12 @@ index_entities (Dynblock_Compare *c, const Dwg_Object_BLOCK_HEADER *_blk,
       const Dwg_Object *ent = ref_object (c->dwg, _blk->entities[i]);
       BITCODE_RL idx;
       if (!ent)
-        continue;
+        {
+          snprintf (c->reason, sizeof (c->reason),
+                    "%s entity " FORMAT_HV " doesn't resolve", whose,
+                    ref_handle (_blk->entities[i]));
+          return 1;
+        }
       if (!etag_index (c->dwg, ent, &idx))
         {
           snprintf (c->reason, sizeof (c->reason),

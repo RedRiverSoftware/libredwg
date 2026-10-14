@@ -172,8 +172,10 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    DWG_ERR_NOTYETSUPPORTED for a value or definition the evaluator doesn't
    support, or a drawing other than r2004; DWG_ERR_UNHANDLEDCLASS for an
    entity or graph node of a class LibreDWG can't decode;
+   DWG_ERR_INVALIDHANDLE for an entity of def that doesn't resolve;
    DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given twice,
-   a state the parameter doesn't have, or a flip value other than 0 or 1;
+   a value that isn't finite, a state the parameter doesn't have, or a
+   flip value other than 0 or 1;
    DWG_ERR_INVALIDTYPE when def is not a dynamic block definition. Or the
    copy's refusal, such as of an entity handle def lists twice. A refusal
    adds nothing to the document, and the reason is logged at LOG_ERROR.
@@ -244,7 +246,8 @@ typedef struct _dwg_dynblock_check_report
    Entities compare by type, by their invisible flag, layer, colour,
    linetype and lineweight, and field by field with the dynapi field
    lists: numbers within tolerance, strings exactly, and references by
-   the entity they point at, paired by index within the blocks. An array
+   the entity they point at, paired by index within the blocks. An entity
+   reference of either block that doesn't resolve is a difference. An array
    the comparison has no length for, unless empty in both, counts as a
    difference. An ELLIPSE also matches the same curve with its major axis
    reversed, and is counted in num_equivalent. The blocks' base points
