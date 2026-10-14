@@ -3780,6 +3780,9 @@ main (int argc, char *argv[])
     error += test_clone (*f, 0);
   for (const char *const *f = r2000; *f; f++)
     error += test_clone (*f, 0);
+  // its PROXY_OBJECTs hold data ending in a partial last byte, which has to
+  // read back as written
+  error += test_clone ("example_r13.dwg", 0);
   error += test_clone ("example_2000.dwg", R_2004);
   error += test_same_document ("example_2004.dwg");
   error += test_same_document ("example_2000.dwg");
