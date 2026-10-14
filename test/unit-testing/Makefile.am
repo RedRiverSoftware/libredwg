@@ -425,6 +425,7 @@ endif
 endif
 if USE_WRITE
 check_minimal += color_test$(EXEEXT)
+check_minimal += svg_api_test$(EXEEXT)
 endif
 
 if CHECK_LESS

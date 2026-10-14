@@ -94,6 +94,11 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   if(NOT MSVC)
     add_test(color_test ${TARGET_SYSTEM_EMULATOR} color_test${CMAKE_EXECUTABLE_SUFFIX})
   endif()
+  add_executable(svg_api_test svg_api_test.c ../../src/logging.c
+    ../../src/classes.c tests_common.h)
+  if(NOT MSVC)
+    add_test(svg_api_test ${TARGET_SYSTEM_EMULATOR} svg_api_test${CMAKE_EXECUTABLE_SUFFIX})
+  endif()
   add_executable(add_test
     add_test.c
     ../../src/bits.c
