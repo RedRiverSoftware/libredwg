@@ -23,10 +23,12 @@
 %{
 #include "config.h"
 #include "dwg_api.h"
+#include "dwg_dynblock_api.h"
 #include "dwg_svg_api.h"
 %}
 
 %include "carrays.i"
+%include "cpointer.i"
 %include "stdint.i"
 %array_functions(Dwg_Object, Dwg_Object_Array);
 
@@ -60,4 +62,17 @@
 %ignore dwg_obj_generic_dwg;
 
 %include "dwg_api.h"
+%include "dwg_dynblock_api.h"
 %include "dwg_svg_api.h"
+
+// The arrays and out parameters of dwg_dynblock_api.h
+%array_functions(Dwg_DynParam, Dwg_DynParam_Array);
+%array_functions(Dwg_DynValue, Dwg_DynValue_Array);
+%array_functions(Dwg_DynBlock_Check, Dwg_DynBlock_Check_Array);
+%array_functions(double, Double_Array);
+%array_functions(char *, String_Array);
+%pointer_functions(Dwg_DynParam *, Dwg_DynParam_Pointer);
+%pointer_functions(Dwg_DynValue *, Dwg_DynValue_Pointer);
+%pointer_functions(Dwg_Object_BLOCK_HEADER *, Dwg_Object_BLOCK_HEADER_Pointer);
+%pointer_functions(BITCODE_BL, BITCODE_BL_Pointer);
+%pointer_functions(int, Int_Pointer);
