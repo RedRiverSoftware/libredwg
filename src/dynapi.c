@@ -14475,7 +14475,7 @@ static const struct _name_subclasses dwg_name_subclasses[] = {
   { "ASSOCROTATEDDIMACTIONBODY", {"AcDbObject", "AcDbAssocActionBody", "AcDbAssocParamBasedActionBody", "AssocRotatedDimActionBody", NULL, NULL, NULL, NULL} },
   { "ASSOCSWEPTSURFACEACTIONBODY", {"AcDbObject", "AcDbAssocActionBody", "AcDbAssocParamBasedActionBody", "AcDbAssocSurfaceActionBody", "AcDbAssocPathBasedSurfaceActionBody", "AcDbAssocSweptSurfaceActionBody", NULL, NULL} },
   { "ASSOCTRIMSURFACEACTIONBODY", {"AcDbObject", "AcDbAssocActionBody", "AcDbAssocParamBasedActionBody", "AcDbAssocSurfaceActionBody", "AcDbAssocPathBasedSurfaceActionBody", "AcDbAssocTrimSurfaceActionBody", NULL, NULL} },
-  { "ASSOCVALUEDEPENDENCY", {"AcDbObject", "AcDbAssocDependency", NULL, NULL, NULL, NULL, NULL, NULL} },
+  { "ASSOCVALUEDEPENDENCY", {"AcDbObject", "AcDbAssocDependency", "AcDbAssocValueDependency", NULL, NULL, NULL, NULL, NULL} },
   { "ASSOCVARIABLE", {"AcDbObject", "AcDbAssocAction", "AcDbAssocVariable", NULL, NULL, NULL, NULL, NULL} },
   { "ASSOCVERTEXACTIONPARAM", {"AcDbObject", "AcDbAssocActionParam", "AcDbAssocSingleDependencyActionParam", "AcDbAssocVertexActionParam", NULL, NULL, NULL, NULL} },
   { "ATTDEF", {"AcDbEntity", "AcDbText", "AcDbAttributeDefinition", NULL, NULL, NULL, NULL, NULL} },

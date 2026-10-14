@@ -36,6 +36,8 @@ static int test_loglevel;
 #include "dwg.h"
 #include "tests_common.h"
 #include "dwg_api.h"
+#include "bits.h"
+#include "out_dxf.h"
 
 #define MAX_FIXTURE_CLASSES 6
 
@@ -540,6 +542,108 @@ test_file (const Fixture_File *f, unsigned index)
   return numfailed ();
 }
 
+#ifndef DISABLE_DXF
+
+static const Dwg_Object *
+find_in (const Dwg_Data *dwg, BITCODE_RLL handle, const char *name)
+{
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    if (dwg->object[i].handle.value == handle)
+      return dwg->object[i].name && !strcmp (dwg->object[i].name, name)
+                 ? &dwg->object[i]
+                 : NULL;
+  return NULL;
+}
+
+/* LibreDWG's DXF of 2004/Dynblocks.dwg reads back with its block actions'
+   connection points, which it writes with AutoCAD's group codes:
+   BLOCKROTATEACTION's third point as 94 and 303, BLOCKSCALEACTION's three
+   as 94-96 and 303-305. */
+static int
+test_dxf_roundtrip (void)
+{
+  const char *name = "2004/Dynblocks.dwg";
+  const char *out = "fields_test_dxf.dxf";
+  char path[512];
+  Dwg_Data dwg, dxf;
+  Bit_Chain dat = { 0 };
+  const Dwg_Object *obj;
+  int error;
+
+  failed = 0;
+  if (!find_fixture (name, path, sizeof (path)))
+    {
+      fail ("%s not found", name);
+      return 1;
+    }
+  error = read_dwg (path, &dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf: %s: dwg_read_file 0x%x", name, error);
+      free_dwg (&dwg);
+      return numfailed ();
+    }
+  unlink (out);
+  dat.fh = fopen (out, "wb");
+  if (!dat.fh)
+    {
+      fail ("dxf: fopen %s", out);
+      free_dwg (&dwg);
+      return numfailed ();
+    }
+  dat.version = dwg.header.version;
+  dat.from_version = dwg.header.from_version;
+  dat.codepage = dwg.header.codepage;
+  dat.opts = dwg.opts;
+  loglevel = tracelevel;
+  error = dwg_write_dxf (&dat, &dwg);
+  loglevel = test_loglevel;
+  fclose (dat.fh);
+  free_dwg (&dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf: %s: dwg_write_dxf 0x%x", name, error);
+      return numfailed ();
+    }
+
+  memset (&dxf, 0, sizeof (dxf));
+  dxf.opts = tracelevel;
+  error = dxf_read_file (out, &dxf);
+  loglevel = test_loglevel;
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf: %s: dxf_read_file 0x%x", out, error);
+      free_dwg (&dxf);
+      return numfailed ();
+    }
+  // Door - Imperial's scale action, and Door Elevation's rotate action
+  obj = find_in (&dxf, 0xBAE6, "BLOCKSCALEACTION");
+  if (obj)
+    check_fields (out, obj);
+  else
+    fail ("dxf: no BLOCKSCALEACTION BAE6");
+  obj = find_in (&dxf, 0xB90C, "BLOCKROTATEACTION");
+  if (obj)
+    {
+      const Dwg_Object_BLOCKROTATEACTION *o
+          = obj->tio.object->tio.BLOCKROTATEACTION;
+      if (o->conn_pts[2].code == 5 && o->conn_pts[2].name
+          && !strcmp (o->conn_pts[2].name, "AngleDelta"))
+        ok ("%s: BLOCKROTATEACTION B90C connection point 5 AngleDelta", out);
+      else
+        fail ("%s: BLOCKROTATEACTION B90C connection point %u %s", out,
+              (unsigned)o->conn_pts[2].code,
+              o->conn_pts[2].name ? o->conn_pts[2].name : "NULL");
+    }
+  else
+    fail ("dxf: no BLOCKROTATEACTION B90C");
+  free_dwg (&dxf);
+  if (!numfailed ())
+    unlink (out);
+  return numfailed ();
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -553,5 +657,8 @@ main (int argc, char *argv[])
 
   for (unsigned i = 0; i < NUM_FIXTURE_FILES; i++)
     error += test_file (&fixture_files[i], i);
+#ifndef DISABLE_DXF
+  error += test_dxf_roundtrip ();
+#endif
   return error ? 1 : 0;
 }
