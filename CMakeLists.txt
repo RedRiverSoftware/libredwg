@@ -278,6 +278,7 @@ set(libredwg_SOURCES
     src/free.c
     src/copy.c
     src/dynblock_copy.c
+    src/dynblock_eval.c
     src/geom.c
     src/out_dxf.c
     ${outjson_SOURCES}

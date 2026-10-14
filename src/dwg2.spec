@@ -1939,9 +1939,13 @@ DWG_OBJECT_END
     SUB_HANDLE_VECTOR (pab,deps, num_deps, 4, 360);         \
     SUB_FIELD_BL (pab,l4, 90);                              \
     SUB_FIELD_BL (pab,num_values, 90);                      \
-    /* Not in r2004: with no values the surface action     \
-       body follows (ASSOCPLANESURFACEACTIONBODY in AutoCAD's \
-       r2004 DXF). Unverified for r2007+. */                \
+    /* Not in r2004 when there are no values: the           \
+       surface action body follows                          \
+       (ASSOCPLANESURFACEACTIONBODY in AutoCAD's r2004      \
+       DXF), the only class with r2004 evidence. AutoCAD's  \
+       r2000-r2010 DXF of ACDBASSOCALIGNEDDIMACTIONBODY has \
+       l5 and assocdep, but LibreDWG does not decode that   \
+       body through this macro. Unverified for r2007+. */   \
     IF_FREE_OR_SINCE (R_2007a) {                            \
       if (!FIELD_VALUE (pab.num_values)) {                  \
         SUB_FIELD_BL (pab,l5, 90);                          \
