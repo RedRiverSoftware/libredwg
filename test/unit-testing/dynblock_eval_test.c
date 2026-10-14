@@ -1371,10 +1371,37 @@ test_linear_refusals (Dwg_Data *dwg)
 
   {
     const BITCODE_3BD endpt = width->def_endpt;
+    const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, WINDOW);
+    const Dwg_Object_BLOCK_HEADER *rep;
+    const Dwg_Object *copy;
     width->def_endpt = width->def_basept;
     failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
                               "a linear parameter of no length");
+    // a huge value on a short parameter: the frame's vertex 3 moves to
+    // about 1e308, and stays at y 0
+    width->def_endpt.x = width->def_basept.x + 0.5;
+    v.value = 1e308;
+    rep = evaluate (dwg, WINDOW, &v, 1, "linear 1e308");
+    copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+    if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
+        && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
+        && isfinite (copy->tio.entity->tio.LWPOLYLINE->points[3].x)
+        && copy->tio.entity->tio.LWPOLYLINE->points[3].x > 1e307
+        && copy->tio.entity->tio.LWPOLYLINE->points[3].y == 0.0)
+      OK ("linear: 1e308 on a parameter 0.5 long moves points by about it");
+    else
+      {
+        fail ("linear: 1e308 on a parameter 0.5 long");
+        failures++;
+      }
     width->def_endpt = endpt;
+    // 4 times as much is more than a double holds
+    stretch->action_offset_x = 4.0;
+    failures += test_refusal (dwg, WINDOW, &v, 1,
+                              REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a value an action can't move points by");
+    stretch->action_offset_x = 1.0;
+    v.value = 24.0;
   }
 
   // Width's stretch moves Height's end point, and Height chains its actions

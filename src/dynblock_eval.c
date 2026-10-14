@@ -2056,6 +2056,15 @@ plan_actions_of (Dynblock_Plan *plan, const Dynblock_Linear *p,
       delta.x = multiplier * (dx * cos (angle) - dy * sin (angle));
       delta.y = multiplier * (dx * sin (angle) + dy * cos (angle));
       delta.z = 0.0;
+      if (!isfinite (delta.x) || !isfinite (delta.y))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' is given %g, which %s '%s' "
+                      "can't move points by",
+                      p->name, p->value, dwg_type_name (a->obj->fixedtype),
+                      a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
       if (delta.x == 0.0 && delta.y == 0.0)
         continue;
       error = a->obj->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION
@@ -2198,9 +2207,10 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
                       p->name);
           return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
-      end.x = p->base.x + (p->end.x - p->base.x) * (p->value / length);
-      end.y = p->base.y + (p->end.y - p->base.y) * (p->value / length);
-      end.z = p->base.z + (p->end.z - p->base.z) * (p->value / length);
+      // the direction first, as value / length can overflow
+      end.x = p->base.x + (p->end.x - p->base.x) / length * p->value;
+      end.y = p->base.y + (p->end.y - p->base.y) / length * p->value;
+      end.z = p->base.z + (p->end.z - p->base.z) / length * p->value;
       end_delta.x = end.x - p->end.x;
       end_delta.y = end.y - p->end.y;
       end_delta.z = end.z - p->end.z;

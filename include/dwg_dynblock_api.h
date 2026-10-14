@@ -273,26 +273,28 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    bits of the copy for data it left out (such as an array, 3DSOLID ACIS
    data or an EED group it could not copy). Otherwise NULL with *errorp
    from DWG_ERR_CRITICAL up. A refusal is DWG_ERR_INVALIDDWG with a bit for
-   the reason: DWG_ERR_NOTYETSUPPORTED for a value, definition or action
-   the evaluator doesn't support, or a drawing other than r2004;
-   DWG_ERR_UNHANDLEDCLASS for an entity or graph node of a class LibreDWG
-   can't decode; DWG_ERR_INVALIDHANDLE for an entity of def, or one it
-   owns, that doesn't resolve or isn't an entity, a node of def's
-   evaluation graph that doesn't resolve, or an action selecting an object
-   that is neither one of def's entities nor a node of its evaluation
-   graph, or a node id the graph doesn't have; DWG_ERR_VALUEOUTOFBOUNDS for
-   a name no
-   property has, a name given twice, a value that isn't finite, a LINEAR
-   value below 0, a state the parameter doesn't have, or a flip value other
-   than 0 or 1; DWG_ERR_INVALIDTYPE when def is not a dynamic block
-   definition; and DWG_ERR_INVALIDDWG alone for an action or parameter
-   whose data isn't what AutoCAD writes, such as a stretch point an entity
-   doesn't have, or actions that move each other's parameters in a cycle.
-   Or the copy's
-   refusal, such as of an entity handle def lists twice. A refusal adds
-   nothing to the document, and the reason is logged at LOG_ERROR.
-   Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the document,
-   or DWG_ERR_INTERNALERROR for NULL arguments. */
+   the reason:
+   - DWG_ERR_NOTYETSUPPORTED for a value, definition or action the
+     evaluator doesn't support, or a drawing other than r2004;
+   - DWG_ERR_UNHANDLEDCLASS for an entity or graph node of a class
+     LibreDWG can't decode;
+   - DWG_ERR_INVALIDHANDLE for an entity of def, or one it owns, that
+     doesn't resolve or isn't an entity; a node of def's evaluation graph
+     that doesn't resolve; an action selecting an object that is neither
+     one of def's entities nor a node of its graph, or a node id the graph
+     doesn't have;
+   - DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given
+     twice, a value that isn't finite, a LINEAR value below 0 or too large
+     for an action to move points by, a state the parameter doesn't have,
+     or a flip value other than 0 or 1;
+   - DWG_ERR_INVALIDTYPE when def is not a dynamic block definition;
+   - no further bit for an action or parameter whose data isn't what
+     AutoCAD writes, such as a stretch point an entity doesn't have, or
+     actions that move each other's parameters in a cycle.
+   Or the copy's refusal, such as of an entity handle def lists twice. A
+   refusal adds nothing to the document, and the reason is logged at
+   LOG_ERROR. Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the
+   document, or DWG_ERR_INTERNALERROR for NULL arguments. */
 EXPORT Dwg_Object_BLOCK_HEADER *
 dwg_dynblock_evaluate (Dwg_Object_BLOCK_HEADER *def,
                        const Dwg_DynValue *values, const BITCODE_BL num_values,
