@@ -175,8 +175,11 @@ true_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp)
       if (!same_cstr (appname, "AcDbDynamicBlockTrueName")
           && !same_cstr (appname, "AcDbDynamicBlockTrueName2"))
         continue;
+      /* A string the decoder left unread, as longer than its group, has
+         its claimed length but zero bytes, in an item sized by the group:
+         its length can't be trusted. */
       if (eed->data->code != 0 || eed->data->u.eed_0.is_tu
-          || !eed->data->u.eed_0.length)
+          || !eed->data->u.eed_0.length || !eed->data->u.eed_0.string[0])
         continue;
       *lenp = eed->data->u.eed_0.length;
       return eed->data->u.eed_0.string;
