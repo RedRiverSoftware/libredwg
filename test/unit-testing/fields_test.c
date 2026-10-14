@@ -96,8 +96,8 @@ typedef struct
 
 typedef struct
 {
-  const char *file; // under test/test-data
-  int objects;      // EVERY_OBJECT (r2004) or LISTED_CLASSES (r2000)
+  const char *file;     // under test/test-data
+  int objects;          // EVERY_OBJECT (r2004) or LISTED_CLASSES (r2000)
   unsigned num_objects; // EVERY_OBJECT: in the drawing
   /* Objects written from their fields that LibreDWG keeps raw bits of, so
      that the bit comparison can't quietly become a size comparison. */
@@ -106,6 +106,9 @@ typedef struct
   unsigned num_dd_rounded;
   Fixture_Class classes[MAX_FIXTURE_CLASSES];
 } Fixture_File;
+
+// a fixture with no listed classes
+#define NO_CLASSES { { NULL, 0, CLASS_CHECKED, NULL } }
 
 /* Every drawing in test-data/2004 must be here (test_fixture_list). */
 static const Fixture_File fixture_files[] = {
@@ -130,15 +133,15 @@ static const Fixture_File fixture_files[] = {
     { { "ASSOCOSNAPPOINTREFACTIONPARAM", 1, CLASS_CHECKED, NULL },
       { "3DSOLID", 1, CLASS_CHECKED, NULL },
       { "REGION", 2, CLASS_CHECKED, NULL } } },
-  { "2004/Arc.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
+  { "2004/Arc.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
   { "2004/Constraints.dwg",
     EVERY_OBJECT,
     227,
     2,
     0,
     { { "ASSOC2DCONSTRAINTGROUP", 1, CLASS_TODO, TODO_CONSTRAINTGROUP } } },
-  { "2004/ConstructionLine.dwg", EVERY_OBJECT, 216, 1, 0, { { NULL } } },
-  { "2004/Donut.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
+  { "2004/ConstructionLine.dwg", EVERY_OBJECT, 216, 1, 0, NO_CLASSES },
+  { "2004/Donut.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
   { "2004/Dynblocks.dwg",
     EVERY_OBJECT,
     51451,
@@ -147,18 +150,18 @@ static const Fixture_File fixture_files[] = {
     { { "ASSOC2DCONSTRAINTGROUP", 2, CLASS_TODO, TODO_CONSTRAINTGROUP },
       { "ASSOCGEOMDEPENDENCY", 28, CLASS_TODO, TODO_GEOMDEPENDENCY },
       { "ACDB_DYNAMICBLOCKPROXYNODE", 1, CLASS_UNDECODED, NULL } } },
-  { "2004/Ellipse.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/HatchG.dwg", EVERY_OBJECT, 229, 1, 0, { { NULL } } },
-  { "2004/Helix.dwg", EVERY_OBJECT, 215, 2, 0, { { NULL } } },
-  { "2004/Leader.dwg", EVERY_OBJECT, 251, 3, 0, { { NULL } } },
-  { "2004/Line.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/Multiline.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/Point.dwg", EVERY_OBJECT, 216, 1, 0, { { NULL } } },
-  { "2004/PolyLine3D.dwg", EVERY_OBJECT, 222, 1, 0, { { NULL } } },
-  { "2004/Polygon.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/Polyline.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/RAY.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/Spline.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
+  { "2004/Ellipse.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/HatchG.dwg", EVERY_OBJECT, 229, 1, 0, NO_CLASSES },
+  { "2004/Helix.dwg", EVERY_OBJECT, 215, 2, 0, NO_CLASSES },
+  { "2004/Leader.dwg", EVERY_OBJECT, 251, 3, 0, NO_CLASSES },
+  { "2004/Line.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/Multiline.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/Point.dwg", EVERY_OBJECT, 216, 1, 0, NO_CLASSES },
+  { "2004/PolyLine3D.dwg", EVERY_OBJECT, 222, 1, 0, NO_CLASSES },
+  { "2004/Polygon.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/Polyline.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/RAY.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/Spline.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
   { "2004/Surface.dwg",
     EVERY_OBJECT,
     287,
@@ -171,10 +174,10 @@ static const Fixture_File fixture_files[] = {
       { "ACDBASSOCPERSSUBENTMANAGER", 1, CLASS_UNDECODED, NULL },
       { "ACDBASSOCEDGEACTIONPARAM", 7, CLASS_UNDECODED, NULL },
       { "ACDBASSOCSWEPTSURFACEACTIONBODY", 1, CLASS_UNDECODED, NULL } } },
-  { "2004/Text.dwg", EVERY_OBJECT, 216, 1, 0, { { NULL } } },
-  { "2004/Underlay.dwg", EVERY_OBJECT, 217, 1, 0, { { NULL } } },
-  { "2004/circle.dwg", EVERY_OBJECT, 215, 1, 0, { { NULL } } },
-  { "2004/material.dwg", EVERY_OBJECT, 264, 1, 0, { { NULL } } },
+  { "2004/Text.dwg", EVERY_OBJECT, 216, 1, 0, NO_CLASSES },
+  { "2004/Underlay.dwg", EVERY_OBJECT, 217, 1, 0, NO_CLASSES },
+  { "2004/circle.dwg", EVERY_OBJECT, 215, 1, 0, NO_CLASSES },
+  { "2004/material.dwg", EVERY_OBJECT, 264, 1, 0, NO_CLASSES },
 };
 #define NUM_FIXTURE_FILES (sizeof (fixture_files) / sizeof (fixture_files[0]))
 
@@ -918,16 +921,17 @@ check_rotation_action_codes (const char *file, unsigned expected)
     }
   while (read_group (fp, &code, value, sizeof (value)))
     {
-      int code2;
       if (code != 100 || strcmp (value, "AcDbBlockRotationAction"))
         continue;
       num_actions++;
+      code = -1;
       if (read_group (fp, &code, value, sizeof (value)) && code == 94
-          && read_group (fp, &code2, value, sizeof (value)) && code2 == 303)
+          && read_group (fp, &code, value, sizeof (value)) && code == 303)
         num_autocad++;
       else
-        fail ("%s: AcDbBlockRotationAction %u followed by group %d", file,
-              num_actions, code);
+        fail ("%s: AcDbBlockRotationAction %u: group %d where AutoCAD has "
+              "94 and 303",
+              file, num_actions, code);
     }
   fclose (fp);
   if (!expected)
