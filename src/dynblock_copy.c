@@ -657,11 +657,16 @@ done:
  * The copy into dst
  */
 
+/* Whether slot is an element of array. Compared for equality, as ordering
+   pointers into different allocations is undefined. */
 static int
 in_array (const void *slot, const BITCODE_H *array, const BITCODE_BL num)
 {
-  return array && num && (const BITCODE_H *)slot >= array
-         && (const BITCODE_H *)slot < array + num;
+  BITCODE_BL i;
+  for (i = 0; array && i < num; i++)
+    if (slot == (const void *)&array[i])
+      return 1;
+  return 0;
 }
 
 /* What becomes of a reference the copy into dst left NULL: every object
