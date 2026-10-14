@@ -185,8 +185,9 @@ typedef struct _dwg_dynvalue
    parameters, which have no property, are left out.
 
    Returns 0, or from DWG_ERR_CRITICAL up: DWG_ERR_INVALIDDWG with
-   DWG_ERR_INVALIDTYPE when def is not a dynamic block definition, or with
-   DWG_ERR_NOTYETSUPPORTED for a drawing other than r2004;
+   DWG_ERR_INVALIDTYPE when def is not a dynamic block definition, with
+   DWG_ERR_INVALIDHANDLE when a node of its evaluation graph doesn't
+   resolve, or with DWG_ERR_NOTYETSUPPORTED for a drawing other than r2004;
    DWG_ERR_OUTOFMEM; or DWG_ERR_INTERNALERROR for NULL arguments. */
 EXPORT int dwg_dynblock_get_params (const Dwg_Object_BLOCK_HEADER *def,
                                     Dwg_DynParam **params, BITCODE_BL *count);
@@ -208,9 +209,10 @@ EXPORT void dwg_dynblock_free_params (Dwg_DynParam *params,
    Returns 0, DWG_ERR_NOTYETSUPPORTED as above, or from DWG_ERR_CRITICAL
    up: DWG_ERR_INVALIDDWG alone when a stored value is missing or not in
    the layout AutoCAD writes, with DWG_ERR_INVALIDTYPE when insert does not
-   place a dynamic block, or with DWG_ERR_NOTYETSUPPORTED for a drawing
-   other than r2004; DWG_ERR_OUTOFMEM; or DWG_ERR_INTERNALERROR for NULL
-   arguments. */
+   place a dynamic block, with DWG_ERR_INVALIDHANDLE when a node of the
+   definition's evaluation graph doesn't resolve, or with
+   DWG_ERR_NOTYETSUPPORTED for a drawing other than r2004;
+   DWG_ERR_OUTOFMEM; or DWG_ERR_INTERNALERROR for NULL arguments. */
 EXPORT int dwg_dynblock_get_values (const Dwg_Entity_INSERT *insert,
                                     Dwg_Object_BLOCK_HEADER **defp,
                                     Dwg_DynValue **values, BITCODE_BL *count);
@@ -222,40 +224,70 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    anonymous block ("*U") in def's document, which it returns: the
    geometry of a representation block for those values.
 
-   The new block holds a copy of each of def's entities, in def's order,
-   with the owned ATTRIBs, VERTEXes and SEQENDs of INSERTs and POLYLINEs
-   among them. Each copy keeps its source's EED, so its
+   The new block holds a copy of each of def's entities, in def's order.
+   The ATTRIBs, VERTEXes and SEQENDs that an INSERT, MINSERT, POLYLINE or
+   TABLE owns are copied with it, owned by its copy, and are not in the
+   block's entity list. Each copy keeps its source's EED, so its
    AcDbBlockRepETag index names the definition entity it was made from,
    while its 1005 handle names the copy itself. The copies leave out their
    sources' extension dictionaries, and the reactors that point outside the
-   copies. A visibility state given in values sets the invisible flag of
-   each entity the visibility parameter controls; without one the copies
-   keep the definition's flags, which show the first state. The block gets
-   def's base point, and no EED or extension dictionary: AcDbBlockRepBTag,
-   the placement and its values are the caller's.
+   copies. The block gets def's base point and its flag for attribute
+   definitions, and no EED or extension dictionary: AcDbBlockRepBTag, the
+   placement and its values are the caller's.
 
-   Properties left out of values keep the definition's values. Only
-   VISIBILITY values change the geometry. A LINEAR or ROTATION value is
-   accepted at the definition's value and a FLIP value at 0, and refused
-   otherwise; a value of any other kind (XY, POLAR, POINT, LOOKUP,
-   CONSTRAINT or USER) is refused whatever it is. A definition that is
-   constraint-based (parametric) is refused.
+   A property left out of values is not set: it keeps the definition's
+   value, unless the actions of another property move its parameter, as
+   in AutoCAD. A visibility state sets the invisible flag of each entity
+   the visibility parameter controls; without one the copies keep the
+   definition's flags, which show the first state.
+
+   A LINEAR value moves its parameter's end point along the parameter, to
+   that distance from its base point. The stretch and move actions taking
+   the end point's change then move entities by it, times each action's
+   distance multiplier and turned by its angle offset: a move action the
+   entities it selects, a stretch action the stretch points its frame
+   holds, as AutoCAD lists them with the action. Those are the ends of a
+   LINE and the vertices of an LWPOLYLINE. An ARC, CIRCLE, ELLIPSE, SPLINE,
+   TEXT, ATTDEF, MTEXT, INSERT (with its ATTRIBs) or HATCH moves whole,
+   when its stretch points are all in the frame; a HATCH must then lie
+   wholly inside the frame, which must be a rectangle. The actions also
+   move the points of the parameters they select, so a LINEAR value is
+   the distance after other properties' actions moved its parameter, as
+   AutoCAD's Properties palette shows it. A LINEAR value is not checked
+   against the parameter's value set. Refused, with
+   DWG_ERR_NOTYETSUPPORTED: a LINEAR value that changes its parameter when
+   the parameter drives an action of another kind (such as scale), has its
+   base point in its middle, or chains its actions and is moved by
+   another property's; a stretch of part of an entity of another type; a
+   HATCH that crosses the frame; an action moving an entity of another
+   type, taking another point's change than the end or base point's, or
+   with an XY type; a move that would take 2D points out of their plane.
+
+   A ROTATION value is accepted at the definition's value and a FLIP value
+   at 0, and refused otherwise; a value of any other kind (XY, POLAR,
+   POINT, LOOKUP, CONSTRAINT or USER) is refused whatever it is. A
+   definition that is constraint-based (parametric) is refused.
 
    Returns the new block, with *errorp 0, or below DWG_ERR_CRITICAL the
-   bits of the copy for data it left out (an array, or an EED group, it
-   could not copy). Otherwise NULL with *errorp from DWG_ERR_CRITICAL up. A
-   refusal is DWG_ERR_INVALIDDWG with a bit for the reason:
-   DWG_ERR_NOTYETSUPPORTED for a value or definition the evaluator doesn't
-   support, or a drawing other than r2004; DWG_ERR_UNHANDLEDCLASS for an
-   entity or graph node of a class LibreDWG can't decode;
-   DWG_ERR_INVALIDHANDLE for an entity of def, or one it owns, that
-   doesn't resolve or isn't an entity;
-   DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given twice,
-   a value that isn't finite, a state the parameter doesn't have, or a
-   flip value other than 0 or 1;
-   DWG_ERR_INVALIDTYPE when def is not a dynamic block definition. Or the
-   copy's refusal, such as of an entity handle def lists twice. A refusal
-   adds nothing to the document, and the reason is logged at LOG_ERROR.
+   bits of the copy for data it left out (such as an array, 3DSOLID ACIS
+   data or an EED group it could not copy). Otherwise NULL with *errorp
+   from DWG_ERR_CRITICAL up. A refusal is DWG_ERR_INVALIDDWG with a bit for
+   the reason: DWG_ERR_NOTYETSUPPORTED for a value, definition or action
+   the evaluator doesn't support, or a drawing other than r2004;
+   DWG_ERR_UNHANDLEDCLASS for an entity or graph node of a class LibreDWG
+   can't decode; DWG_ERR_INVALIDHANDLE for an entity of def, or one it
+   owns, that doesn't resolve or isn't an entity, a node of def's
+   evaluation graph that doesn't resolve, or an action selecting an object
+   that isn't one of def's entities; DWG_ERR_VALUEOUTOFBOUNDS for a name no
+   property has, a name given twice, a value that isn't finite, a LINEAR
+   value below 0, a state the parameter doesn't have, or a flip value other
+   than 0 or 1; DWG_ERR_INVALIDTYPE when def is not a dynamic block
+   definition; and DWG_ERR_INVALIDDWG alone for an action or parameter
+   whose data isn't what AutoCAD writes, such as a stretch point an entity
+   doesn't have, or actions that move each other's parameters in a cycle.
+   Or the copy's
+   refusal, such as of an entity handle def lists twice. A refusal adds
+   nothing to the document, and the reason is logged at LOG_ERROR.
    Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the document,
    or DWG_ERR_INTERNALERROR for NULL arguments. */
 EXPORT Dwg_Object_BLOCK_HEADER *
@@ -272,21 +304,27 @@ typedef enum DWG_DYNBLOCK_CHECK_STATUS
   /* the evaluation differs from AutoCAD's block, or left out data it
      could not copy */
   DWG_DYNBLOCK_CHECK_MISMATCH,
-  /* the evaluator refuses the placement's values or definition, or a stored
-     value isn't read */
+  /* the evaluator doesn't support the placement's values or definition, or
+     the drawing: reading or evaluating them was refused with
+     DWG_ERR_NOTYETSUPPORTED or DWG_ERR_UNHANDLEDCLASS, or a stored value
+     isn't read */
   DWG_DYNBLOCK_CHECK_UNSUPPORTED,
   /* no values to evaluate: no INSERT draws the block, or its INSERT has no
      AcDbBlockRepresentation */
   DWG_DYNBLOCK_CHECK_NO_VALUES,
-  /* reading the values or evaluating them failed */
+  /* reading the values or evaluating them failed otherwise: any other
+     refusal, such as of a stored value that is missing, or of a reference
+     that doesn't resolve, or no memory */
   DWG_DYNBLOCK_CHECK_FAILED
 } Dwg_DynBlock_Check_Status;
 
 typedef struct _dwg_dynblock_check
 {
-  BITCODE_RLL insert;     /* the placement, 0 for a block none draws */
-  BITCODE_RLL block;      /* the representation block AutoCAD stored */
-  BITCODE_RLL definition; /* the definition, 0 when not known */
+  BITCODE_RLL insert; /* the placement, 0 for a block none draws */
+  BITCODE_RLL block;  /* the representation block AutoCAD stored */
+  /* the definition: the one the placement's values name, or else the one
+     the block's AcDbBlockRepBTag names */
+  BITCODE_RLL definition;
   BITCODE_RLL evaluated;  /* the block the evaluation made, 0 for none */
   Dwg_DynBlock_Check_Status status;
   /* a bit (1 << kind) for each kind of property whose stored value
@@ -318,8 +356,8 @@ typedef struct _dwg_dynblock_check_report
 } Dwg_DynBlock_Check_Report;
 
 /* Checks the evaluator against the representation blocks AutoCAD stored in
-   dwg. For every INSERT that draws a representation block (an anonymous
-   block with AcDbBlockRepBTag EED), it reads the INSERT's values,
+   dwg. For every INSERT or MINSERT that draws a representation block (an
+   anonymous block with AcDbBlockRepBTag EED), it reads the INSERT's values,
    evaluates its definition at them, and compares the evaluated block with
    AutoCAD's entity by entity, paired by their AcDbBlockRepETag index. A
    representation block no INSERT draws gets a check too, with status
@@ -339,10 +377,10 @@ typedef struct _dwg_dynblock_check_report
    is a mismatch, though not of an entity. EED is not compared.
 
    An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
-   copy left out (an array or an EED group it could not copy), is a
-   mismatch whatever the comparison finds, as the comparison doesn't see
-   all such data. Its reason gives those bits first, then what differs, if
-   anything.
+   copy left out (such as an array, 3DSOLID ACIS data or an EED group it
+   could not copy), is a mismatch whatever the comparison finds, as the
+   comparison doesn't see all such data. Its reason gives those bits first,
+   then what differs, if anything.
 
    Each evaluation adds its block to dwg, so check a document that won't be
    written. Returns the report, which dwg_dynblock_free_check_report ()
