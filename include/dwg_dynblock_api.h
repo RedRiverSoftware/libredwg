@@ -174,11 +174,11 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    entity or graph node of a class LibreDWG can't decode;
    DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given twice,
    a state the parameter doesn't have, or a flip value other than 0 or 1;
-   DWG_ERR_INVALIDTYPE when def is not a dynamic block definition. A
-   refusal adds nothing to the document, and the reason is logged at
-   LOG_ERROR. Otherwise the error of the copy, DWG_ERR_OUTOFMEM, or
-   DWG_ERR_INTERNALERROR for NULL arguments; an error after the block was
-   made leaves it in the document. */
+   DWG_ERR_INVALIDTYPE when def is not a dynamic block definition. Or the
+   copy's refusal, such as of an entity handle def lists twice. A refusal
+   adds nothing to the document, and the reason is logged at LOG_ERROR.
+   Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the document,
+   or DWG_ERR_INTERNALERROR for NULL arguments. */
 EXPORT Dwg_Object_BLOCK_HEADER *
 dwg_dynblock_evaluate (Dwg_Object_BLOCK_HEADER *def,
                        const Dwg_DynValue *values, const BITCODE_BL num_values,
@@ -248,7 +248,8 @@ typedef struct _dwg_dynblock_check_report
    the comparison has no length for, unless empty in both, counts as a
    difference. An ELLIPSE also matches the same curve with its major axis
    reversed, and is counted in num_equivalent. The blocks' base points
-   compare too.
+   compare too: a difference there is a mismatch, though not of an
+   entity.
 
    Each evaluation adds its block to dwg, so check a document that won't be
    written. Returns the report, which dwg_dynblock_free_check_report ()

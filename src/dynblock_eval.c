@@ -1257,20 +1257,9 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       goto done;
     }
 
-  // The block, then the copies: adding objects may move dwg->object, so
-  // objects are found by handle after each step.
-  _rep = dwg_add_BLOCK_HEADER (dwg, "*U");
-  if (!_rep || !dwg_add_BLOCK (_rep, "*U"))
-    {
-      set_reason (reason, reason_size, "could not add the block");
-      error = DWG_ERR_OUTOFMEM;
-      goto done;
-    }
-  _rep->anonymous = 1;
-  _rep->flag |= 1;
-  _rep->base_pt = _def->base_pt;
-  *rep_handlep = block_header_object (_rep)->handle.value;
-
+  // The copies first, so that a refused copy adds nothing, then the block
+  // that owns them. Adding objects may move dwg->object, so objects are
+  // found by handle after each step.
   error = dwg_copy_objects (dwg, dwg, handles, num_handles, map, &unresolved,
                             &num_unresolved);
   free (unresolved);
@@ -1283,6 +1272,17 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   // below DWG_ERR_CRITICAL: data the copy left out, returned at the end
   copy_error = error;
   error = 0;
+  _rep = dwg_add_BLOCK_HEADER (dwg, "*U");
+  if (!_rep || !dwg_add_BLOCK (_rep, "*U"))
+    {
+      set_reason (reason, reason_size, "could not add the block");
+      error = DWG_ERR_OUTOFMEM;
+      goto done;
+    }
+  _rep->anonymous = 1;
+  _rep->flag |= 1;
+  _rep->base_pt = _def->base_pt;
+  *rep_handlep = block_header_object (_rep)->handle.value;
   for (BITCODE_BL i = 0; i < num_handles; i++)
     if (dwg_copy_map_get (map, handles[i]))
       hash_set (copies, dwg_copy_map_get (map, handles[i]), 1);
@@ -1513,10 +1513,16 @@ static void
 compare_color (Dynblock_Compare *c, const char *name, const Dwg_Color *a,
                const Dwg_Color *b)
 {
+  char sub[180];
   if (a->index != b->index || a->flag != b->flag || a->rgb != b->rgb
-      || a->method != b->method)
-    differ (c, "%s is %d/0x%x, AutoCAD's %d/0x%x", name, b->index, b->rgb,
-            a->index, a->rgb);
+      || a->method != b->method || a->alpha_type != b->alpha_type
+      || a->alpha != b->alpha)
+    differ (c, "%s is %d/0x%x/0x%x, AutoCAD's %d/0x%x/0x%x", name, b->index,
+            b->rgb, b->alpha, a->index, a->rgb, a->alpha);
+  snprintf (sub, sizeof (sub), "%s.name", name);
+  compare_string (c, sub, a->name, b->name);
+  snprintf (sub, sizeof (sub), "%s.book_name", name);
+  compare_string (c, sub, a->book_name, b->book_name);
   compare_ref (c, name, a->handle, b->handle);
 }
 
@@ -1901,10 +1907,8 @@ compare_blocks (const Dwg_Data *dwg, const BITCODE_RLL a_handle,
     set_reason (reason, reason_size,
                 "the evaluation has %u entities, AutoCAD's block %u",
                 (unsigned)_b->num_owned, (unsigned)_a->num_owned);
-  c.entity = "base_pt";
+  c.entity = "the block";
   compare_doubles (&c, "base_pt", &_a->base_pt.x, &_b->base_pt.x, 3);
-  if (c.differs)
-    check->num_differing++;
   for (BITCODE_BL i = 0; _a->entities && i < _a->num_owned; i++)
     {
       const Dwg_Object *ea = ref_object (dwg, _a->entities[i]);

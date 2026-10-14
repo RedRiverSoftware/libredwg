@@ -473,6 +473,16 @@ test_refusals (Dwg_Data *dwg)
   failures += test_refusal (dwg, dwg_model_space_ref (dwg)->absolute_ref,
                             NULL, 0, REFUSED (DWG_ERR_INVALIDTYPE),
                             "a block that isn't dynamic");
+  // the copy refuses an entity listed twice, before the block is made
+  {
+    Dwg_Object_BLOCK_HEADER *window = block_header (dwg, WINDOW);
+    BITCODE_H second = window->entities[1];
+    window->entities[1] = window->entities[0];
+    failures += test_refusal (dwg, WINDOW, NULL, 0,
+                              REFUSED (DWG_ERR_INVALIDHANDLE),
+                              "an entity the definition lists twice");
+    window->entities[1] = second;
+  }
   return failures;
 }
 
@@ -794,6 +804,19 @@ test_check_finds (Dwg_Data *dwg)
     _e->start_angle += M_PI;
     _e->end_angle += M_PI;
   }
+  // BFD8's block: its base point
+  block_header (dwg, 0xAC8C)->base_pt.x += 1.0;
+  // C145's block: entity 0's transparency
+  {
+    Dwg_Object *first = rep_entity (dwg, 0xB6AC, 0);
+    if (!first)
+      {
+        fail ("check finds: fixture entity not found");
+        return 1;
+      }
+    first->tio.entity->color.alpha_type = 3;
+    first->tio.entity->color.alpha = 0x80;
+  }
   // R2 without its values, and R3 drawing the definition, which leaves its
   // block unplaced
   r2->parent->is_xdic_missing = 1;
@@ -826,6 +849,27 @@ test_check_finds (Dwg_Data *dwg)
             c ? (int)c->status : -1, c && c->reason ? c->reason : "");
       failures++;
     }
+  c = find_check (report, 0xBFD8, 0xAC8C);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && !c->num_differing
+      && c->reason && strstr (c->reason, "base_pt"))
+    ok ("check finds a moved base point: %s", c->reason);
+  else
+    {
+      fail ("check of a moved base point: status %d, %u differ, %s",
+            c ? (int)c->status : -1, c ? (unsigned)c->num_differing : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC145, 0xB6AC);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 1
+      && c->reason && strstr (c->reason, "color"))
+    ok ("check finds a transparency: %s", c->reason);
+  else
+    {
+      fail ("check of a transparency: status %d, %s", c ? (int)c->status : -1,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
   c = find_check (report, 0xBFD0, 0x9D5E);
   if (c && c->status == DWG_DYNBLOCK_CHECK_MATCH && c->num_equivalent == 1)
     ok ("check matches a reversed ELLIPSE as the same curve");
@@ -854,9 +898,9 @@ test_check_finds (Dwg_Data *dwg)
       fail ("check of an unplaced block: status %d", c ? (int)c->status : -1);
       failures++;
     }
-  if (report->num_match == 6 && report->num_mismatch == 2
+  if (report->num_match == 4 && report->num_mismatch == 4
       && report->num_no_values == 2 && report->num_unsupported == 13)
-    ok ("check finds: 6 match, 2 mismatch, 2 no values, 13 unsupported");
+    ok ("check finds: 4 match, 4 mismatch, 2 no values, 13 unsupported");
   else
     {
       fail ("check finds: %u match, %u mismatch, %u no values, %u "
