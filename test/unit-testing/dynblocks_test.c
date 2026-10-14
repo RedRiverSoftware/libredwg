@@ -185,14 +185,12 @@ take_unknown_bits (Dwg_Object *obj)
   return bits;
 }
 
-/* Bit i of raw bits as bit_read_bits stores them: whole bytes as read, then
-   the bits of a last partial byte from its lowest bit up. */
+/* Bit i of raw bits as bit_read_bits stores them: MSB first, the bits of a
+   last partial byte too. */
 static int
-bit_at (const BITCODE_TF bits, BITCODE_RL num_bits, BITCODE_RL i)
+bit_at (const BITCODE_TF bits, BITCODE_RL i)
 {
-  if (i < num_bits / 8 * 8)
-    return (bits[i / 8] >> (7 - i % 8)) & 1;
-  return (bits[i / 8] >> (i % 8)) & 1;
+  return (bits[i / 8] >> (7 - i % 8)) & 1;
 }
 
 /* Raw bits run to the end of the object's last byte. AutoCAD pads the bits
@@ -203,13 +201,12 @@ same_bits_but_padding (const BITCODE_TF autocad, const BITCODE_TF libredwg,
                        BITCODE_RL num_bits)
 {
   BITCODE_RL i = 0;
-  while (i < num_bits
-         && bit_at (autocad, num_bits, i) == bit_at (libredwg, num_bits, i))
+  while (i < num_bits && bit_at (autocad, i) == bit_at (libredwg, i))
     i++;
   if (num_bits - i > 7)
     return 0;
   for (; i < num_bits; i++)
-    if (!bit_at (autocad, num_bits, i) || bit_at (libredwg, num_bits, i))
+    if (!bit_at (autocad, i) || bit_at (libredwg, i))
       return 0;
   return 1;
 }

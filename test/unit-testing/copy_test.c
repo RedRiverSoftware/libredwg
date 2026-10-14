@@ -235,9 +235,6 @@ typedef struct _compare
   int is_tu;
   /* the documents' version, which sizes LTYPE.strings_area */
   Dwg_Version_Type version;
-  /* PROXY data last bytes left out of a read-back comparison, see
-     unwritten_last_byte () */
-  unsigned unwritten;
   const char *what;
   int failed;
 } Compare;
@@ -879,24 +876,6 @@ compare_bytes (Compare *c, const char *name, const unsigned char *a,
       }
 }
 
-/* bit_write_bits writes the bits of a partial last byte in the reverse of
-   the order bit_read_bits reads them into it, so the data_numbits % 8 last
-   bits of PROXY_ENTITY and PROXY_OBJECT data don't read back as written,
-   in a plain rewrite of a drawing too. Read back, that byte is left out of
-   the comparison, and counted. */
-static int
-unwritten_last_byte (const Compare *c, const char *structname,
-                     const Dwg_DYNAPI_field *f, const Outer *self)
-{
-  const Dwg_DYNAPI_field *numbits;
-  if (c->map || strNE (f->name, "data")
-      || (strNE (structname, "PROXY_ENTITY")
-          && strNE (structname, "PROXY_OBJECT")))
-    return 0;
-  numbits = find_field (self->fields, "data_numbits");
-  return numbits && count_value (numbits, self->a) % 8;
-}
-
 /* An array, or a binary chunk, held by pointer: compared up to the length
    its struct gives it. */
 static void
@@ -949,14 +928,8 @@ compare_array (Compare *c, const char *name, const char *structname,
     }
   if (binary)
     {
-      size_t n = (size_t)la;
-      if (unwritten_last_byte (c, structname, f, self))
-        {
-          n--;
-          c->unwritten++;
-        }
       compare_bytes (c, name, (const unsigned char *)va,
-                     (const unsigned char *)vb, n);
+                     (const unsigned char *)vb, (size_t)la);
       return;
     }
   if (strEQc (f->type, "char **"))
@@ -1568,8 +1541,8 @@ test_clone (const char *name, Dwg_Version_Type version)
         }
       if (!c.failed)
         OK ("%s: every object reads back with the fields written, but %u "
-            "misread from the source and %u PROXY data last bytes",
-            what, misread, c.unwritten);
+            "misread from the source",
+            what, misread);
       else
         FAIL ("%s: %d field differences read back", what, c.failed);
     }
@@ -1732,9 +1705,8 @@ test_same_document (const char *name)
             compare_object (&c, &dwg, a, &readback, b);
         }
       if (readback.num_objects == dwg.num_objects && !c.failed)
-        OK ("%s: %u objects read back, the copies with their fields, but "
-            "%u PROXY data last bytes",
-            what, (unsigned)readback.num_objects, c.unwritten);
+        OK ("%s: %u objects read back, the copies with their fields", what,
+            (unsigned)readback.num_objects);
       else
         FAIL ("%s: %u objects read back of %u, %d field differences", what,
               (unsigned)readback.num_objects, (unsigned)dwg.num_objects,

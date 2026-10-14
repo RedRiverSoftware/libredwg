@@ -1724,9 +1724,11 @@ bit_read_TF (Bit_Chain *restrict dat, size_t length)
   return (BITCODE_TF)chain;
 }
 
-/** Read fixed text with zero-termination.
+/** Read the next bits bits into a new zero-terminated buffer.
+ *  A partial last byte (bits % 8 bits) is filled MSB first, like the full
+ *  bytes, and its low bits are left 0: bit_write_bits writes it back in that
+ *  order.
  *  After usage, the allocated memory must be properly freed.
- *  preR11
  */
 ATTRIBUTE_MALLOC
 BITCODE_TF
@@ -1758,7 +1760,7 @@ bit_read_bits (Bit_Chain *dat, size_t bits)
       for (int i = 0; i < rest; i++)
         {
           BITCODE_RC last = bit_read_B (dat);
-          chain[bytes] |= last << i;
+          chain[bytes] |= last << (7 - i);
         }
       dat->size--;
       // we are now in overflow state
