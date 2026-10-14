@@ -1052,11 +1052,25 @@ definition_entities (const Dwg_Data *dwg,
           handles = more;
         }
       handles[count++] = ent->handle.value;
-      for (BITCODE_BL j = 0; j < num_owned; j++)
-        if (ref_handle (owned[j]))
-          handles[count++] = ref_handle (owned[j]);
-      if (ref_handle (seqend))
-        handles[count++] = ref_handle (seqend);
+      for (BITCODE_BL j = 0; j <= num_owned; j++)
+        {
+          // the owned ATTRIBs or VERTEXes, then the SEQEND
+          const Dwg_Object_Ref *ref = j < num_owned ? owned[j] : seqend;
+          const Dwg_Object *sub;
+          if (!ref_handle (ref))
+            continue;
+          sub = ref_object (dwg, ref);
+          if (!sub || sub->supertype != DWG_SUPERTYPE_ENTITY)
+            {
+              set_reason (reason, reason_size,
+                          "the definition's entity " FORMAT_HV
+                          " owns " FORMAT_HV ", which is not an entity",
+                          ent->handle.value, ref_handle (ref));
+              free (handles);
+              return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+            }
+          handles[count++] = sub->handle.value;
+        }
     }
   *handlesp = handles;
   *countp = count;
@@ -1306,7 +1320,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     {
       Dwg_Object *copy
           = handle_object (dwg, dwg_copy_map_get (map, handles[i]));
-      if (!copy)
+      if (!copy || copy->supertype != DWG_SUPERTYPE_ENTITY)
         continue;
       detach_copy (copy, copies);
       if (!dwg_obj_is_subentity (copy))

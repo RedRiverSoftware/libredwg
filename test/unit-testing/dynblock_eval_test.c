@@ -493,6 +493,37 @@ test_refusals (Dwg_Data *dwg)
                               "an entity that doesn't resolve");
     window->entities[1] = second;
   }
+  // an INSERT of a definition owning an object that isn't an entity
+  {
+    const Dwg_Object_BLOCK_HEADER *altezza = block_header (dwg, ALTEZZA);
+    Dwg_Entity_INSERT *insert = NULL;
+    for (BITCODE_BL i = 0; !insert && i < altezza->num_owned; i++)
+      {
+        Dwg_Object *obj = dwg_ref_object (dwg, altezza->entities[i]);
+        if (obj && obj->fixedtype == DWG_TYPE_INSERT)
+          insert = obj->tio.entity->tio.INSERT;
+      }
+    if (insert)
+      {
+        BITCODE_H *attribs = insert->attribs;
+        const BITCODE_BL num_owned = insert->num_owned;
+        BITCODE_H owned[1];
+        // alteZZa's extension dictionary
+        owned[0] = altezza->parent->xdicobjhandle;
+        insert->attribs = owned;
+        insert->num_owned = 1;
+        failures += test_refusal (dwg, ALTEZZA, NULL, 0,
+                                  REFUSED (DWG_ERR_INVALIDHANDLE),
+                                  "an owned object that isn't an entity");
+        insert->attribs = attribs;
+        insert->num_owned = num_owned;
+      }
+    else
+      {
+        fail ("alteZZa has no INSERT");
+        failures++;
+      }
+  }
   return failures;
 }
 
