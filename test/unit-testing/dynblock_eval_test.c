@@ -561,14 +561,28 @@ test_evaluate (Dwg_Data *dwg)
   Dwg_Object_BLOCK_HEADER *rep;
   BITCODE_RLL shrub = 0, door_closed = 0;
   Dwg_Data readback;
+  BITCODE_BL num_objects, num_entities;
   int error = 0, failures = 0;
   memset (v, 0, sizeof (v));
 
   // R1: Trees at Shrub (Plan), which shows 52 of its 582 entities
   v[0].name = (char *)"Type (view)";
   v[0].state = (char *)"Shrub (Plan)";
+  num_objects = dwg->num_objects;
+  num_entities = dwg->num_entities;
   rep = dwg_dynblock_evaluate (block_header (dwg, TREES), v, 1, &error);
   loglevel = test_loglevel;
+  // the block header, its BLOCK and ENDBLK, and the 582 copies
+  if (rep && dwg->num_objects - num_objects == 585
+      && dwg->num_entities - num_entities == 584)
+    ok ("evaluate Trees adds 585 objects, 584 of them entities");
+  else
+    {
+      fail ("evaluate Trees adds %u objects, %u entities",
+            (unsigned)(dwg->num_objects - num_objects),
+            (unsigned)(dwg->num_entities - num_entities));
+      failures++;
+    }
   if (rep && !error)
     {
       shrub = block_handle (rep);

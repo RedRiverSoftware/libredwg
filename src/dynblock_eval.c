@@ -1292,6 +1292,9 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
+  // the add API doesn't count the entities it adds, as the decoder and the
+  // copy do
+  dwg->num_entities++;
   _rep->anonymous = 1;
   _rep->flag |= 1;
   _rep->base_pt = _def->base_pt;
@@ -1315,6 +1318,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
+  dwg->num_entities++;
 
   for (BITCODE_BL j = 0; j < list.count; j++)
     if (state[j])
@@ -2007,7 +2011,9 @@ changed_kinds (const Dwg_Data *dwg, const BITCODE_RLL def_handle,
   return kinds;
 }
 
-static void
+/* Checks the placement check names, into check. Returns 0, or
+   DWG_ERR_OUTOFMEM. */
+static int
 check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
                  const double tolerance)
 {
@@ -2016,7 +2022,7 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
   BITCODE_BL count = 0;
   BITCODE_RLL def_handle = 0;
   char reason[REASON_SIZE] = "";
-  int error;
+  int error, oom = 0;
 
   if (!block_representation (dwg, insert))
     {
@@ -2031,6 +2037,7 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
   if (error >= DWG_ERR_CRITICAL)
     {
       check->status = DWG_DYNBLOCK_CHECK_FAILED;
+      oom = error & DWG_ERR_OUTOFMEM;
       goto done;
     }
   check->kinds = changed_kinds (dwg, def_handle, values, count);
@@ -2049,16 +2056,24 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
                         & (DWG_ERR_NOTYETSUPPORTED | DWG_ERR_UNHANDLEDCLASS))
                 ? DWG_DYNBLOCK_CHECK_UNSUPPORTED
                 : DWG_DYNBLOCK_CHECK_FAILED;
+      oom = error & DWG_ERR_OUTOFMEM;
       goto done;
     }
   // data the copy left out shows in the comparison, if it is compared
   reason[0] = '\0';
   compare_blocks (dwg, check->block, check->evaluated, tolerance, check,
                   reason, sizeof (reason));
+  // compare_blocks fails only for memory
+  oom = check->status == DWG_DYNBLOCK_CHECK_FAILED;
 done:
   dwg_dynblock_free_values (values, count);
-  if (reason[0] && check->status != DWG_DYNBLOCK_CHECK_MATCH)
-    check->reason = strdup (reason);
+  if (check->status != DWG_DYNBLOCK_CHECK_MATCH)
+    {
+      check->reason = strdup (reason);
+      if (!check->reason)
+        oom = 1;
+    }
+  return oom ? DWG_ERR_OUTOFMEM : 0;
 }
 
 static int
@@ -2139,6 +2154,8 @@ dwg_dynblock_check (Dwg_Data *dwg, const double tolerance)
       check->definition = btag_definition (dwg, obj);
       check->status = DWG_DYNBLOCK_CHECK_NO_VALUES;
       check->reason = strdup ("no INSERT draws the block");
+      if (!check->reason)
+        goto oom;
     }
   free_hash (drawn);
   drawn = NULL;
@@ -2146,8 +2163,8 @@ dwg_dynblock_check (Dwg_Data *dwg, const double tolerance)
   for (BITCODE_BL i = 0; i < report->num_checks; i++)
     {
       Dwg_DynBlock_Check *check = &report->checks[i];
-      if (check->insert)
-        check_placement (dwg, check, tolerance);
+      if (check->insert && check_placement (dwg, check, tolerance))
+        goto oom;
       switch (check->status)
         {
         case DWG_DYNBLOCK_CHECK_MATCH:
