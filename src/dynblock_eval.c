@@ -2217,6 +2217,18 @@ move_size (const Dynblock_Move *m)
   return fabs (m->delta.x) + fabs (m->delta.y) + fabs (m->delta.z);
 }
 
+/* Orders moves by entity, then by stretch point, the whole moves (-1)
+   first. */
+static int
+compare_moves (const void *pa, const void *pb)
+{
+  const Dynblock_Move *a = (const Dynblock_Move *)pa;
+  const Dynblock_Move *b = (const Dynblock_Move *)pb;
+  if (a->entity != b->entity)
+    return a->entity < b->entity ? -1 : 1;
+  return a->point < b->point ? -1 : a->point > b->point ? 1 : 0;
+}
+
 /* Refuses moves that could take a coordinate beyond what a double holds:
    an entity's largest coordinate, plus the sum of its whole moves and of
    the moves of the stretch point moved most, must stay finite. */
@@ -2224,42 +2236,34 @@ static int
 check_reach (Dynblock_Plan *plan)
 {
   const BITCODE_BL n = plan->num_moves;
-  for (BITCODE_BL i = 0; i < n; i++)
+  Dynblock_Move *sorted;
+  int error = 0;
+  if (!n)
+    return 0;
+  sorted = (Dynblock_Move *)malloc (n * sizeof (Dynblock_Move));
+  if (!sorted)
+    return DWG_ERR_OUTOFMEM;
+  memcpy (sorted, plan->moves, n * sizeof (Dynblock_Move));
+  qsort (sorted, n, sizeof (Dynblock_Move), compare_moves);
+  for (BITCODE_BL i = 0; i < n && !error;)
     {
-      const BITCODE_RLL entity = plan->moves[i].entity;
-      const Dwg_Object *obj;
+      const BITCODE_RLL entity = sorted[i].entity;
+      const Dwg_Object *obj = handle_object (plan->dwg, entity);
       double whole = 0.0, most = 0.0, reach;
-      int seen = 0;
-      // each entity once, at its first move
-      for (BITCODE_BL j = 0; j < i && !seen; j++)
-        seen = plan->moves[j].entity == entity;
-      if (seen)
-        continue;
-      for (BITCODE_BL j = i; j < n; j++)
+      // the entity's whole moves, then those of each of its stretch points
+      while (i < n && sorted[i].entity == entity)
         {
-          const Dynblock_Move *m = &plan->moves[j];
+          const int point = sorted[i].point;
           double sum = 0.0;
-          int counted = 0;
-          if (m->entity != entity)
-            continue;
-          if (m->point < 0)
-            {
-              whole += move_size (m);
-              continue;
-            }
-          // each stretch point once, at its first move
-          for (BITCODE_BL k = i; k < j && !counted; k++)
-            counted = plan->moves[k].entity == entity
-                      && plan->moves[k].point == m->point;
-          if (counted)
-            continue;
-          for (BITCODE_BL k = j; k < n; k++)
-            if (plan->moves[k].entity == entity
-                && plan->moves[k].point == m->point)
-              sum += move_size (&plan->moves[k]);
-          most = fmax (most, sum);
+          for (; i < n && sorted[i].entity == entity
+                 && sorted[i].point == point;
+               i++)
+            sum += move_size (&sorted[i]);
+          if (point < 0)
+            whole = sum;
+          else
+            most = fmax (most, sum);
         }
-      obj = handle_object (plan->dwg, entity);
       reach = (obj ? entity_reach (plan->dwg, obj) : 0.0) + whole + most;
       if (!isfinite (reach))
         {
@@ -2268,10 +2272,11 @@ check_reach (Dynblock_Plan *plan)
                       " beyond what a double holds",
                       obj ? dwg_type_name (obj->fixedtype) : "entity",
                       entity);
-          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
     }
-  return 0;
+  free (sorted);
+  return error;
 }
 
 /* Plans the LINEAR values of list, given in linear (a NaN where not given),
@@ -2377,6 +2382,13 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
           set_reason (plan->reason, plan->reason_size,
                       "linear property '%s' has no length to set", p->name);
           return DYNBLOCK_REFUSED;
+        }
+      if (!isfinite (length))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' is longer than a double holds",
+                      p->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
       if (_p->parameter_base_location != 0)
         {

@@ -284,9 +284,10 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
      one of def's entities nor a node of its graph, or a node id the graph
      doesn't have;
    - DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given
-     twice, a value that isn't finite, a LINEAR value below 0 or one that
-     would move a point beyond what a double holds, a state the parameter
-     doesn't have, or a flip value other than 0 or 1;
+     twice, a value that isn't finite, a LINEAR value below 0, for a
+     parameter longer than a double holds, or that would move a point
+     beyond what a double holds, a state the parameter doesn't have, or a
+     flip value other than 0 or 1;
    - DWG_ERR_INVALIDTYPE when def is not a dynamic block definition;
    - no further bit for an action or parameter whose data isn't what
      AutoCAD writes, such as a stretch point an entity doesn't have, or

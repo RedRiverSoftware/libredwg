@@ -1410,6 +1410,16 @@ test_linear_refusals (Dwg_Data *dwg)
         fail ("linear: a parameter 1e200 long set to 2e200");
         failures++;
       }
+    // a parameter longer than a double holds, whose stretch at half its
+    // change would keep the points in range
+    width->def_endpt.x = width->def_basept.x + 1.3e308;
+    width->def_endpt.y = width->def_basept.y + 1.3e308;
+    stretch->action_offset_x = 0.5;
+    v.value = 1e308;
+    failures += test_refusal (dwg, WINDOW, &v, 1,
+                              REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a parameter longer than a double holds");
+    stretch->action_offset_x = 1.0;
     width->def_endpt = endpt;
     // 4 times as much is more than a double holds
     stretch->action_offset_x = 4.0;
