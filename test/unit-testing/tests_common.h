@@ -85,7 +85,7 @@ void ATTRIBUTE_FORMAT (1, 2) todo (const char *fmt, ...)
 }
 #endif
 
-#if defined(BITS_TEST_C) || defined(DECODE_TEST_C)
+#if defined(BITS_TEST_C) || defined(DECODE_TEST_C) || defined(ENCODE_TEST_C)
 
 void bitprepare (Bit_Chain *dat, size_t size);
 void bitfree (Bit_Chain *dat);

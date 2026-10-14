@@ -1300,6 +1300,87 @@ bit_write_TF_tests (void)
   bitfree (&bitchain);
 }
 
+// bit pos of a bit string held MSB first
+static int
+string_bit (const unsigned char *s, size_t pos)
+{
+  return (s[pos / 8] >> (7 - pos % 8)) & 1;
+}
+
+/* bit_read_bits and bit_write_bits hold a bit string MSB first, a partial
+   last byte too, so the bits read from a stream write back the same. */
+static void
+bit_bits_tests (void)
+{
+  static const unsigned char src[] = { 0xCA, 0x5B, 0xE7 };
+  Bit_Chain bitchain = strtobt ("1100101011");
+  BITCODE_TF bits = bit_read_bits (&bitchain, 10);
+  if (bits && bits[0] == 0xCA && bits[1] == 0xC0 && bits[2] == 0
+      && bit_position (&bitchain) == 10)
+    ok ("bit_read_bits 10 bits");
+  else
+    fail ("bit_read_bits 10 bits: %02X %02X", bits ? bits[0] : 0,
+          bits ? bits[1] : 0);
+  free (bits);
+  bitfree (&bitchain);
+
+  for (size_t numbits = 1; numbits <= 8 * sizeof (src); numbits++)
+    for (unsigned offset = 0; offset < 8; offset += 3)
+      {
+        const size_t len = (numbits + 7) / 8;
+        unsigned char expected[sizeof (src) + 1] = { 0 };
+        Bit_Chain copy;
+        size_t wrong = numbits; // the first stream bit that differs
+        int good;
+
+        // written: src's first numbits bits, in order
+        bitprepare (&bitchain, sizeof (src) + 2);
+        bit_advance_position (&bitchain, offset);
+        bit_write_bits (&bitchain, (BITCODE_TF)src, numbits);
+        good = bit_position (&bitchain) == offset + numbits;
+        for (size_t i = 0; good && i < numbits; i++)
+          if (string_bit (bitchain.chain, offset + i) != string_bit (src, i))
+            good = 0;
+        if (!good)
+          fail ("bit_write_bits %u bits at bit %u", (unsigned)numbits,
+                offset);
+
+        // read back: the same bits, the unused bits of the last byte 0
+        bit_set_position (&bitchain, offset);
+        bits = bit_read_bits (&bitchain, numbits);
+        memcpy (expected, src, len);
+        if (numbits % 8)
+          expected[len - 1] &= (unsigned char)(0xFF << (8 - numbits % 8));
+        if (!bits || memcmp (bits, expected, len + 1)
+            || bit_position (&bitchain) != offset + numbits)
+          fail ("bit_read_bits %u bits at bit %u: last byte %02X, "
+                "expected %02X",
+                (unsigned)numbits, offset, bits ? bits[len - 1] : 0,
+                expected[len - 1]);
+
+        // and written again, at another offset: the stream bits again
+        bitprepare (&copy, sizeof (src) + 2);
+        bit_advance_position (&copy, 7 - offset);
+        if (bits)
+          bit_write_bits (&copy, bits, numbits);
+        for (size_t i = 0; i < numbits && wrong == numbits; i++)
+          if (string_bit (copy.chain, 7 - offset + i)
+              != string_bit (bitchain.chain, offset + i))
+            wrong = i;
+        if (bits && wrong == numbits
+            && bit_position (&copy) == 7 - offset + numbits)
+          ok ("bit_read_bits, bit_write_bits %u bits at bit %u",
+              (unsigned)numbits, offset);
+        else
+          fail ("bit_read_bits, bit_write_bits %u bits at bit %u: bit %u "
+                "differs",
+                (unsigned)numbits, offset, (unsigned)wrong);
+        free (bits);
+        bitfree (&copy);
+        bitfree (&bitchain);
+      }
+}
+
 static void
 bit_read_BE_tests (void)
 {
@@ -1746,6 +1827,7 @@ main (int argc, char const *argv[])
   bit_write_TV_tests ();
   bit_read_TF_tests ();
   bit_write_TF_tests ();
+  bit_bits_tests ();
   bit_read_BE_tests ();
   bit_write_BE_tests ();
   bit_read_CMC_tests ();
