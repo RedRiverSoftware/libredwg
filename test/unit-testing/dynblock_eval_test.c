@@ -689,6 +689,68 @@ test_evaluate (Dwg_Data *dwg)
   return failures;
 }
 
+/* An INSERT with an attribute, added to a definition: the copy of its
+   ATTRIB and SEQEND are owned by the INSERT's copy, and stay out of the
+   block's entity list. */
+static int
+test_evaluate_owned (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCK_HEADER *def = block_header (dwg, TREES);
+  const dwg_point_3d pt = { 0.0, 0.0, 0.0 };
+  Dwg_Entity_INSERT *insert, *copy;
+  Dwg_Entity_ATTRIB *added = NULL;
+  Dwg_Object_BLOCK_HEADER *rep;
+  Dwg_Object *last, *attrib, *seqend;
+  int error = 0;
+  // 't' is a block alteZZa's INSERTs draw
+  insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
+  // dwg_add_ATTRIB, as dwg_add_Attribute links its ATTRIB twice
+  if (!insert
+      || !(added = dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value")))
+    {
+      loglevel = test_loglevel;
+      fail ("evaluate owned: could not add an INSERT with an attribute");
+      return 1;
+    }
+  // the add API makes the block the ATTRIB's owner; AutoCAD makes the
+  // INSERT
+  added->parent->ownerhandle = dwg_add_handleref (
+      dwg, 4, dwg->object[insert->parent->objid].handle.value, NULL);
+  rep = dwg_dynblock_evaluate (def, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!rep || error || rep->num_owned != def->num_owned)
+    {
+      fail ("evaluate owned: 0x%x, %u entities, expected %u", error,
+            rep ? (unsigned)rep->num_owned : 0, (unsigned)def->num_owned);
+      return 1;
+    }
+  last = dwg_ref_object (dwg, rep->entities[rep->num_owned - 1]);
+  copy = last && last->fixedtype == DWG_TYPE_INSERT
+             ? last->tio.entity->tio.INSERT
+             : NULL;
+  attrib = copy && copy->num_owned == 1 && copy->attribs
+               ? dwg_ref_object (dwg, copy->attribs[0])
+               : NULL;
+  seqend = copy ? dwg_ref_object (dwg, copy->seqend) : NULL;
+  loglevel = test_loglevel;
+  if (attrib && seqend && attrib->fixedtype == DWG_TYPE_ATTRIB
+      && seqend->fixedtype == DWG_TYPE_SEQEND
+      && attrib->tio.entity->ownerhandle->absolute_ref
+             == last->handle.value
+      && seqend->tio.entity->ownerhandle->absolute_ref
+             == last->handle.value)
+    {
+      ok ("evaluate owned: the ATTRIB and SEQEND copies are the INSERT "
+          "copy's");
+      return 0;
+    }
+  fail ("evaluate owned: the INSERT copy " FORMAT_HV " has %u owned, ATTRIB "
+        FORMAT_HV ", SEQEND " FORMAT_HV,
+        last ? last->handle.value : 0, copy ? (unsigned)copy->num_owned : 0,
+        attrib ? attrib->handle.value : 0, seqend ? seqend->handle.value : 0);
+  return 1;
+}
+
 /* What the check reports for each placement of the fixture. AutoCAD
    computed the visibility-only placements and those at the defaults,
    which the evaluator matches; the others change kinds it refuses, and
@@ -1016,6 +1078,7 @@ main (int argc, char *argv[])
   failures += test_values (&dwg);
   failures += test_refusals (&dwg);
   failures += test_evaluate (&dwg);
+  failures += test_evaluate_owned (&dwg);
   free_dwg (&dwg);
 
   // each check adds its evaluations to the document: a fresh one each

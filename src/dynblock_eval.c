@@ -1320,10 +1320,16 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     {
       Dwg_Object *copy
           = handle_object (dwg, dwg_copy_map_get (map, handles[i]));
-      if (!copy || copy->supertype != DWG_SUPERTYPE_ENTITY)
-        continue;
-      detach_copy (copy, copies);
-      if (!dwg_obj_is_subentity (copy))
+      if (copy && copy->supertype == DWG_SUPERTYPE_ENTITY)
+        detach_copy (copy, copies);
+    }
+  // def's own entities join the block; the ATTRIBs, VERTEXes and SEQENDs
+  // they own keep their copied owner
+  for (BITCODE_BL i = 0; _def->entities && i < _def->num_owned; i++)
+    {
+      Dwg_Object *copy = handle_object (
+          dwg, dwg_copy_map_get (map, ref_handle (_def->entities[i])));
+      if (copy)
         dwg_insert_entity (_rep, copy);
     }
   if (!dwg_add_ENDBLK (_rep))
@@ -1431,8 +1437,15 @@ static void ATTRIBUTE_FORMAT (2, 3)
 static void compare_object (Dynblock_Compare *c, const Dwg_Object *a,
                             const Dwg_Object *b);
 
+/* An entity another entity owns: an ATTRIB, VERTEX or SEQEND. */
+static int
+is_owned_entity (const Dwg_Object *obj)
+{
+  return dwg_obj_is_subentity (obj) || obj->fixedtype == DWG_TYPE_SEQEND;
+}
+
 /* References compare by what they point at: the same object, entities
-   with the same index in their blocks, or owned subentities (ATTRIB,
+   with the same index in their blocks, or owned entities (ATTRIB,
    VERTEX, SEQEND) that compare equal. */
 static void
 compare_handles (Dynblock_Compare *c, const char *name, const BITCODE_RLL ta,
@@ -1448,8 +1461,8 @@ compare_handles (Dynblock_Compare *c, const char *name, const BITCODE_RLL ta,
     return;
   oa = handle_object (c->dwg, ta);
   ob = handle_object (c->dwg, tb);
-  if (oa && ob && c->depth < 2 && dwg_obj_is_subentity (oa)
-      && dwg_obj_is_subentity (ob))
+  if (oa && ob && c->depth < 2 && is_owned_entity (oa)
+      && is_owned_entity (ob))
     {
       c->depth++;
       compare_object (c, oa, ob);
