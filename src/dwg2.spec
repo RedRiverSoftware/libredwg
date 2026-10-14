@@ -1643,7 +1643,7 @@ DWG_OBJECT_END
     FIELD_2RD_VECTOR (clip_verts, num_clip_verts, 11);                  \
   /* r2004 stores no inverted clip, even with flag 16 set (AutoCAD's   \
      r2004 DXF has no 170 either). Unverified for r2007+. */           \
-  SINCE (R_2007a)                                                       \
+  IF_FREE_OR_SINCE (R_2007a)                                            \
   {                                                                     \
     if (FIELD_VALUE (flag) & 16)                                        \
       {                                                                 \
@@ -1942,7 +1942,7 @@ DWG_OBJECT_END
     /* Not in r2004: with no values the surface action     \
        body follows (ASSOCPLANESURFACEACTIONBODY in AutoCAD's \
        r2004 DXF). Unverified for r2007+. */                \
-    SINCE (R_2007a) {                                       \
+    IF_FREE_OR_SINCE (R_2007a) {                            \
       if (!FIELD_VALUE (pab.num_values)) {                  \
         SUB_FIELD_BL (pab,l5, 90);                          \
         SUB_FIELD_HANDLE (pab,assocdep, 5, 330);            \
@@ -5736,7 +5736,7 @@ DWG_OBJECT (ASSOCVARIABLE)
   AcDbEvalVariant_fields(value); // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   FIELD_B (has_t78, 290);
   // has_t78 is 0 in every AutoCAD sample, whose DXF has no 1 here
-  if (FIELD_VALUE (has_t78)) {
+  if (FIELD_VALUE (has_t78) || IF_IS_FREE) {
     FIELD_T (t78, 1);
   }
   FIELD_B (b290, 290);
