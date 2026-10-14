@@ -256,12 +256,13 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    AutoCAD's Properties palette shows it. A LINEAR value is not checked
    against the parameter's value set. Refused, with
    DWG_ERR_NOTYETSUPPORTED: a LINEAR value that changes its parameter when
-   the parameter drives an action of another kind (such as scale), has its
-   base point in its middle, or chains its actions and is moved by
-   another property's; a stretch of part of an entity of another type; a
-   HATCH that crosses the frame; an action moving an entity of another
-   type, taking another point's change than the end or base point's, or
-   with an XY type; a move that would take 2D points out of their plane.
+   the parameter drives an action of another kind (such as scale), or has
+   its base point in its middle; an action moving a parameter, of any
+   kind, that chains its actions, which AutoCAD would then run too; a
+   stretch of part of an entity of another type; a HATCH that crosses the
+   frame; an action moving an entity of another type, taking another
+   point's change than the end or base point's, or with an XY type; a move
+   that would take 2D points out of their plane.
 
    A ROTATION value is accepted at the definition's value and a FLIP value
    at 0, and refused otherwise; a value of any other kind (XY, POLAR,
@@ -278,7 +279,8 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    can't decode; DWG_ERR_INVALIDHANDLE for an entity of def, or one it
    owns, that doesn't resolve or isn't an entity, a node of def's
    evaluation graph that doesn't resolve, or an action selecting an object
-   that isn't one of def's entities; DWG_ERR_VALUEOUTOFBOUNDS for a name no
+   that is neither one of def's entities nor a node of its evaluation
+   graph; DWG_ERR_VALUEOUTOFBOUNDS for a name no
    property has, a name given twice, a value that isn't finite, a LINEAR
    value below 0, a state the parameter doesn't have, or a flip value other
    than 0 or 1; DWG_ERR_INVALIDTYPE when def is not a dynamic block

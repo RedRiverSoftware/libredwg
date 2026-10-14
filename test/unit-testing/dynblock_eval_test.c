@@ -1699,7 +1699,7 @@ test_stretch_whole (Dwg_Data *dwg)
   Dwg_Entity_CIRCLE *circle, *mirrored, *boundary, *crossing;
   Dwg_Entity_ELLIPSE *ellipse, *elliptical_arc;
   Dwg_Entity_SPLINE *spline;
-  Dwg_Entity_TEXT *text, *centred;
+  Dwg_Entity_TEXT *text, *centred, *unstored;
   Dwg_Entity_ATTDEF *attdef;
   Dwg_Entity_MTEXT *mtext;
   Dwg_Entity_INSERT *insert;
@@ -1738,6 +1738,8 @@ test_stretch_whole (Dwg_Data *dwg)
   spline = dwg_add_SPLINE (def, 3, fit, &tan, &tan);
   pt.y = 20.0;
   text = dwg_add_TEXT (def, "left", &pt, 1.0);
+  pt.y = 21.0;
+  unstored = dwg_add_TEXT (def, "unstored", &pt, 1.0);
   pt.y = 22.0;
   centred = dwg_add_TEXT (def, "centred", &pt, 1.0);
   pt.y = 24.0;
@@ -1760,7 +1762,7 @@ test_stretch_whole (Dwg_Data *dwg)
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
   if (!line || !arc || !circle || !mirrored || !ellipse || !elliptical_arc
-      || !spline || !text || !centred || !attdef || !mtext || !insert
+      || !spline || !text || !unstored || !centred || !attdef || !mtext || !insert
       || !attrib || !boundary || !lwpline || !crossing || !point)
     {
       fail ("stretch whole: could not add the entities");
@@ -1789,6 +1791,10 @@ test_stretch_whole (Dwg_Data *dwg)
   centred->horiz_alignment = 1;
   centred->alignment_pt.x = 35.5;
   centred->alignment_pt.y = 22.0;
+  // centred, but with no alignment point stored, as AutoCAD writes one at
+  // its insertion point: the decoder leaves it 0, and so does the copy
+  unstored->horiz_alignment = 1;
+  unstored->dataflags = 0x02;
   set_owner (dwg, insert->attribs[0], entity_handle (dwg, insert->parent));
   set_owner (dwg, insert->seqend, entity_handle (dwg, insert->parent));
 
@@ -1800,6 +1806,8 @@ test_stretch_whole (Dwg_Data *dwg)
   list[n++] = added (dwg, spline->parent, 3, "SPLINE");
   list[n++] = added (dwg, text->parent, 1, "TEXT");
   list[n++] = added (dwg, centred->parent, 1, "centred TEXT");
+  list[n++] = added (dwg, unstored->parent, 1,
+                     "centred TEXT with no alignment point stored");
   list[n++] = added (dwg, attdef->parent, 1, "ATTDEF");
   list[n++] = added (dwg, mtext->parent, 5, "MTEXT");
   list[n++] = added (dwg, insert->parent, 1, "INSERT with an ATTRIB");
@@ -1941,6 +1949,56 @@ test_move (Dwg_Data *dwg)
                                 "a move of a POINT");
       move->num_deps--;
     }
+  // the Door's extension dictionary, neither an entity of it nor a node
+  if (add_move_entity (dwg, move, def->parent->xdicobjhandle->absolute_ref))
+    {
+      failures += test_refusal (dwg, DOOR, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a move of an object outside the definition");
+      move->num_deps--;
+    }
+  return failures;
+}
+
+/* A parameter of another kind than linear that an action moves, and that
+   chains its actions, would run them: here the Door's flip parameter
+   'swing', which MoveSwing moves, and which 'Stretch' is made to move. */
+static int
+test_chained (Dwg_Data *dwg)
+{
+  Dwg_Object *swing
+      = graph_node (dwg, DOOR, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
+  Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
+  Dwg_Object_BLOCKSTRETCHACTION *stretch
+      = stretch_action (dwg, DOOR, "Stretch");
+  Dwg_Object_BLOCKFLIPPARAMETER *_swing;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!swing || !move || !stretch)
+    {
+      fail ("chained: fixture objects not found");
+      return 1;
+    }
+  _swing = swing->tio.object->tio.BLOCKFLIPPARAMETER;
+  v.name = (char *)"Wall Thickness";
+  v.value = 6.0;
+  _swing->chain_actions = 1;
+  failures += test_refusal (dwg, DOOR, &v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a move of a flip parameter chaining its actions");
+  if (add_stretch_code (stretch, _swing->evalexpr.nodeid, 1))
+    {
+      // MoveSwing then moves nothing that chains
+      const BITCODE_BL num_actions = move->num_actions;
+      move->num_actions = 0;
+      failures += test_refusal (
+          dwg, DOOR, &v, 1, REFUSED (DWG_ERR_NOTYETSUPPORTED),
+          "a stretch of a flip parameter chaining its actions");
+      move->num_actions = num_actions;
+      pop_stretch_code (stretch);
+    }
+  _swing->chain_actions = 0;
   return failures;
 }
 
@@ -2941,6 +2999,7 @@ test_linear_all (Dwg_Data *dwg)
   failures += test_angle_offset (dwg);
   failures += test_stretch_whole (dwg);
   failures += test_move (dwg);
+  failures += test_chained (dwg);
   return failures;
 }
 

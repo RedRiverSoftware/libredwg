@@ -1237,6 +1237,9 @@ typedef struct _dynblock_plan
 {
   const Dwg_Data *dwg;
   dwg_inthash *entities; /* def's own entities */
+  const Dwg_Object **nodes; /* the evaluation graph's nodes */
+  BITCODE_BL num_nodes;
+  dwg_inthash *node_handles;
   Dynblock_Linear *linear;
   BITCODE_BL num_linear;
   Dynblock_Action *actions;
@@ -1301,6 +1304,70 @@ find_linear (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
     if (plan->linear[i].nodeid == nodeid)
       return (int)i;
   return -1;
+}
+
+/* The node of the evaluation graph with node id nodeid, or NULL. */
+static const Dwg_Object *
+find_node (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
+{
+  for (BITCODE_BL i = 0; i < plan->num_nodes; i++)
+    {
+      const Dynblock_Element *e
+          = plan->nodes[i] ? (const Dynblock_Element *)plan->nodes[i]
+                                 ->tio.object->tio.BLOCKMOVEACTION
+                           : NULL;
+      if (e && e->evalexpr.nodeid == nodeid)
+        return plan->nodes[i];
+    }
+  return NULL;
+}
+
+static int
+is_parameter (const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARPARAMETER:
+    case DWG_TYPE_BLOCKROTATIONPARAMETER:
+    case DWG_TYPE_BLOCKVISIBILITYPARAMETER:
+    case DWG_TYPE_BLOCKFLIPPARAMETER:
+    case DWG_TYPE_BLOCKXYPARAMETER:
+    case DWG_TYPE_BLOCKPOLARPARAMETER:
+    case DWG_TYPE_BLOCKPOINTPARAMETER:
+    case DWG_TYPE_BLOCKLOOKUPPARAMETER:
+    case DWG_TYPE_BLOCKALIGNMENTPARAMETER:
+    case DWG_TYPE_BLOCKBASEPOINTPARAMETER:
+    case DWG_TYPE_BLOCKUSERPARAMETER:
+    case DWG_TYPE_BLOCKLINEARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKALIGNEDCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* Refuses action a moving points of the parameter with node id nodeid,
+   other than a linear one, when it chains its actions: AutoCAD would run
+   them too. */
+static int
+check_chained (Dynblock_Plan *plan, const Dynblock_Action *a,
+               const BITCODE_BL nodeid)
+{
+  const Dwg_Object *obj = find_node (plan, nodeid);
+  // every parameter starts with BLOCKPARAMETER_fields
+  if (!obj || !is_parameter (obj)
+      || !obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "action '%s' moves %s (node %u), which chains its actions; "
+              "that is not supported",
+              a->name, dwg_type_name (obj->fixedtype), (unsigned)nodeid);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
 }
 
 static int
@@ -1733,6 +1800,12 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
     {
       const Dwg_BLOCKSTRETCHACTION_codes *c = &_a->codes[i];
       const int k = find_linear (plan, c->bl95);
+      if (k < 0 && c->indexes && c->num_indexes)
+        {
+          error = check_chained (plan, a, c->bl95);
+          if (error)
+            return error;
+        }
       for (BITCODE_BS j = 0; k >= 0 && c->indexes && j < c->num_indexes; j++)
         {
           Dynblock_Linear *q = &plan->linear[k];
@@ -1772,19 +1845,22 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
   int error = 0;
   for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
     {
-      const Dwg_Object *obj
-          = handle_object (plan->dwg, ref_handle (_a->deps[i]));
-      // the parameters and grips it moves are graph nodes, listed by id
-      if (obj && obj->supertype == DWG_SUPERTYPE_OBJECT)
+      const BITCODE_RLL handle = ref_handle (_a->deps[i]);
+      const Dwg_Object *obj;
+      // the parameters and grips it moves are nodes of the graph, which it
+      // lists by id too
+      if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
         continue;
-      obj = selected_entity (plan, a, ref_handle (_a->deps[i]), &error);
+      obj = selected_entity (plan, a, handle, &error);
       if (obj)
         error = plan_whole (plan, a, obj, delta);
     }
   for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
     {
       const int k = find_linear (plan, _a->actions[i]);
-      if (k >= 0)
+      if (k < 0)
+        error = check_chained (plan, a, _a->actions[i]);
+      else
         {
           Dynblock_Linear *q = &plan->linear[k];
           q->base.x += delta->x;
@@ -1957,6 +2033,8 @@ static void
 free_plan (Dynblock_Plan *plan)
 {
   free_hash (plan->entities);
+  free_hash (plan->node_handles);
+  free ((void *)plan->nodes);
   free (plan->linear);
   for (BITCODE_BL i = 0; plan->actions && i < plan->num_actions; i++)
     free (plan->actions[i].name);
@@ -1983,15 +2061,29 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
   int error = 0, next;
 
   plan->entities = hash_new (_def->num_owned * 2 + 8);
+  plan->node_handles = hash_new (_graph->num_nodes * 2 + 8);
+  plan->nodes = (const Dwg_Object **)calloc (_graph->num_nodes + 1,
+                                             sizeof (Dwg_Object *));
   plan->linear
       = (Dynblock_Linear *)calloc (list->count + 1, sizeof (Dynblock_Linear));
   plan->actions = (Dynblock_Action *)calloc (_graph->num_nodes + 1,
                                              sizeof (Dynblock_Action));
-  if (!plan->entities || !plan->linear || !plan->actions)
+  if (!plan->entities || !plan->node_handles || !plan->nodes || !plan->linear
+      || !plan->actions)
     return DWG_ERR_OUTOFMEM;
   for (BITCODE_BL i = 0; _def->entities && i < _def->num_owned; i++)
     if (ref_handle (_def->entities[i]))
       hash_set (plan->entities, ref_handle (_def->entities[i]), 1);
+  for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj
+          = ref_object (plan->dwg, _graph->nodes[i].evalexpr);
+      if (obj)
+        {
+          plan->nodes[plan->num_nodes++] = obj;
+          hash_set (plan->node_handles, obj->handle.value, 1);
+        }
+    }
   for (BITCODE_BL i = 0; i < list->count; i++)
     {
       const Dwg_DynParam *p = &list->params[i];
