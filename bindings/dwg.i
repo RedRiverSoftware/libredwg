@@ -23,8 +23,8 @@
 %{
 #include "config.h"
 #include "dwg_api.h"
-#include "dwg_dynblock_api.h"
 #include "dwg_svg_api.h"
+#include "dwg_dynblock_api.h"
 %}
 
 %include "carrays.i"
@@ -62,8 +62,8 @@
 %ignore dwg_obj_generic_dwg;
 
 %include "dwg_api.h"
-%include "dwg_dynblock_api.h"
 %include "dwg_svg_api.h"
+%include "dwg_dynblock_api.h"
 
 // The arrays and out parameters of dwg_dynblock_api.h
 %array_functions(Dwg_DynParam, Dwg_DynParam_Array);

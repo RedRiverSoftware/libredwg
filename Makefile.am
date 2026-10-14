@@ -39,8 +39,8 @@ DIST_SUBDIRS = $(SUBDIRS)
 include_HEADERS = \
 	include/dwg.h \
 	include/dwg_api.h \
-	include/dwg_dynblock_api.h \
-	include/dwg_svg_api.h
+	include/dwg_svg_api.h \
+	include/dwg_dynblock_api.h
 
 pcdatadir = $(libdir)/pkgconfig
 pcdata_DATA = libredwg.pc

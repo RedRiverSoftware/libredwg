@@ -238,8 +238,8 @@ endif()
 set(libredwg_HEADERS
     include/dwg.h
     include/dwg_api.h
-    include/dwg_dynblock_api.h
-    include/dwg_svg_api.h)
+    include/dwg_svg_api.h
+    include/dwg_dynblock_api.h)
 
 if(NOT LIBREDWG_DISABLE_JSON)
   set(outjson_SOURCES
@@ -277,6 +277,7 @@ set(libredwg_SOURCES
     src/dxfclasses.c
     src/free.c
     src/copy.c
+    src/dynblock_copy.c
     src/dynblock_eval.c
     src/geom.c
     src/out_dxf.c

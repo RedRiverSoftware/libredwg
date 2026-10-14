@@ -19,7 +19,10 @@
    - references to objects outside the copy, reported and then resolved;
    - EED, also a string the decoder left unread;
    - linetype dash texts in the linetype's strings_area;
-   - refused copies. */
+   - refused copies;
+   - block definitions, with their dynamic-block data, copied by
+     dwg_dynblock_copy_block () into a new document and into a public
+     drawing: compared with their sources, written and read back. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,6 +41,8 @@ static int test_loglevel;
 /* The copy itself, for its internals and for its spec macros, which copy
    the header variables of the documents the clone test builds. */
 #include "copy.c"
+/* The block copy, for the map its copies are made through. */
+#include "dynblock_copy.c"
 #include "tests_common.h"
 #include "dwg_api.h"
 
@@ -227,10 +232,12 @@ typedef struct _compare
   const Dwg_Copy_Map *map;
   /* within one document references outside the copy keep their target */
   int same_document;
-  /* Doubles read back may differ from those written by less than 1e-12:
-     bit_write_DD writes a value that close to its default (for LWPOLYLINE
-     points, the previous point) as the default, as a plain dwgrewrite of
-     example_2004.dwg shows too. Copies must match exactly. */
+  /* Set for a read back. Doubles read back may differ from those written
+     by less than 1e-12: bit_write_DD writes a value that close to its
+     default (for LWPOLYLINE points, the previous point) as the default, as
+     a plain dwgrewrite of example_2004.dwg shows too. Objects and EED read
+     back may hold raw bits and bytes again, which a copy mustn't keep.
+     Copies must match exactly. */
   int dd_tolerance;
   int is_tu;
   /* the documents' version, which sizes LTYPE.strings_area */
@@ -238,6 +245,11 @@ typedef struct _compare
   /* PROXY data last bytes left out of a read-back comparison, see
      unwritten_last_byte () */
   unsigned unwritten;
+  /* a read back of a document built with the add API, see
+     ADD_API_ACAD_APPID, and the strings in it that lost their characters
+     outside ASCII */
+  int add_api_readback;
+  unsigned non_ascii;
   const char *what;
   int failed;
 } Compare;
@@ -297,6 +309,25 @@ compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
   compare_handle (c, name, ta, tb);
 }
 
+/* Whether b equals a with a's bytes from 0x80 up removed, and a has at
+   least one: the loss a document built with the add API reads back, see
+   ADD_API_ACAD_APPID. */
+static int
+lost_non_ascii (const char *a, const char *b)
+{
+  int lost = 0;
+  if (!a)
+    return 0;
+  if (!b)
+    b = "";
+  for (; *a; a++)
+    if ((unsigned char)*a >= 0x80)
+      lost = 1;
+    else if (*b++ != *a)
+      return 0;
+  return lost && !*b;
+}
+
 static void
 compare_string (Compare *c, const char *name, const char *a, const char *b,
                 const int wide)
@@ -312,7 +343,15 @@ compare_string (Compare *c, const char *name, const char *a, const char *b,
       la = a ? strlen (a) : 0;
       lb = b ? strlen (b) : 0;
     }
-  if (la != lb || (la && memcmp (a, b, la)))
+  if ((la != lb || (la && memcmp (a, b, la))) && c->add_api_readback && !wide
+      && lost_non_ascii (a, b))
+    {
+      // see ADD_API_ACAD_APPID
+      if (c->non_ascii++ < (unsigned)max_reported && test_loglevel >= 2)
+        printf ("  # TODO P3-06 %s: %s: \"%s\", expected \"%s\"\n", c->what,
+                name, b ? b : "", a);
+    }
+  else if (la != lb || (la && memcmp (a, b, la)))
     compare_fail (c, "%s: \"%s\", expected \"%s\"", name,
                   b && !wide ? b : "", a && !wide ? a : "");
   else if (c->map && a && a == b)
@@ -1064,7 +1103,7 @@ compare_eed (Compare *c, const Dwg_Eed *a, const BITCODE_BL na,
       const Dwg_Eed_Data *da = a[i].data, *db = b[i].data;
       char name[32];
       snprintf (name, sizeof (name), "eed[%u]", (unsigned)i);
-      if (c->map && b[i].raw)
+      if (c->map && !c->dd_tolerance && b[i].raw)
         compare_fail (c, "%s: raw bytes kept", name);
       if (!!a[i].size != !!b[i].size)
         compare_fail (c, "%s: group start %d, expected %d", name, !!b[i].size,
@@ -1195,7 +1234,8 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
                     a->name, a->type);
       return;
     }
-  if (c->map
+  // copies, not objects read back, which may have raw bits again
+  if (c->map && !c->dd_tolerance
       && (b->unknown_bits || b->num_unknown_bits || b->unknown_rest
           || b->num_unknown_rest))
     compare_fail (c, "raw bits kept");
@@ -2514,6 +2554,1216 @@ test_refused (void)
   return numfailed ();
 }
 
+/*--------------------------------------------------------------------------------
+ * dwg_dynblock_copy_block
+ */
+
+/* The drawing whose blocks the block copy tests copy. Its constraint-based
+   block, Door Elevation, holds an ACDB_DYNAMICBLOCKPROXYNODE, which
+   LibreDWG can't decode, so the copy refuses it, and the one
+   representation block that refers to it. */
+#define DYNBLOCKS "2004/Dynblocks.dwg"
+#define DOOR_ELEVATION "Door Elevation - Imperial"
+#define DYNBLOCKS_REFUSED 2
+
+/* A block's name as the block copy matches it, or NULL. */
+static const char *
+test_block_name (const Dwg_Data *dwg, const Dwg_Object *obj, char *buf,
+                 const size_t size)
+{
+  size_t len;
+  const char *name = block_name (dwg, obj, &len);
+  if (!name)
+    return NULL;
+  snprintf (buf, size, "%.*s", (int)len, name);
+  return buf;
+}
+
+/* The blocks of dwg's block table, only the dynamic definitions or all. */
+static const Dwg_Object **
+table_blocks (const Dwg_Data *dwg, const int dynamic, BITCODE_BL *nump)
+{
+  const Dwg_Object_APPID_CONTROL *ctrl
+      = control_of (dwg_get_first_object (dwg, DWG_TYPE_BLOCK_CONTROL));
+  const Dwg_Object **blocks;
+  *nump = 0;
+  if (!ctrl || !ctrl->num_entries)
+    return NULL;
+  blocks
+      = (const Dwg_Object **)calloc (ctrl->num_entries, sizeof (Dwg_Object *));
+  for (BITCODE_BS i = 0; i < ctrl->num_entries; i++)
+    {
+      const Dwg_Object *obj
+          = ctrl->entries[i]
+                ? dwg_resolve_handle (dwg, ctrl->entries[i]->absolute_ref)
+                : NULL;
+      size_t len;
+      if (obj && obj->fixedtype == DWG_TYPE_BLOCK_HEADER
+          && (!dynamic || true_name (dwg, obj, &len)))
+        blocks[(*nump)++] = obj;
+    }
+  return blocks;
+}
+
+/* The name of a table record, or of a block as the block copy matches it. */
+static const char *
+record_name (const Dwg_Data *dwg, const Dwg_Object *obj, char *buf,
+             const size_t size)
+{
+  if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+    return test_block_name (dwg, obj, buf, size);
+  return obj->tio.object && obj->tio.object->tio.APPID
+             ? obj->tio.object->tio.APPID->name
+             : NULL;
+}
+
+/* Each table of dwg lists each of its records once, and has no two
+   records, nor two blocks, of the same name. */
+static void
+check_tables (const char *what, const Dwg_Data *dwg)
+{
+  const Dwg_Object_Type controls[]
+      = { DWG_TYPE_BLOCK_CONTROL, DWG_TYPE_LAYER_CONTROL,
+          DWG_TYPE_STYLE_CONTROL, DWG_TYPE_LTYPE_CONTROL,
+          DWG_TYPE_APPID_CONTROL, DWG_TYPE_DIMSTYLE_CONTROL };
+  unsigned twice = 0, same = 0, records = 0;
+  for (size_t t = 0; t < sizeof (controls) / sizeof (controls[0]); t++)
+    {
+      const Dwg_Object_APPID_CONTROL *ctrl
+          = control_of (dwg_get_first_object (dwg, controls[t]));
+      if (!ctrl || !ctrl->entries)
+        continue;
+      for (BITCODE_BS i = 0; i < ctrl->num_entries; i++)
+        {
+          const Dwg_Object *a
+              = ctrl->entries[i]
+                    ? dwg_resolve_handle (dwg, ctrl->entries[i]->absolute_ref)
+                    : NULL;
+          char abuf[256], bbuf[256];
+          const char *aname;
+          if (!a)
+            continue;
+          records++;
+          aname = record_name (dwg, a, abuf, sizeof (abuf));
+          for (BITCODE_BS j = i + 1; j < ctrl->num_entries; j++)
+            {
+              const Dwg_Object *b
+                  = ctrl->entries[j] ? dwg_resolve_handle (
+                                           dwg, ctrl->entries[j]->absolute_ref)
+                                     : NULL;
+              if (!b)
+                continue;
+              if (a == b)
+                twice++;
+              else if (aname
+                       && same_cstr (
+                           aname, record_name (dwg, b, bbuf, sizeof (bbuf))))
+                {
+                  if (test_loglevel >= 2)
+                    printf ("  # %s: %s " FORMAT_HV " and " FORMAT_HV
+                            " both named %s\n",
+                            what, a->name, a->handle.value, b->handle.value,
+                            aname);
+                  same++;
+                }
+            }
+        }
+    }
+  if (!twice && !same)
+    OK ("%s: %u table records, each listed once, no two of a name", what,
+        records);
+  else
+    FAIL ("%s: of %u table records, %u listed twice, %u pairs of a name", what,
+          records, twice, same);
+}
+
+/* Each block from first on lists exactly the INSERTs that draw it, and
+   each INSERT from first on is listed by its block. */
+static void
+check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
+{
+  unsigned listed = 0, wrong = 0, missing = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER && i >= first)
+        {
+          const Dwg_Object_BLOCK_HEADER *blk
+              = obj->tio.object->tio.BLOCK_HEADER;
+          for (BITCODE_BL k = 0; k < blk->num_inserts; k++)
+            {
+              const Dwg_Object *ins
+                  = dwg_resolve_handle (dwg, ref_target (blk->inserts[k]));
+              if (ins && ins->fixedtype == DWG_TYPE_INSERT
+                  && ref_target (ins->tio.entity->tio.INSERT->block_header)
+                         == obj->handle.value)
+                listed++;
+              else
+                wrong++;
+            }
+        }
+      else if (obj->fixedtype == DWG_TYPE_INSERT && i >= first)
+        {
+          const Dwg_Object *blkobj = dwg_resolve_handle (
+              dwg, ref_target (obj->tio.entity->tio.INSERT->block_header));
+          const Dwg_Object_BLOCK_HEADER *blk
+              = blkobj && blkobj->fixedtype == DWG_TYPE_BLOCK_HEADER
+                    ? blkobj->tio.object->tio.BLOCK_HEADER
+                    : NULL;
+          int found = 0;
+          for (BITCODE_BL k = 0; blk && k < blk->num_inserts; k++)
+            if (ref_target (blk->inserts[k]) == obj->handle.value)
+              found = 1;
+          if (!found)
+            missing++;
+        }
+    }
+  if (!wrong && !missing)
+    OK ("%s: the blocks list their %u INSERTs", what, listed);
+  else
+    FAIL ("%s: %u INSERTs listed by the wrong block, %u not listed", what,
+          wrong, missing);
+}
+
+/* A document built with the add API is encoded as a DXF import, as
+   dwg_add_Document () sets DWG_OPTS_IN. The encoder then leaves out a
+   BLOCK_HEADER's EED of the APPID with handle 0x12, ACAD, such as its
+   "DesignCenter Data" (EED_ALLOWED in encode.c, a workaround for a crash
+   on a DXF import, LibreDWG #244), and computes TEXT, ATTRIB and ATTDEF
+   dataflags afresh (dwg_set_dataflags), which may differ from AutoCAD's
+   for the same values. A read back of such a document is compared with
+   both allowed for. The encoder also takes its 8-bit strings to be UTF-8,
+   as the add API makes them, and converts them to the codepage
+   (bit_utf8_to_TV ()), while a copy holds its source's codepage bytes. A
+   byte from 0x80 to 0xBF, or from 0xF0 up, doesn't start a UTF-8 sequence
+   and is dropped: "Open 30\xBA" (0xBA is the masculine ordinal in codepage
+   1252) reads back as "Open 30". A byte from 0xC0 to 0xEF starts one,
+   takes the bytes after it along, and changes more than itself. Until the
+   copy converts its strings (runbook task P3-06, which makes these strict
+   checks again), compare_string () reports a string that lost only its
+   bytes from 0x80 up as TODO, and fails any other difference. */
+#define ADD_API_ACAD_APPID 0x12
+
+/* The EED of a, but for the groups whose APPID map maps to dropped_appid,
+   in eed (with room for num_eed items). Returns the number left. */
+static BITCODE_BL
+eed_without_appid (const Dwg_Eed *a, const BITCODE_BL num_eed,
+                   const Dwg_Copy_Map *map, const BITCODE_RLL dropped_appid,
+                   Dwg_Eed *eed, unsigned *dropped)
+{
+  BITCODE_BL n = 0;
+  int drop = 0;
+  for (BITCODE_BL i = 0; i < num_eed; i++)
+    {
+      // the first item of a group has its size and APPID
+      if (a[i].size)
+        {
+          drop = dwg_copy_map_get (map, a[i].handle.value) == dropped_appid;
+          *dropped += drop;
+        }
+      if (!drop)
+        eed[n++] = a[i];
+    }
+  return n;
+}
+
+/* A copied BLOCK_HEADER has its source's fields but its INSERTs, which
+   check_inserts () checks. A read back from a document built with the add
+   API lacks its ACAD EED, see ADD_API_ACAD_APPID, which dropped counts. */
+static void
+compare_block_header (Compare *c, const Dwg_Object *a, const Dwg_Object *b,
+                      unsigned *dropped)
+{
+  const Dwg_Object_Object *oa = a->tio.object;
+  Dwg_Object_BLOCK_HEADER ba = *oa->tio.BLOCK_HEADER;
+  Dwg_Object_BLOCK_HEADER bb = *b->tio.object->tio.BLOCK_HEADER;
+  ba.num_inserts = bb.num_inserts = 0;
+  ba.inserts = bb.inserts = NULL;
+  compare_fields (c, "", "Object", dwg_dynapi_common_object_fields (), oa,
+                  b->tio.object, NULL);
+  if (c->add_api_readback && oa->num_eed)
+    {
+      Dwg_Eed *eed = (Dwg_Eed *)calloc (oa->num_eed, sizeof (Dwg_Eed));
+      const BITCODE_BL n = eed_without_appid (
+          oa->eed, oa->num_eed, c->map, ADD_API_ACAD_APPID, eed, dropped);
+      compare_eed (c, eed, n, b->tio.object->eed, b->tio.object->num_eed);
+      free (eed);
+    }
+  else
+    compare_eed (c, oa->eed, oa->num_eed, b->tio.object->eed,
+                 b->tio.object->num_eed);
+  compare_fields (c, "", "BLOCK_HEADER",
+                  dwg_dynapi_entity_fields ("BLOCK_HEADER"), &ba, &bb, NULL);
+}
+
+/* A table record the block copy added has its source's fields, but no
+   extension dictionary. */
+static void
+compare_record (Compare *c, const Dwg_Object *a, const Dwg_Object *b)
+{
+  const Dwg_Object_Object *ob = b->tio.object;
+  compare_eed (c, a->tio.object->eed, a->tio.object->num_eed, ob->eed,
+               ob->num_eed);
+  compare_fields (c, "", a->name, dwg_dynapi_entity_fields (a->name),
+                  a->tio.object->tio.APPID, ob->tio.APPID, NULL);
+  if (ref_target (ob->xdicobjhandle) || ob->num_reactors
+      || (a->tio.object->xdicobjhandle && !ob->is_xdic_missing))
+    compare_fail (c, "kept its extension dictionary or reactors");
+}
+
+/* What compare_block_copies () found. */
+typedef struct _block_copies
+{
+  unsigned copies;
+  unsigned blocks;
+  unsigned records;
+  unsigned dropped; /* ACAD EED groups of blocks read back, see above */
+} Block_Copies;
+
+/* Compares the objects the block copy added to dst, from index first on,
+   with their sources in src through map. dst may be read back from the
+   document the copies were made in. */
+static void
+compare_block_copies (Compare *c, Dwg_Data *src, Dwg_Data *dst,
+                      const Dwg_Copy_Map *map, const BITCODE_BL first,
+                      Block_Copies *found)
+{
+  memset (found, 0, sizeof (Block_Copies));
+  for (BITCODE_BL i = 0; i < src->num_objects; i++)
+    {
+      const Dwg_Object *a = &src->object[i];
+      const BITCODE_RLL h = dwg_copy_map_get (map, a->handle.value);
+      const Dwg_Object *b = h ? dwg_resolve_handle (dst, h) : NULL;
+      char what[64];
+      // not copied, or matched in dst
+      if (!b || b->index < first)
+        continue;
+      found->copies++;
+      snprintf (what, sizeof (what), "%s%s " FORMAT_HV,
+                c->dd_tolerance ? "read back " : "", a->name, a->handle.value);
+      c->what = what;
+      if (a->fixedtype == DWG_TYPE_BLOCK_HEADER)
+        {
+          found->blocks++;
+          compare_block_header (c, a, b, &found->dropped);
+        }
+      else if (dwg_obj_is_table (a))
+        {
+          found->records++;
+          compare_record (c, a, b);
+        }
+      else
+        {
+          // the read back's dataflags are computed afresh, see above
+          if (c->add_api_readback && b->tio.entity && b->tio.entity->tio.TEXT)
+            {
+              if (a->fixedtype == DWG_TYPE_TEXT)
+                b->tio.entity->tio.TEXT->dataflags
+                    = a->tio.entity->tio.TEXT->dataflags;
+              else if (a->fixedtype == DWG_TYPE_ATTRIB)
+                b->tio.entity->tio.ATTRIB->dataflags
+                    = a->tio.entity->tio.ATTRIB->dataflags;
+              else if (a->fixedtype == DWG_TYPE_ATTDEF)
+                b->tio.entity->tio.ATTDEF->dataflags
+                    = a->tio.entity->tio.ATTDEF->dataflags;
+            }
+          compare_object (c, src, a, dst, b);
+        }
+    }
+}
+
+/* Adds the entries of map for src's objects to total. */
+static void
+merge_map (Dwg_Copy_Map *total, const Dwg_Copy_Map *map, const Dwg_Data *src)
+{
+  for (BITCODE_BL i = 0; i < src->num_objects; i++)
+    {
+      const BITCODE_RLL h
+          = dwg_copy_map_get (map, src->object[i].handle.value);
+      if (h)
+        dwg_copy_map_set (total, src->object[i].handle.value, h);
+    }
+}
+
+/* The number of times dwg's block table lists block. */
+static int
+in_block_table (const Dwg_Data *dwg, const BITCODE_RLL block)
+{
+  const Dwg_Object_APPID_CONTROL *ctrl
+      = control_of (dwg_get_first_object (dwg, DWG_TYPE_BLOCK_CONTROL));
+  int listed = 0;
+  for (BITCODE_BS i = 0; ctrl && ctrl->entries && i < ctrl->num_entries; i++)
+    if (ref_target (ctrl->entries[i]) == block)
+      listed++;
+  return listed;
+}
+
+/* Copies blk of src into dst and checks the copy: its objects have their
+   sources' fields, and it is in dst's block table. A copy of a block of a
+   name dst has already is that block, as is a second copy of the block.
+   Adds the copy's map to total. Returns whether blk was copied. */
+static int
+copy_and_check_block (const char *what, Dwg_Data *dst, Dwg_Data *src,
+                      const Dwg_Object *blk, const int refuse,
+                      Dwg_Copy_Map *total)
+{
+  const BITCODE_BL first = dst->num_objects;
+  const BITCODE_BS num_classes = dst->num_classes;
+  const BITCODE_RLL existing = find_block (dst, src, blk);
+  Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Object_BLOCK_HEADER *copy, *again;
+  const Dwg_Object *copyobj;
+  Block_Copies found;
+  Compare c;
+  int error, error2, copied = 0;
+
+  loglevel = refuse ? 0 : tracelevel; // a refusal logs an error
+  copy = copy_block (dst, src, blk->tio.object->tio.BLOCK_HEADER, map, &error);
+  loglevel = test_loglevel;
+  if (refuse)
+    {
+      if (!copy && error >= DWG_ERR_CRITICAL && dst->num_objects == first
+          && dst->num_classes == num_classes)
+        OK ("%s: refused (error 0x%x), nothing added", what, (unsigned)error);
+      else
+        FAIL ("%s: not refused: error 0x%x, %u objects added", what,
+              (unsigned)error, (unsigned)(dst->num_objects - first));
+      goto done;
+    }
+  if (existing)
+    {
+      if (copy && copy->parent->objid < first
+          && dst->object[copy->parent->objid].handle.value == existing
+          && !error && dst->num_objects == first)
+        OK ("%s: dst has a block of its name, " FORMAT_HV
+            ", which it returns, adding nothing",
+            what, existing);
+      else
+        FAIL ("%s: dst has a block of its name, " FORMAT_HV
+              ", but error 0x%x, %u objects added",
+              what, existing, (unsigned)error,
+              (unsigned)(dst->num_objects - first));
+      goto done;
+    }
+  if (!copy || error)
+    {
+      FAIL ("%s: error 0x%x", what, (unsigned)error);
+      goto done;
+    }
+  copied = 1;
+  if (total)
+    merge_map (total, map, src);
+  copyobj = &dst->object[copy->parent->objid];
+  memset (&c, 0, sizeof (c));
+  c.map = map;
+  c.version = src->header.from_version;
+  compare_block_copies (&c, src, dst, map, first, &found);
+  if (!c.failed && found.copies == dst->num_objects - first
+      && copyobj->index >= first)
+    OK ("%s: copied as " FORMAT_HV ": %u objects, %u of them blocks and %u "
+        "table records, each with its source's fields",
+        what, copyobj->handle.value, found.copies, found.blocks,
+        found.records);
+  else
+    FAIL ("%s: %d field differences, %u copies of %u objects added", what,
+          c.failed, found.copies, (unsigned)(dst->num_objects - first));
+  if (in_block_table (dst, copyobj->handle.value) == 1)
+    OK ("%s: listed in dst's block table", what);
+  else
+    FAIL ("%s: listed %d times in dst's block table", what,
+          in_block_table (dst, copyobj->handle.value));
+
+  loglevel = tracelevel;
+  again = dwg_dynblock_copy_block (dst, src, blk->tio.object->tio.BLOCK_HEADER,
+                                   &error2);
+  loglevel = test_loglevel;
+  if (again == copy && !error2 && dst->num_objects == first + found.copies)
+    OK ("%s: copied again, the first copy, nothing added", what);
+  else
+    FAIL ("%s: copied again: error 0x%x, %s, %u objects added", what,
+          (unsigned)error2, again == copy ? "the first copy" : "not it",
+          (unsigned)(dst->num_objects - first - found.copies));
+
+done:
+  dwg_copy_map_free (map);
+  return copied;
+}
+
+/* Writes dst as r2004 and reads it back: each copy, from index first on,
+   reads back with its source's fields, compared through map, and every
+   reference resolves. */
+static void
+check_block_readback (const char *what, Dwg_Data *dst, const BITCODE_BL first,
+                      Dwg_Data *src, const Dwg_Copy_Map *map, const char *file)
+{
+  const int add_api = (dst->opts & DWG_OPTS_IN) == DWG_OPTS_IN;
+  Dwg_Data readback;
+  Block_Copies found;
+  Compare c;
+  int error;
+  memset (&readback, 0, sizeof (readback));
+  loglevel = tracelevel;
+  error = write_dwg (file, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (file, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+      free_dwg (&readback);
+      return;
+    }
+  memset (&c, 0, sizeof (c));
+  c.map = map;
+  c.dd_tolerance = 1;
+  c.add_api_readback = add_api;
+  c.version = dst->header.from_version;
+  compare_block_copies (&c, src, &readback, map, first, &found);
+  if (readback.num_objects == dst->num_objects
+      && found.copies == dst->num_objects - first && !c.failed)
+    OK ("%s: %u objects read back, the %u copies with their sources' "
+        "fields, but for what a document built with the add API doesn't "
+        "write: %u ACAD EED groups of blocks and the characters outside "
+        "ASCII of %u strings",
+        what, (unsigned)readback.num_objects, found.copies, found.dropped,
+        c.non_ascii);
+  else
+    FAIL ("%s: %u objects read back of %u, %u copies of %u, %d field "
+          "differences",
+          what, (unsigned)readback.num_objects, (unsigned)dst->num_objects,
+          found.copies, (unsigned)(dst->num_objects - first), c.failed);
+  if (c.non_ascii)
+    {
+      loglevel = test_loglevel;
+      todo ("%s: %u strings read back without their characters outside "
+            "ASCII, and with nothing else changed, from a document built "
+            "with the add API (runbook task P3-06)",
+            what, c.non_ascii);
+    }
+  check_refs (what, &readback, 0);
+  check_tables (what, &readback);
+  check_inserts (what, &readback, first);
+  free_dwg (&readback);
+  if (!numfailed () && !getenv ("COPY_TEST_KEEP"))
+    unlink (file);
+}
+
+/* Copies the dynamic block definitions of the fixture into a new r2004
+   document, or into the public drawing dst_name. */
+static int
+test_copy_dynblocks (const char *dst_name)
+{
+  char path[256], file[128], what[300];
+  Dwg_Data src, dstdwg;
+  Dwg_Data *dst;
+  Dwg_Copy_Map *total;
+  const Dwg_Object **blocks;
+  BITCODE_BL num_blocks, first;
+  unsigned copied = 0;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("copy dynamic blocks: %s read failed", DYNBLOCKS);
+      return 1;
+    }
+  if (dst_name)
+    {
+      char dst_path[256];
+      if (!test_file (dst_name, dst_path, sizeof (dst_path))
+          || read_dwg (dst_path, &dstdwg) >= DWG_ERR_CRITICAL)
+        {
+          FAIL ("copy dynamic blocks: %s read failed", dst_name);
+          free_dwg (&src);
+          return 1;
+        }
+      dst = &dstdwg;
+    }
+  else
+    dst = dwg_new_Document (R_2004, 0, tracelevel);
+  loglevel = test_loglevel;
+  first = dst->num_objects;
+  total = dwg_copy_map_new ();
+  blocks = table_blocks (&src, 1, &num_blocks);
+  for (BITCODE_BL i = 0; i < num_blocks; i++)
+    {
+      char name[256];
+      test_block_name (&src, blocks[i], name, sizeof (name));
+      snprintf (what, sizeof (what), "copy %s into %s", name,
+                dst_name ? dst_name : "a new document");
+      copied += copy_and_check_block (what, dst, &src, blocks[i],
+                                      strEQc (name, DOOR_ELEVATION), total);
+    }
+  snprintf (what, sizeof (what), "copy dynamic blocks into %s",
+            dst_name ? dst_name : "a new document");
+  if (num_blocks == 6 && copied == num_blocks - 1)
+    OK ("%s: %u of the %u definitions copied", what, copied,
+        (unsigned)num_blocks);
+  else
+    FAIL ("%s: %u of the %u definitions copied", what, copied,
+          (unsigned)num_blocks);
+  check_tables (what, dst);
+  check_inserts (what, dst, first);
+  check_refs (what, dst, 0);
+  if (dst->block_control.num_entries
+      == control_of (dwg_get_first_object (dst, DWG_TYPE_BLOCK_CONTROL))
+             ->num_entries)
+    OK ("%s: dwg->block_control has the table's %u entries", what,
+        (unsigned)dst->block_control.num_entries);
+  else
+    FAIL ("%s: dwg->block_control has %u entries", what,
+          (unsigned)dst->block_control.num_entries);
+  snprintf (file, sizeof (file), "copy_dynblocks_into_%s.dwg",
+            dst_name ? "example_2004" : "new");
+  check_block_readback (what, dst, first, &src, total, file);
+
+  free (blocks);
+  dwg_copy_map_free (total);
+  free_dwg (&src);
+  free_dwg (dst);
+  if (!dst_name)
+    free (dst);
+  return numfailed ();
+}
+
+/* Copies every block of the fixture's block table into a new document,
+   plain and anonymous ones too, then example_2004's plain blocks into
+   another. Each copy is compared with its source; the refused ones are
+   Door Elevation and the representation block that refers to it. */
+static int
+test_copy_all_blocks (void)
+{
+  const char *what = "copy every block";
+  char path[256], name[256], blkwhat[300];
+  Dwg_Data src, src2;
+  Dwg_Data *dst;
+  Dwg_Copy_Map *total;
+  const Dwg_Object **blocks;
+  BITCODE_BL num_blocks, first;
+  unsigned refused = 0, copied = 0, existing = 0, layouts = 0, objects = 0;
+  Compare c;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  loglevel = test_loglevel;
+  first = dst->num_objects;
+  total = dwg_copy_map_new ();
+  memset (&c, 0, sizeof (c));
+  c.version = src.header.from_version;
+  blocks = table_blocks (&src, 0, &num_blocks);
+  for (BITCODE_BL i = 0; i < num_blocks; i++)
+    {
+      const Dwg_Object *blk = blocks[i];
+      const BITCODE_BL before = dst->num_objects;
+      Dwg_Copy_Map *map;
+      Dwg_Object_BLOCK_HEADER *copy;
+      Block_Copies found;
+      int error;
+      if (!is_copyable_block (&src, blk))
+        {
+          layouts++;
+          continue;
+        }
+      // copied already, with a block that inserts it
+      if (find_block (dst, &src, blk))
+        {
+          existing++;
+          continue;
+        }
+      snprintf (blkwhat, sizeof (blkwhat), "copy %s " FORMAT_HV,
+                test_block_name (&src, blk, name, sizeof (name))
+                    ? name
+                    : blk->tio.object->tio.BLOCK_HEADER->name,
+                blk->handle.value);
+      map = dwg_copy_map_new ();
+      loglevel = 0; // a refusal logs an error
+      copy = copy_block (dst, &src, blk->tio.object->tio.BLOCK_HEADER, map,
+                         &error);
+      loglevel = test_loglevel;
+      if (!copy && error >= DWG_ERR_CRITICAL && dst->num_objects == before)
+        refused++;
+      else if (!copy || error)
+        FAIL ("%s: error 0x%x, %u objects added", blkwhat, (unsigned)error,
+              (unsigned)(dst->num_objects - before));
+      else
+        {
+          copied++;
+          merge_map (total, map, &src);
+          c.map = map;
+          compare_block_copies (&c, &src, dst, map, before, &found);
+          objects += found.copies;
+          if (found.copies != dst->num_objects - before)
+            FAIL ("%s: %u copies of %u objects added", blkwhat, found.copies,
+                  (unsigned)(dst->num_objects - before));
+        }
+      dwg_copy_map_free (map);
+    }
+  if (refused == DYNBLOCKS_REFUSED && !c.failed && !numfailed ())
+    OK ("%s: %u blocks copied, %u objects in all, each with its source's "
+        "fields; %u copied already with others, %u refused, %u layout "
+        "blocks left",
+        what, copied, objects, existing, refused, layouts);
+  else
+    FAIL ("%s: %u blocks copied, %u refused, %d field differences", what,
+          copied, refused, c.failed);
+  free (blocks);
+  check_tables (what, dst);
+  check_inserts (what, dst, first);
+  check_refs (what, dst, 0);
+  check_block_readback (what, dst, first, &src, total, "copy_every_block.dwg");
+  free_dwg (dst);
+  free (dst);
+  dwg_copy_map_free (total);
+  free_dwg (&src);
+
+  // example_2004's plain blocks into another new document
+  what = "copy example_2004's blocks";
+  if (!test_file ("example_2004.dwg", path, sizeof (path))
+      || read_dwg (path, &src2) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: example_2004.dwg read failed", what);
+      return numfailed ();
+    }
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  loglevel = test_loglevel;
+  first = dst->num_objects;
+  total = dwg_copy_map_new ();
+  blocks = table_blocks (&src2, 0, &num_blocks);
+  copied = 0;
+  for (BITCODE_BL i = 0; i < num_blocks; i++)
+    if (test_block_name (&src2, blocks[i], name, sizeof (name)))
+      {
+        snprintf (blkwhat, sizeof (blkwhat), "copy example_2004's %s", name);
+        copied
+            += copy_and_check_block (blkwhat, dst, &src2, blocks[i], 0, total);
+      }
+  if (copied == 2)
+    OK ("%s: its 2 named blocks copied", what);
+  else
+    FAIL ("%s: %u named blocks copied", what, copied);
+  check_block_readback (what, dst, first, &src2, total,
+                        "copy_example_2004_blocks.dwg");
+  free (blocks);
+  free_dwg (dst);
+  free (dst);
+  dwg_copy_map_free (total);
+  free_dwg (&src2);
+  return numfailed ();
+}
+
+/* The block of dwg with the true name, or NULL. */
+static const Dwg_Object *
+dynamic_block (const Dwg_Data *dwg, const char *name)
+{
+  BITCODE_BL num_blocks;
+  const Dwg_Object **blocks = table_blocks (dwg, 1, &num_blocks);
+  const Dwg_Object *found = NULL;
+  for (BITCODE_BL i = 0; i < num_blocks && !found; i++)
+    {
+      char buf[256];
+      if (same_cstr (test_block_name (dwg, blocks[i], buf, sizeof (buf)),
+                     name))
+        found = blocks[i];
+    }
+  free (blocks);
+  return found;
+}
+
+/* The number of objects of type, from index first on. */
+static unsigned
+count_type (const Dwg_Data *dwg, const BITCODE_BL first,
+            const Dwg_Object_Type type)
+{
+  unsigned n = 0;
+  for (BITCODE_BL i = first; i < dwg->num_objects; i++)
+    if (dwg->object[i].fixedtype == type)
+      n++;
+  return n;
+}
+
+/* An object that a definition's extension dictionary names as its owner
+   but doesn't list is left out: Door's ACAD_SORTENTS entry is taken out of
+   its dictionary for the copy, as if AutoCAD had replaced its sort table
+   with another. */
+static int
+test_copy_block_orphan (void)
+{
+  const char *what = "copy a block with an unlisted sort table";
+  char path[256];
+  Dwg_Data src;
+  Dwg_Data *dst;
+  const Dwg_Object *door, *xdic;
+  Dwg_Object_DICTIONARY *dict;
+  BITCODE_BL k, last, first;
+  BITCODE_T text;
+  BITCODE_H item;
+  unsigned listed, unlisted;
+  int error;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  door = dynamic_block (&src, "Door - Imperial");
+  xdic = door ? dwg_resolve_handle (
+                    &src, ref_target (door->tio.object->xdicobjhandle))
+              : NULL;
+  dict = xdic ? xdic->tio.object->tio.DICTIONARY : NULL;
+  for (k = 0; dict && k < dict->numitems; k++)
+    if (same_cstr (dict->texts[k], "ACAD_SORTENTS"))
+      break;
+  if (!dict || k == dict->numitems)
+    {
+      FAIL ("%s: Door's ACAD_SORTENTS not found", what);
+      free_dwg (&src);
+      return 1;
+    }
+
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  first = dst->num_objects;
+  loglevel = tracelevel;
+  (void)dwg_dynblock_copy_block (dst, &src, door->tio.object->tio.BLOCK_HEADER,
+                                 &error);
+  loglevel = test_loglevel;
+  listed = count_type (dst, first, DWG_TYPE_SORTENTSTABLE);
+  free_dwg (dst);
+  free (dst);
+
+  // the entry moves to the end, out of numitems
+  last = dict->numitems - 1;
+  text = dict->texts[k];
+  item = dict->itemhandles[k];
+  dict->texts[k] = dict->texts[last];
+  dict->itemhandles[k] = dict->itemhandles[last];
+  dict->texts[last] = text;
+  dict->itemhandles[last] = item;
+  dict->numitems--;
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  first = dst->num_objects;
+  loglevel = tracelevel;
+  (void)dwg_dynblock_copy_block (dst, &src, door->tio.object->tio.BLOCK_HEADER,
+                                 &error);
+  loglevel = test_loglevel;
+  unlisted = count_type (dst, first, DWG_TYPE_SORTENTSTABLE);
+  dict->numitems++;
+  if (listed == 1 && !unlisted && !error)
+    OK ("%s: listed, the sort table is copied; unlisted, it is left out",
+        what);
+  else
+    FAIL ("%s: %u sort tables copied while listed, %u unlisted, error 0x%x",
+          what, listed, unlisted, (unsigned)error);
+  check_refs (what, dst, 0);
+  free_dwg (dst);
+  free (dst);
+  free_dwg (&src);
+  return numfailed ();
+}
+
+/* Colours survive the copy and a write and read back: entities of a
+   definition ByLayer, ByBlock, in an ACI colour and in a true colour, and
+   the colours of the layers copied with a definition, alteZZa's. The
+   fixture's blocks have no true colour, so a source entity is given the one
+   AutoCAD writes for RGB 0,159,223, as LibreDWG decodes it. */
+static int
+test_copy_block_colours (void)
+{
+  const char *what = "copy colours";
+  const Dwg_Color colors[] = {
+    { .index = 256, .flag = 1 },                       // ByLayer
+    { .index = 0 },                                    // ByBlock
+    { .index = 3 },                                    // ACI green
+    { .index = 142, .rgb = 0xc2009fdf, .flag = 0x80 }, // true colour
+  };
+  const size_t num_colors = sizeof (colors) / sizeof (colors[0]);
+  char path[256];
+  Dwg_Data src, readback;
+  Dwg_Data *dst;
+  const Dwg_Object *window, *altezza;
+  const Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Copy_Map *map, *map2 = NULL;
+  Dwg_Object_BLOCK_HEADER *copy;
+  BITCODE_RLL handles[4], layer_handles[16];
+  Dwg_Color layer_colors[16];
+  BITCODE_BL first;
+  unsigned same = 0, layers = 0, num_layers = 0;
+  int error;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  window = dynamic_block (&src, "Aluminum Window (Elevation) - Imperial");
+  blk = window ? window->tio.object->tio.BLOCK_HEADER : NULL;
+  if (!blk || blk->num_owned < num_colors)
+    {
+      FAIL ("%s: Window not found", what);
+      free_dwg (&src);
+      return 1;
+    }
+  for (size_t i = 0; i < num_colors; i++)
+    {
+      Dwg_Object *ent
+          = dwg_resolve_handle (&src, ref_target (blk->entities[i]));
+      ent->tio.entity->color = colors[i];
+    }
+
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  first = dst->num_objects;
+  map = dwg_copy_map_new ();
+  loglevel = tracelevel;
+  copy = copy_block (dst, &src, blk, map, &error);
+  loglevel = test_loglevel;
+  if (!copy || error)
+    {
+      FAIL ("%s: error 0x%x", what, (unsigned)error);
+      free_dwg (&src);
+      goto done;
+    }
+  for (size_t i = 0; i < num_colors; i++)
+    handles[i] = dwg_copy_map_get (map, ref_target (blk->entities[i]));
+  // the layers dst lacked, copied with alteZZa
+  altezza = dynamic_block (&src, "alteZZa");
+  map2 = dwg_copy_map_new ();
+  loglevel = tracelevel;
+  copy = altezza
+             ? copy_block (dst, &src, altezza->tio.object->tio.BLOCK_HEADER,
+                           map2, &error)
+             : NULL;
+  loglevel = test_loglevel;
+  if (!copy || error)
+    {
+      FAIL ("%s: alteZZa error 0x%x", what, (unsigned)error);
+      free_dwg (&src);
+      goto done;
+    }
+  for (BITCODE_BL i = 0; i < src.num_objects && num_layers < 16; i++)
+    {
+      const Dwg_Object *a = &src.object[i];
+      const Dwg_Object *b
+          = dwg_resolve_handle (dst, dwg_copy_map_get (map2, a->handle.value));
+      if (a->fixedtype == DWG_TYPE_LAYER && b && b->index >= first)
+        {
+          layer_handles[num_layers] = b->handle.value;
+          layer_colors[num_layers++] = a->tio.object->tio.LAYER->color;
+        }
+    }
+  free_dwg (&src);
+
+  memset (&readback, 0, sizeof (readback));
+  loglevel = tracelevel;
+  error = write_dwg ("copy_colours.dwg", dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg ("copy_colours.dwg", &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+  else
+    {
+      for (size_t i = 0; i < num_colors; i++)
+        {
+          const Dwg_Object *ent = dwg_resolve_handle (&readback, handles[i]);
+          const Dwg_Color *col = ent ? &ent->tio.entity->color : NULL;
+          if (col && col->index == colors[i].index && col->rgb == colors[i].rgb
+              && col->flag == colors[i].flag)
+            same++;
+          else
+            FAIL ("%s: entity %u read back %d/%x/%x, expected %d/%x/%x", what,
+                  (unsigned)i, col ? col->index : -1, col ? col->rgb : 0,
+                  col ? col->flag : 0, colors[i].index, colors[i].rgb,
+                  colors[i].flag);
+        }
+      for (unsigned i = 0; i < num_layers; i++)
+        {
+          const Dwg_Object *layer
+              = dwg_resolve_handle (&readback, layer_handles[i]);
+          const Dwg_Color *col
+              = layer ? &layer->tio.object->tio.LAYER->color : NULL;
+          if (col && col->index == layer_colors[i].index
+              && col->rgb == layer_colors[i].rgb
+              && col->method == layer_colors[i].method)
+            layers++;
+          else
+            FAIL ("%s: layer " FORMAT_HV " read back %d/%x, expected %d/%x",
+                  what, layer_handles[i], col ? col->index : -1,
+                  col ? col->rgb : 0, layer_colors[i].index,
+                  layer_colors[i].rgb);
+        }
+    }
+  if (same == num_colors && layers && layers == num_layers)
+    OK ("%s: ByLayer, ByBlock, ACI and true colour entities read back so, "
+        "and the %u layers copied with alteZZa in their colours",
+        what, layers);
+  else
+    FAIL ("%s: %u of %u entity colours and %u of %u layer colours read "
+          "back",
+          what, same, (unsigned)num_colors, layers, num_layers);
+  free_dwg (&readback);
+  if (!numfailed ())
+    unlink ("copy_colours.dwg");
+
+done:
+  dwg_copy_map_free (map);
+  dwg_copy_map_free (map2);
+  free_dwg (dst);
+  free (dst);
+  return numfailed ();
+}
+
+/* A refused block copy returns NULL with an error from DWG_ERR_CRITICAL up,
+   with the reason bit, and adds nothing to dst. */
+static void
+check_block_refused (const char *what, Dwg_Data *dst, const Dwg_Data *src,
+                     const Dwg_Object_BLOCK_HEADER *blk, const int reason)
+{
+  const BITCODE_BL num_objects = dst ? dst->num_objects : 0;
+  const BITCODE_BS num_classes = dst ? dst->num_classes : 0;
+  Dwg_Object_BLOCK_HEADER *copy;
+  int error;
+  loglevel = 0; // the refusal logs an error
+  copy = dwg_dynblock_copy_block (dst, src, blk, &error);
+  loglevel = test_loglevel;
+  if (!copy && error >= DWG_ERR_CRITICAL && (error & reason)
+      && (!dst
+          || (dst->num_objects == num_objects
+              && dst->num_classes == num_classes)))
+    OK ("block copy refused: %s (error 0x%x)", what, (unsigned)error);
+  else
+    FAIL ("block copy refused: %s: error 0x%x, %u objects added", what,
+          (unsigned)error,
+          dst ? (unsigned)(dst->num_objects - num_objects) : 0);
+}
+
+static int
+test_copy_block_refused (void)
+{
+  char path[256], path2000[256], path2004[256];
+  Dwg_Data src, src2000, src2004;
+  Dwg_Data *dst;
+  const Dwg_Object *window, *door_elevation, *ms, *ps, *blk2000 = NULL;
+  BITCODE_BL num_blocks;
+  const Dwg_Object **blocks;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || !test_file ("example_2000.dwg", path2000, sizeof (path2000))
+      || !test_file ("example_2004.dwg", path2004, sizeof (path2004))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL
+      || read_dwg (path2000, &src2000) >= DWG_ERR_CRITICAL
+      || read_dwg (path2004, &src2004) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("block copy refused: read failed");
+      return 1;
+    }
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  window = dynamic_block (&src, "Aluminum Window (Elevation) - Imperial");
+  door_elevation = dynamic_block (&src, DOOR_ELEVATION);
+  ms = dwg_model_space_object (&src);
+  ps = dwg_paper_space_object (&src);
+  blocks = table_blocks (&src2000, 0, &num_blocks);
+  for (BITCODE_BL i = 0; i < num_blocks && !blk2000; i++)
+    if (is_copyable_block (&src2000, blocks[i]))
+      blk2000 = blocks[i];
+  free (blocks);
+  if (!window || !door_elevation || !ms || !ps || !blk2000)
+    {
+      FAIL ("block copy refused: blocks not found");
+      goto done;
+    }
+
+  check_block_refused ("no dst", NULL, &src,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_INTERNALERROR);
+  check_block_refused ("no src", dst, NULL,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_INTERNALERROR);
+  check_block_refused ("no block", dst, &src, NULL, DWG_ERR_INTERNALERROR);
+  check_block_refused ("within one document", &src, &src,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_INTERNALERROR);
+  check_block_refused ("an r2000 source", dst, &src2000,
+                       blk2000->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_NOTYETSUPPORTED);
+  check_block_refused ("into an r2000 document", &src2000, &src,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_NOTYETSUPPORTED);
+  dst->header.codepage++;
+  check_block_refused ("another codepage", dst, &src,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_NOTYETSUPPORTED);
+  dst->header.codepage--;
+  check_block_refused ("a block of another document", dst, &src2004,
+                       window->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_INVALIDHANDLE);
+  check_block_refused ("model space", dst, &src,
+                       ms->tio.object->tio.BLOCK_HEADER, DWG_ERR_INVALIDTYPE);
+  check_block_refused ("paper space", dst, &src,
+                       ps->tio.object->tio.BLOCK_HEADER, DWG_ERR_INVALIDTYPE);
+  check_block_refused ("a constraint-based block", dst, &src,
+                       door_elevation->tio.object->tio.BLOCK_HEADER,
+                       DWG_ERR_NOTYETSUPPORTED);
+
+done:
+  free_dwg (&src);
+  free_dwg (&src2000);
+  free_dwg (&src2004);
+  free_dwg (dst);
+  free (dst);
+  return numfailed ();
+}
+
+/* The first object of the type in dwg owned by an entry of the named
+   object dictionary named dict, or NULL. */
+static const Dwg_Object *
+dictionary_object (const Dwg_Data *dwg, const char *dict,
+                   const Dwg_Object_Type type)
+{
+  const Dwg_Object *nod = named_object_dictionary (dwg);
+  const BITCODE_RLL d = dictionary_entry (dictionary_of (nod), dict);
+  for (BITCODE_BL i = 0; d && i < dwg->num_objects; i++)
+    if (dwg->object[i].fixedtype == type && owner_of (&dwg->object[i]) == d)
+      return &dwg->object[i];
+  return NULL;
+}
+
+/* How the block copy matches what it doesn't copy, and finds what it
+   copies: styles of the named object dictionary by key, but not scales,
+   whose keys are arbitrary; text styles of shape files by their files; an
+   object met before its owner is copied once its owner is. */
+static int
+test_copy_block_matching (void)
+{
+  const char *what = "block copy matching";
+  char path[256];
+  Dwg_Data src;
+  const Dwg_Object *plotstyle, *mlinestyle, *scale, *window, *graph = NULL,
+                                                             *param = NULL;
+  Dwg_Object_Object oa, ob;
+  Dwg_Object_STYLE sa, sb;
+  Dwg_Object a, b;
+  Block_Copy bc;
+  Dwg_Copy_Unresolved u;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  plotstyle
+      = dictionary_object (&src, "ACAD_PLOTSTYLENAME", DWG_TYPE_PLACEHOLDER);
+  mlinestyle
+      = dictionary_object (&src, "ACAD_MLINESTYLE", DWG_TYPE_MLINESTYLE);
+  scale = dictionary_object (&src, "ACAD_SCALELIST", DWG_TYPE_SCALE);
+  if (plotstyle && mlinestyle && scale
+      && find_dictionary_entry (&src, &src, plotstyle)
+             == plotstyle->handle.value
+      && find_dictionary_entry (&src, &src, mlinestyle)
+             == mlinestyle->handle.value
+      && !find_dictionary_entry (&src, &src, scale))
+    OK ("%s: a plot style and a multiline style match the entry of their "
+        "key, a scale doesn't",
+        what);
+  else
+    FAIL ("%s: plot style %p, multiline style %p, scale %p", what,
+          (void *)plotstyle, (void *)mlinestyle, (void *)scale);
+
+  // text styles of shape files have no names
+  memset (&a, 0, sizeof (a));
+  memset (&b, 0, sizeof (b));
+  memset (&oa, 0, sizeof (oa));
+  memset (&ob, 0, sizeof (ob));
+  memset (&sa, 0, sizeof (sa));
+  memset (&sb, 0, sizeof (sb));
+  a.fixedtype = b.fixedtype = DWG_TYPE_STYLE;
+  a.tio.object = &oa;
+  b.tio.object = &ob;
+  oa.tio.STYLE = &sa;
+  ob.tio.STYLE = &sb;
+  sa.name = sb.name = (char *)"";
+  sa.is_shape = sb.is_shape = 1;
+  sa.font_file = (char *)"ltypeshp.shx";
+  sb.font_file = (char *)"myshapes.shx";
+  if (!same_record (&a, &b))
+    {
+      sb.font_file = (char *)"LTYPESHP.SHX";
+      if (same_record (&a, &b))
+        {
+          sa.name = (char *)"Standard";
+          sb.name = (char *)"STANDARD";
+          sb.font_file = (char *)"myshapes.shx";
+          if (same_record (&a, &b))
+            OK ("%s: unnamed text styles match by their shape files, named "
+                "ones by name",
+                what);
+          else
+            FAIL ("%s: named text styles of other names", what);
+        }
+      else
+        FAIL ("%s: shape text styles of one file don't match", what);
+    }
+  else
+    FAIL ("%s: shape text styles of different files match", what);
+
+  // Window's linear parameter, met before its evaluation graph is copied
+  window = dynamic_block (&src, "Aluminum Window (Elevation) - Imperial");
+  for (BITCODE_BL i = 0; window && i < src.num_objects && !param; i++)
+    if (src.object[i].fixedtype == DWG_TYPE_BLOCKLINEARPARAMETER)
+      {
+        const Dwg_Object *g
+            = dwg_resolve_handle (&src, owner_of (&src.object[i]));
+        const Dwg_Object *xdic
+            = g ? dwg_resolve_handle (&src, owner_of (g)) : NULL;
+        if (xdic && owner_of (xdic) == window->handle.value)
+          {
+            param = &src.object[i];
+            graph = g;
+          }
+      }
+  memset (&bc, 0, sizeof (bc));
+  bc.src = &src;
+  bc.dst = &src;
+  bc.role = hash_new (16);
+  bc.decided = hash_new (16);
+  memset (&u, 0, sizeof (u));
+  u.kind = DWG_COPY_SLOT_REF;
+  u.code = 4;
+  u.target = param ? param->handle.value : 0;
+  if (param)
+    {
+      int deferred, copied;
+      classify (&bc, &u);
+      deferred = hash_get (bc.decided, u.target) == DECIDED_DEFERRED;
+      add_copy (&bc, graph->handle.value, ROLE_PART);
+      copy_deferred (&bc);
+      copied = hash_get (bc.role, u.target) == ROLE_PART;
+      if (deferred && copied && !bc.deferred.num)
+        OK ("%s: a parameter met before its graph is copied with it", what);
+      else
+        FAIL ("%s: parameter deferred %d, copied %d", what, deferred, copied);
+    }
+  else
+    FAIL ("%s: Window's linear parameter not found", what);
+  free (bc.copy.handles);
+  free (bc.pending.handles);
+  free (bc.deferred.handles);
+  hash_free (bc.role);
+  hash_free (bc.decided);
+  free_dwg (&src);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2525,7 +3775,8 @@ main (int argc, char *argv[])
           "2004/material.dwg",    "2004/Multiline.dwg", "2004/Point.dwg",
           "2004/PolyLine3D.dwg",  "2004/Polygon.dwg",   "2004/Polyline.dwg",
           "2004/RAY.dwg",         "2004/Spline.dwg",    "2004/Surface.dwg",
-          "2004/Text.dwg",        "2004/Underlay.dwg",  NULL };
+          "2004/Text.dwg",        "2004/Underlay.dwg",  "2004/Dynblocks.dwg",
+          NULL };
   const char *const r2000[]
       = { "example_2000.dwg",     "sample_2000.dwg",    "2000/Arc.dwg",
           "2000/circle.dwg",      "2000/Cone.dwg",      "2000/Constraints.dwg",
@@ -2565,5 +3816,12 @@ main (int argc, char *argv[])
   error += test_eed_unread_string ();
   error += test_ltype_text ();
   error += test_refused ();
+  error += test_copy_dynblocks (NULL);
+  error += test_copy_dynblocks ("example_2004.dwg");
+  error += test_copy_all_blocks ();
+  error += test_copy_block_orphan ();
+  error += test_copy_block_colours ();
+  error += test_copy_block_refused ();
+  error += test_copy_block_matching ();
   return error ? 1 : 0;
 }
