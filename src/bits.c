@@ -1724,10 +1724,10 @@ bit_read_TF (Bit_Chain *restrict dat, size_t length)
   return (BITCODE_TF)chain;
 }
 
-/** Read the next bits bits into a new zero-terminated buffer.
- *  A partial last byte (bits % 8 bits) is filled MSB first, like the full
- *  bytes, and its low bits are left 0: bit_write_bits writes it back in that
- *  order.
+/** Read as many bits as the bits argument gives into a new zero-terminated
+ *  buffer. A partial last byte (the last bits % 8 of them) is filled MSB
+ *  first, like the full bytes, and its low bits are left 0: bit_write_bits
+ *  writes it back in that order.
  *  After usage, the allocated memory must be properly freed.
  */
 ATTRIBUTE_MALLOC
