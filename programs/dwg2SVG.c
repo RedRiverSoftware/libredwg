@@ -1928,8 +1928,8 @@ output_MTEXT (Dwg_Object *obj)
   ty = transform_Y (pt.y);
 
   /* Fast path: a single run with no style overrides produces byte-equal
-     output to the legacy renderer.  Most simple labels and ByLayer-only
-     notes hit this path. */
+     output to the legacy renderer.  Labels and notes that fit on one
+     line, with no inline formatting, hit this path. */
   if (runs.count <= 1
       && (runs.count == 0 || mtext_run_is_plain (&runs.runs[0])))
     {
@@ -5247,7 +5247,7 @@ static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
 /* Zoom-extents framing breaks down when a drawing scatters geometry
    absurdly far apart — e.g. a site plan drawn in millimetres at map-grid
    coordinates (~1e8 and up) plus a stray block near the origin.  The
-   viewBox then spans hundreds of kilometres and every entity shrinks to a
+   viewBox then spans 100 km or more and every entity shrinks to a
    sub-pixel speck.  AutoCAD and TrueView look fine on such files only
    because they open the drawing's saved model view: the "*Active" VPORT
    table entry.  When the computed extents dwarf that saved view by more
@@ -5256,7 +5256,7 @@ static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
    authored drawings stay on fit-to-content extents framing. */
 /* 1000: an author plausibly saves zoomed ~100x into a detail of a large
    drawing, but nobody works at 1000x — beyond that the extents are junk
-   (a drawing like the example above exceeds it many times over). */
+   (the example above, against a saved view 20 m across, is 5000x or more). */
 #define VPORT_RESCUE_RATIO 1000.0
 
 static void
@@ -5741,7 +5741,7 @@ main (int argc, char *argv[])
   /* Default stdout buffer (typically 4 KiB) causes a flush every few
      formatted writes when the destination isn't a tty.  Large drawings
      emit tens of MiB through hundreds of thousands of printf calls; a
-     1 MiB fully-buffered stdout takes the CLI from ~27 s to ~1 s for
+     1 MiB fully-buffered stdout makes the CLI many times faster for
      a large drawing.  Has no effect on the library API (dwg_svg_api.c
      routes printf through its own writer callback). */
   setvbuf (stdout, NULL, _IOFBF, 1 << 20);
