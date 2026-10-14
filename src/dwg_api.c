@@ -26107,6 +26107,26 @@ dwg_add_SEQEND (dwg_ent_generic *restrict owner)
   return _obj;
 }
 
+/* Points INSERT _obj, of object obj, at block hdr, and lists it in hdr's
+   INSERTs. */
+static void
+link_insert_block (Dwg_Data *restrict dwg, Dwg_Entity_INSERT *restrict _obj,
+                   const Dwg_Object *restrict obj, Dwg_Object *restrict hdr)
+{
+  Dwg_Object_BLOCK_HEADER *blkhdr = hdr->tio.object->tio.BLOCK_HEADER;
+  _obj->block_header = dwg_add_handleref (dwg, 5, hdr->handle.value, NULL);
+  blkhdr->used = 1;
+  blkhdr->is_xref_ref = 1;
+  blkhdr->num_inserts++;
+  if (!blkhdr->inserts)
+    blkhdr->inserts = (BITCODE_H *)calloc (1, sizeof (BITCODE_H));
+  else
+    blkhdr->inserts = (BITCODE_H *)realloc (
+        blkhdr->inserts, blkhdr->num_inserts * sizeof (BITCODE_H));
+  blkhdr->inserts[blkhdr->num_inserts - 1]
+      = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+}
+
 EXPORT Dwg_Entity_INSERT *
 dwg_add_INSERT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
                 const dwg_point_3d *restrict ins_pt, const char *restrict name,
@@ -26140,18 +26160,7 @@ dwg_add_INSERT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
       Dwg_Object *hdr = dwg_ref_object (dwg, hdrref);
       if (!hdr)
         return _obj;
-      _obj->block_header = dwg_add_handleref (dwg, 5, hdr->handle.value, NULL);
-      blkhdr = hdr->tio.object->tio.BLOCK_HEADER;
-      blkhdr->used = 1;
-      blkhdr->is_xref_ref = 1;
-      blkhdr->num_inserts++;
-      if (!blkhdr->inserts)
-        blkhdr->inserts = (BITCODE_H *)calloc (1, sizeof (BITCODE_H));
-      else
-        blkhdr->inserts = (BITCODE_H *)realloc (
-            blkhdr->inserts, blkhdr->num_inserts * sizeof (BITCODE_H));
-      blkhdr->inserts[blkhdr->num_inserts - 1]
-          = dwg_add_handleref (dwg, 4, obj->handle.value, NULL);
+      link_insert_block (dwg, _obj, obj, hdr);
     }
   else
     {
@@ -26171,6 +26180,62 @@ dwg_add_INSERT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
         }
     }
   return _obj;
+}
+
+/* As dwg_add_INSERT (), with the block to insert given by reference rather
+   than by name, as anonymous blocks share their names: every "*U" block is
+   called "*U". block must be a BLOCK_HEADER of blkhdr's document other
+   than blkhdr, and is checked before anything is added. */
+EXPORT Dwg_Entity_INSERT *
+dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
+                      const dwg_point_3d *restrict ins_pt,
+                      Dwg_Object_BLOCK_HEADER *block,
+                      const double xscale, const double yscale,
+                      const double zscale, const double rotation)
+{
+  int err;
+  const Dwg_Object *owner = dwg_obj_generic_to_object (blkhdr, &err);
+  const Dwg_Object *target = dwg_obj_generic_to_object (block, &err);
+  if (!owner || !target || target->parent != owner->parent
+      || target->fixedtype != DWG_TYPE_BLOCK_HEADER
+      || target->tio.object->tio.BLOCK_HEADER != block || target == owner)
+    {
+      LOG_ERROR ("add_INSERT_block: block is not a BLOCK_HEADER of the "
+                 "owner's document, or is the owner");
+      return NULL;
+    }
+  if (isnan (ins_pt->x) || isnan (ins_pt->y) || isnan (ins_pt->z)
+      || isnan (xscale) || isnan (yscale) || isnan (zscale)
+      || isnan (rotation) || fabs (rotation) > 12.0)
+    {
+      LOG_ERROR ("add_INSERT_block: invalid point, scale or rotation");
+      return NULL;
+    }
+  {
+    API_ADD_ENTITY (INSERT);
+    _obj->ins_pt.x = ins_pt->x;
+    _obj->ins_pt.y = ins_pt->y;
+    _obj->ins_pt.z = ins_pt->z;
+    _obj->scale.x = xscale;
+    _obj->scale.y = yscale;
+    _obj->scale.z = zscale;
+    _obj->rotation = rotation;
+    // adding the entity may have moved dwg->object
+    link_insert_block (dwg, _obj, obj,
+                       dwg_obj_generic_to_object (block, &err));
+    if (dwg->header.version < R_2_0b && block->name)
+      _obj->block_name = strdup (block->name);
+    if (dwg->header.version <= R_12)
+      {
+        obj->type = DWG_TYPE_INSERT_r11;
+        if (_obj->ins_pt.z == 0.0)
+          {
+            obj->tio.entity->flag_r11 |= FLAG_R11_HAS_ELEVATION;
+            obj->tio.entity->opts_r11 = 1;
+          }
+      }
+    return _obj;
+  }
 }
 
 EXPORT Dwg_Entity_MINSERT *

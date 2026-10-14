@@ -1276,6 +1276,19 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
                                reason_size);
   if (error)
     goto done;
+  // The block table's count is 16-bit, and the add API would wrap it. As
+  // dynblock_copy.c's add_to_table (), checked before anything is added.
+  {
+    const Dwg_Object *ctrl
+        = dwg_get_first_object (dwg, DWG_TYPE_BLOCK_CONTROL);
+    if (ctrl && ctrl->tio.object->tio.BLOCK_CONTROL->num_entries == 0xFFFF)
+      {
+        set_reason (reason, reason_size,
+                    "the block table is full: it lists 65535 blocks");
+        error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        goto done;
+      }
+  }
   map = dwg_copy_map_new ();
   copies = hash_new (num_handles * 2 + 8);
   if (!map || !copies)

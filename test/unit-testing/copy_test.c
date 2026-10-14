@@ -2649,8 +2649,19 @@ check_tables (const char *what, const Dwg_Data *dwg)
           records, twice, same);
 }
 
-/* Each block from first on lists exactly the INSERTs that draw it, and
-   each INSERT from first on is listed by its block. */
+/* The block an INSERT or MINSERT draws, or 0 for another object. */
+static BITCODE_RLL
+placed_block (const Dwg_Object *obj)
+{
+  if (obj->fixedtype == DWG_TYPE_INSERT)
+    return ref_target (obj->tio.entity->tio.INSERT->block_header);
+  if (obj->fixedtype == DWG_TYPE_MINSERT)
+    return ref_target (obj->tio.entity->tio.MINSERT->block_header);
+  return 0;
+}
+
+/* Each block from first on lists exactly the INSERTs and MINSERTs that draw
+   it, and each INSERT and MINSERT from first on is listed by its block. */
 static void
 check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
 {
@@ -2666,18 +2677,16 @@ check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
             {
               const Dwg_Object *ins
                   = dwg_resolve_handle (dwg, ref_target (blk->inserts[k]));
-              if (ins && ins->fixedtype == DWG_TYPE_INSERT
-                  && ref_target (ins->tio.entity->tio.INSERT->block_header)
-                         == obj->handle.value)
+              if (ins && placed_block (ins) == obj->handle.value)
                 listed++;
               else
                 wrong++;
             }
         }
-      else if (obj->fixedtype == DWG_TYPE_INSERT && i >= first)
+      else if (placed_block (obj) && i >= first)
         {
-          const Dwg_Object *blkobj = dwg_resolve_handle (
-              dwg, ref_target (obj->tio.entity->tio.INSERT->block_header));
+          const Dwg_Object *blkobj
+              = dwg_resolve_handle (dwg, placed_block (obj));
           const Dwg_Object_BLOCK_HEADER *blk
               = blkobj && blkobj->fixedtype == DWG_TYPE_BLOCK_HEADER
                     ? blkobj->tio.object->tio.BLOCK_HEADER
@@ -2691,10 +2700,11 @@ check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
         }
     }
   if (!wrong && !missing)
-    OK ("%s: the blocks list their %u INSERTs", what, listed);
+    OK ("%s: the blocks list their %u INSERTs and MINSERTs", what, listed);
   else
-    FAIL ("%s: %u INSERTs listed by the wrong block, %u not listed", what,
-          wrong, missing);
+    FAIL ("%s: %u INSERTs and MINSERTs listed by the wrong block, %u not "
+          "listed",
+          what, wrong, missing);
 }
 
 /* A document built with the add API is encoded as a DXF import, as
@@ -3340,6 +3350,135 @@ test_copy_block_orphan (void)
   return numfailed ();
 }
 
+/* A copied block's MINSERTs are listed by the blocks they draw, as its
+   INSERTs are. The public drawings have no MINSERT, so the source is built
+   with the add API, block Grid holding a MINSERT and an INSERT of block
+   Cell, and written and read back, as the copy takes a document read from
+   a file. dst has a Cell of its own, which the copies then draw: a copied
+   Cell would list them through its copied list of INSERTs, but dst's own
+   Cell lists them only if the copy adds them. */
+static int
+test_copy_block_minsert (void)
+{
+  const char *what = "copy a block holding a MINSERT";
+  const char *built_file = "copy_minsert_source.dwg";
+  const dwg_point_3d origin = { 0.0, 0.0, 0.0 }, corner = { 1.0, 1.0, 0.0 };
+  Dwg_Data *built, *dst;
+  Dwg_Data src;
+  Dwg_Object_BLOCK_HEADER *cell, *grid;
+  Dwg_Entity_MINSERT *minsert = NULL;
+  Dwg_Entity_INSERT *insert = NULL;
+  const Dwg_Object **blocks;
+  const Dwg_Object *gridobj = NULL, *cellobj = NULL;
+  Dwg_Copy_Map *total;
+  BITCODE_BL num_blocks, first;
+  unsigned minserts = 0, listed = 0;
+  int error;
+
+  failed = 0;
+  built = dwg_new_Document (R_2004, 0, tracelevel);
+  cell = dwg_add_BLOCK_HEADER (built, "Cell");
+  if (cell && dwg_add_BLOCK (cell, "Cell")
+      && dwg_add_LINE (cell, &origin, &corner) && dwg_add_ENDBLK (cell))
+    {
+      grid = dwg_add_BLOCK_HEADER (built, "Grid");
+      if (grid && dwg_add_BLOCK (grid, "Grid"))
+        {
+          minsert = dwg_add_MINSERT (grid, &origin, "Cell", 1.0, 1.0, 1.0,
+                                     0.0, 2, 3, 2.0, 2.0);
+          insert = dwg_add_INSERT (grid, &corner, "Cell", 1.0, 1.0, 1.0, 0.0);
+          if (!dwg_add_ENDBLK (grid))
+            minsert = NULL;
+        }
+    }
+  loglevel = test_loglevel;
+  error = minsert && insert ? write_dwg (built_file, built)
+                            : DWG_ERR_INTERNALERROR;
+  free_dwg (built);
+  free (built);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (built_file, &src);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: building the source failed (0x%x)", what, (unsigned)error);
+      return 1;
+    }
+  blocks = table_blocks (&src, 0, &num_blocks);
+  for (BITCODE_BL i = 0; i < num_blocks; i++)
+    {
+      char name[64];
+      if (!test_block_name (&src, blocks[i], name, sizeof (name)))
+        continue;
+      if (strEQc (name, "Grid"))
+        gridobj = blocks[i];
+      else if (strEQc (name, "Cell"))
+        cellobj = blocks[i];
+    }
+  free (blocks);
+  // the source's Cell lists its MINSERT, so the copy has one to list
+  for (BITCODE_BL k = 0;
+       cellobj && k < cellobj->tio.object->tio.BLOCK_HEADER->num_inserts; k++)
+    {
+      const Dwg_Object *ins = dwg_resolve_handle (
+          &src,
+          ref_target (cellobj->tio.object->tio.BLOCK_HEADER->inserts[k]));
+      if (ins && ins->fixedtype == DWG_TYPE_MINSERT)
+        listed++;
+    }
+  if (!gridobj || listed != 1)
+    {
+      FAIL ("%s: the source's Grid %s, its Cell lists %u MINSERTs", what,
+            gridobj ? "read back" : "is missing", listed);
+      free_dwg (&src);
+      return 1;
+    }
+
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  cell = dwg_add_BLOCK_HEADER (dst, "Cell");
+  if (!cell || !dwg_add_BLOCK (cell, "Cell")
+      || !dwg_add_LINE (cell, &origin, &corner) || !dwg_add_ENDBLK (cell))
+    {
+      loglevel = test_loglevel;
+      FAIL ("%s: adding dst's Cell failed", what);
+      free_dwg (&src);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  loglevel = test_loglevel;
+  first = dst->num_objects;
+  total = dwg_copy_map_new ();
+  (void)copy_and_check_block (what, dst, &src, gridobj, 0, total);
+  for (BITCODE_BL i = first; i < dst->num_objects; i++)
+    if (dst->object[i].fixedtype == DWG_TYPE_MINSERT)
+      minserts++;
+  listed = 0;
+  for (BITCODE_BL k = 0; k < cell->num_inserts; k++)
+    {
+      const Dwg_Object *ins
+          = dwg_resolve_handle (dst, ref_target (cell->inserts[k]));
+      if (ins && ins->index >= first)
+        listed++;
+    }
+  if (minserts == 1 && listed == 2)
+    OK ("%s: the copy holds a MINSERT and an INSERT, which dst's Cell "
+        "lists",
+        what);
+  else
+    FAIL ("%s: the copy holds %u MINSERTs, dst's Cell lists %u copies", what,
+          minserts, listed);
+  // from 0, to take in dst's own Cell
+  check_inserts (what, dst, 0);
+  check_block_readback (what, dst, first, &src, total, "copy_minsert.dwg");
+  dwg_copy_map_free (total);
+  free_dwg (&src);
+  free_dwg (dst);
+  free (dst);
+  if (!numfailed ())
+    unlink (built_file);
+  return numfailed ();
+}
+
 /* Colours survive the copy and a write and read back: entities of a
    definition ByLayer, ByBlock, in an ACI colour and in a true colour, and
    the colours of the layers copied with a definition, alteZZa's. The
@@ -3577,6 +3716,13 @@ test_copy_block_refused (void)
   check_block_refused ("a block of another document", dst, &src2004,
                        window->tio.object->tio.BLOCK_HEADER,
                        DWG_ERR_INVALIDHANDLE);
+  {
+    // it links to Window's object, but the document doesn't hold it
+    const Dwg_Object_BLOCK_HEADER struct_copy
+        = *window->tio.object->tio.BLOCK_HEADER;
+    check_block_refused ("a copy of a block's struct", dst, &src,
+                         &struct_copy, DWG_ERR_INVALIDHANDLE);
+  }
   check_block_refused ("model space", dst, &src,
                        ms->tio.object->tio.BLOCK_HEADER, DWG_ERR_INVALIDTYPE);
   check_block_refused ("paper space", dst, &src,
@@ -3795,6 +3941,7 @@ main (int argc, char *argv[])
   error += test_copy_dynblocks ("example_2004.dwg");
   error += test_copy_all_blocks ();
   error += test_copy_block_orphan ();
+  error += test_copy_block_minsert ();
   error += test_copy_block_colours ();
   error += test_copy_block_refused ();
   error += test_copy_block_matching ();
