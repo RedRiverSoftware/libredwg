@@ -68,10 +68,10 @@ encode_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/dwg.lo \
 	$(top_builddir)/src/encode2.lo \
 	$(top_builddir)/src/hash.lo
+# hash_test includes hash.c, to fail its allocations
 hash_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
-	$(top_builddir)/src/bits.lo \
-	$(top_builddir)/src/hash.lo
+	$(top_builddir)/src/bits.lo
 dynapi_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo \
 	$(top_builddir)/src/bits.lo

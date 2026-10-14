@@ -939,7 +939,10 @@ output_text_element (Dwg_Object *obj, double x, double y,
     }
   else if (has_rotation && has_scale)
     /* The text sits at (tx, render_y) and scale() moves it back to its
-       anchor (x, render_y), so that is the point to rotate about. */
+       anchor (x, render_y), so that is the point to rotate about. That
+       holds as ys is 1 here: rotated text in a block definition takes the
+       matrix() branch above, and with ys -1 scale() would move it to
+       (x, -render_y). */
     printf (" transform=\"rotate(%f %f %f) scale(%f %d)\"",
             frame_rotation, x, render_y, width_factor, ys);
   else if (has_rotation)

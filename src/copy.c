@@ -477,7 +477,11 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
 
 /* dwg_copy_TOKEN copies the common data, then the class's struct: a byte
    copy, then fixups that need explicit code, the spec walk, and a sweep of
-   the struct's references and strings for any the walk didn't reach. */
+   the struct's references and strings for any the walk didn't reach. The
+   class's struct is allocated first, so that a copy with common data has a
+   class struct as its source has, which dwg_free () walks. When out of
+   memory, every pointer the walk can't copy is cleared, so that freeing
+   dst never frees src's data. */
 #define DWG_ENTITY(token)                                                     \
   static int dwg_copy_##token##_private (Bit_Chain *dat, Bit_Chain *hdl_dat,  \
                                          Bit_Chain *str_dat,                  \
@@ -488,13 +492,22 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                                const Dwg_Object *restrict srcobj)             \
   {                                                                           \
     const Dwg_Entity_##token *src = srcobj->tio.entity->tio.token;            \
-    Dwg_Entity_##token *_obj;                                                 \
-    int error = copy_common_entity (CHAIN, obj, srcobj);                      \
-    if (error >= DWG_ERR_CRITICAL || !src)                                    \
-      return error;                                                           \
-    _obj = (Dwg_Entity_##token *)malloc (sizeof (Dwg_Entity_##token));        \
+    Dwg_Entity_##token *_obj = NULL;                                          \
+    int error;                                                                \
+    if (src)                                                                  \
+      {                                                                       \
+        _obj = (Dwg_Entity_##token *)malloc (sizeof (Dwg_Entity_##token));   \
+        if (!_obj)                                                            \
+          return DWG_ERR_OUTOFMEM;                                            \
+      }                                                                       \
+    error = copy_common_entity (CHAIN, obj, srcobj);                          \
     if (!_obj)                                                                \
-      return error | DWG_ERR_OUTOFMEM;                                        \
+      return error;                                                           \
+    if (!obj->tio.entity)                                                     \
+      {                                                                       \
+        free (_obj);                                                          \
+        return error;                                                         \
+      }                                                                       \
     memcpy (_obj, src, sizeof (Dwg_Entity_##token));                          \
     _obj->parent = obj->tio.entity;                                           \
     obj->tio.entity->tio.token = _obj;                                        \
@@ -535,13 +548,22 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                                const Dwg_Object *restrict srcobj)             \
   {                                                                           \
     const Dwg_Object_##token *src = srcobj->tio.object->tio.token;            \
-    Dwg_Object_##token *_obj;                                                 \
-    int error = copy_common_object (CHAIN, obj, srcobj);                      \
-    if (error >= DWG_ERR_CRITICAL || !src)                                    \
-      return error;                                                           \
-    _obj = (Dwg_Object_##token *)malloc (sizeof (Dwg_Object_##token));        \
+    Dwg_Object_##token *_obj = NULL;                                          \
+    int error;                                                                \
+    if (src)                                                                  \
+      {                                                                       \
+        _obj = (Dwg_Object_##token *)malloc (sizeof (Dwg_Object_##token));    \
+        if (!_obj)                                                            \
+          return DWG_ERR_OUTOFMEM;                                            \
+      }                                                                       \
+    error = copy_common_object (CHAIN, obj, srcobj);                          \
     if (!_obj)                                                                \
-      return error | DWG_ERR_OUTOFMEM;                                        \
+      return error;                                                           \
+    if (!obj->tio.object)                                                     \
+      {                                                                       \
+        free (_obj);                                                          \
+        return error;                                                         \
+      }                                                                       \
     memcpy (_obj, src, sizeof (Dwg_Object_##token));                          \
     _obj->parent = obj->tio.object;                                           \
     obj->tio.object->tio.token = _obj;                                        \
@@ -606,30 +628,6 @@ slots_grow (Copy_Slots *restrict s)
   return 0;
 }
 
-/* Adds slot to the set. Returns 1 if it was not in the set yet, so the
-   caller copies what it holds, and 0 if it was, or when out of memory. */
-static int
-slot_first_visit (Copy_Chain *restrict cdat, const void *slot)
-{
-  Copy_Slots *s = &cdat->slots;
-  size_t i;
-  if (s->count * 2 >= s->size && slots_grow (s))
-    {
-      cdat->error |= DWG_ERR_OUTOFMEM;
-      return 0;
-    }
-  i = slot_hash (slot) & (s->size - 1);
-  while (s->keys[i])
-    {
-      if (s->keys[i] == slot)
-        return 0;
-      i = (i + 1) & (s->size - 1);
-    }
-  s->keys[i] = slot;
-  s->count++;
-  return 1;
-}
-
 static int
 slot_visited (const Copy_Chain *restrict cdat, const void *slot)
 {
@@ -645,6 +643,41 @@ slot_visited (const Copy_Chain *restrict cdat, const void *slot)
       i = (i + 1) & (s->size - 1);
     }
   return 0;
+}
+
+/* Adds slot to the set. Returns 1 if it was not in the set yet, so the
+   caller copies what it holds, 0 if it was, and -1 if it was not but the
+   set can't grow. */
+static int
+slot_first_visit (Copy_Chain *restrict cdat, const void *slot)
+{
+  Copy_Slots *s = &cdat->slots;
+  size_t i;
+  if (slot_visited (cdat, slot))
+    return 0;
+  if (s->count * 2 >= s->size && slots_grow (s))
+    {
+      cdat->error |= DWG_ERR_OUTOFMEM;
+      return -1;
+    }
+  i = slot_hash (slot) & (s->size - 1);
+  while (s->keys[i])
+    i = (i + 1) & (s->size - 1);
+  s->keys[i] = slot;
+  s->count++;
+  return 1;
+}
+
+/* Whether the caller copies what slot holds now: on its first visit. A slot
+   the set can't take when out of memory still holds src's pointer, and is
+   cleared instead, so that freeing dst doesn't free src's data. */
+static int
+slot_claim (Copy_Chain *restrict cdat, void **slot)
+{
+  const int first = slot_first_visit (cdat, slot);
+  if (first < 0)
+    *slot = NULL;
+  return first > 0;
 }
 
 /* Empties the set for the next object. A set grown large by one object is
@@ -671,7 +704,7 @@ copy_string (Copy_Chain *restrict cdat, char **restrict slot,
   size_t size;
   char *copy;
   const Bit_Chain *dat = &cdat->dat;
-  if (!str || !slot_first_visit (cdat, slot))
+  if (!str || !slot_claim (cdat, (void **)slot))
     return;
   if (kind == COPY_TU || (kind == COPY_T && IS_FROM_TU (dat)))
     size = (bit_wcs2len ((BITCODE_TU)str) + 1) * 2;
@@ -692,7 +725,7 @@ copy_bytes (Copy_Chain *restrict cdat, unsigned char **restrict slot,
 {
   const unsigned char *bytes = *slot;
   unsigned char *copy;
-  if (!bytes || !slot_first_visit (cdat, slot))
+  if (!bytes || !slot_claim (cdat, (void **)slot))
     return;
   copy = (unsigned char *)malloc (len + 1);
   if (copy)
@@ -713,7 +746,7 @@ copy_tfv (Copy_Chain *restrict cdat, char **restrict slot, const size_t len)
   const char *str = *slot;
   size_t n;
   char *copy;
-  if (!str || !slot_first_visit (cdat, slot))
+  if (!str || !slot_claim (cdat, (void **)slot))
     return;
   n = strlen (str);
   copy = (char *)calloc ((n > len ? n : len) + 1, 1);
@@ -731,7 +764,7 @@ copy_vector (Copy_Chain *restrict cdat, void **restrict slot,
 {
   const void *array = *slot;
   void *copy = NULL;
-  if (!array || !slot_first_visit (cdat, slot))
+  if (!array || !slot_claim (cdat, slot))
     return 1;
   if (count && elemsize && count <= SIZE_MAX / elemsize)
     {
@@ -832,7 +865,7 @@ copy_ref (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
   BITCODE_RLL target;
   BITCODE_RC code;
   int unresolved;
-  if (!ref || !slot_first_visit (cdat, slot))
+  if (!ref || !slot_claim (cdat, (void **)slot))
     return;
   code = ref->handleref.code;
   /* 0xE points at its holder, whatever its value. */
@@ -896,19 +929,21 @@ copy_handle_value (Copy_Chain *restrict cdat,
  * EED and XRECORD data
  */
 
-/* The length of an EED string as the encoder writes it: a string that
+/* The length of an 8-bit EED string as the encoder writes it: a string that
    starts with NUL as the empty string. The decoder leaves a string that
-   claims more bytes than its group holds unread, with that length and zero
-   bytes, in an item sized by its group, so its length can't be trusted. */
+   claims more bytes than are left in its group unread, with that length and
+   zero bytes, in an item sized by what is left of its group (for a group's
+   later items, one byte more), so its length can't be trusted. */
 static BITCODE_RS
 eed_string_length (const Dwg_Eed_Data *restrict data)
 {
   return data->u.eed_0.string[0] ? data->u.eed_0.length : 0;
 }
 
-/* The bytes an EED item uses, which may be fewer than sizeof (Dwg_Eed_Data):
-   the decoder sizes each item by what is left of its group. Strings and
-   binary chunks are inline. */
+/* The bytes of an EED item the copy keeps, which may be fewer than
+   sizeof (Dwg_Eed_Data): the decoder sizes each item by what is left of its
+   group. Strings and binary chunks are inline; an 8-bit string keeps the
+   length eed_string_length () gives it. */
 static size_t
 eed_data_size (const Dwg_Eed_Data *restrict data)
 {
@@ -951,10 +986,70 @@ eed_data_size (const Dwg_Eed_Data *restrict data)
     }
 }
 
+/* The bytes an EED item takes in an r13 to r2004 DWG file, its code
+   included, or 0 for a code the decoder doesn't read from one, or a UTF-16
+   string, which it reads from r2007 on only. */
+static size_t
+eed_item_file_size (const Dwg_Eed_Data *restrict data)
+{
+  switch (data->code)
+    {
+    case 0: // length [RC], codepage [RS], then the string
+      return data->u.eed_0.is_tu ? 0 : 4 + (size_t)data->u.eed_0.length;
+    case 1:
+    case 70:
+      return 3;
+    case 2:
+      return 2;
+    case 3:
+    case 5:
+    case 40:
+    case 41:
+    case 42:
+      return 9;
+    case 4: // length [RC], then the bytes
+      return 2 + (size_t)data->u.eed_4.length;
+    case 10:
+    case 11:
+    case 12:
+    case 13:
+    case 14:
+    case 15:
+      return 25;
+    case 71:
+      return 5;
+    default:
+      return 0;
+    }
+}
+
+/* Whether the items of the EED group that starts at eed[first] hold all of
+   it: every one of them decoded, their sizes adding up to the group's. They
+   don't when the decoder failed on a later item, which it leaves without
+   data, or left a string unread, after which it skips to the group's end:
+   the items after it are then only in the group's raw bytes. */
+static int
+eed_group_decoded (const Dwg_Eed *restrict eed, const BITCODE_BL num_eed,
+                   const BITCODE_BL first)
+{
+  size_t total = 0;
+  BITCODE_BL i;
+  for (i = first; i < num_eed && (i == first || !eed[i].size); i++)
+    {
+      const size_t size = eed[i].data ? eed_item_file_size (eed[i].data) : 0;
+      if (!size)
+        return 0;
+      total += size;
+    }
+  return total == eed[first].size;
+}
+
 /* Copies the EED, without its raw bytes, so the encoder writes it from the
    items. The APPID handles and the handles in it (1003 layer, 1005) are
-   remapped. A group whose items could not be decoded has only raw bytes,
-   with handles that can't be remapped, and is left out. */
+   remapped. A group read from a file, which has raw bytes, is left out
+   when its items don't hold all of those bytes: the rest is only in the
+   raw bytes, with handles that can't be remapped. A group whose first item
+   has no data is left out too. */
 static int
 copy_eed (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
           Dwg_Eed **restrict eedp, BITCODE_BL *restrict num_eedp)
@@ -981,12 +1076,13 @@ copy_eed (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
       size_t size;
       if (e->size)
         {
-          skip = !e->data;
+          skip = !e->data || (e->raw && !eed_group_decoded (src, num_eed, i));
           if (skip)
             {
-              LOG_WARN ("copy: %s " FORMAT_HV " EED[%u] dropped, its data "
-                        "could not be decoded",
-                        holder->name, holder->handle.value, (unsigned)i);
+              LOG_WARN ("copy: %s " FORMAT_HV " EED[%u] group of %u bytes "
+                        "dropped, its items could not all be decoded",
+                        holder->name, holder->handle.value, (unsigned)i,
+                        (unsigned)e->size);
               error |= DWG_ERR_INVALIDEED;
             }
         }
@@ -1039,7 +1135,7 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
 {
   const Dwg_Resbuf *rbuf = *slot;
   Dwg_Resbuf *root = NULL, *last = NULL;
-  if (!rbuf || !slot_first_visit (cdat, slot))
+  if (!rbuf || !slot_claim (cdat, (void **)slot))
     return;
   for (; rbuf; rbuf = rbuf->nextrb)
     {
@@ -1110,7 +1206,8 @@ copy_3dsolid (Copy_Chain *restrict cdat, Dwg_Entity_3DSOLID *restrict _obj)
         copy_bytes (cdat, (unsigned char **)&_obj->encr_sat_data[i],
                     _obj->block_size[i]);
     }
-  else if (_obj->encr_sat_data && slot_first_visit (cdat, &_obj->encr_sat_data))
+  else if (_obj->encr_sat_data
+           && slot_claim (cdat, (void **)&_obj->encr_sat_data))
     {
       LOG_ERROR ("copy: 3DSOLID encr_sat_data without block_size not copied");
       _obj->encr_sat_data = NULL;
@@ -1420,10 +1517,11 @@ copy_check_documents (const Dwg_Data *restrict dst,
                       const Dwg_Data *restrict src)
 {
   /* Untested from r2007 on, where strings are UTF-16 and free.c frees some
-     TABLESTYLE fields outside the spec walk, which this doesn't mirror. */
+     TABLESTYLE fields outside the spec walk, which this doesn't mirror. The
+     r2007 alpha and beta versions sort below R_2007. */
   if (src->header.from_version < R_13b1 || dst->header.from_version < R_13b1
-      || src->header.from_version >= R_2007
-      || dst->header.from_version >= R_2007)
+      || src->header.from_version > R_2004
+      || dst->header.from_version > R_2004)
     {
       LOG_ERROR ("copy: only documents from r13 to r2004 are supported");
       return COPY_REFUSED | DWG_ERR_NOTYETSUPPORTED;
@@ -1450,7 +1548,8 @@ copy_check_documents (const Dwg_Data *restrict dst,
 }
 
 /* The copy's type: a fixed type, or the number of dst's class of the same
-   name, which is added from src's class when dst has none. */
+   name, which is added from src's class when dst has none. *added is set
+   once dst's classes may have moved, also when adding one then fails. */
 static int
 copy_class_type (Copy_Chain *restrict cdat, const Dwg_Object *restrict srcobj,
                  BITCODE_BS *restrict typep, int *restrict added)
@@ -1459,6 +1558,7 @@ copy_class_type (Copy_Chain *restrict cdat, const Dwg_Object *restrict srcobj,
   const Dwg_Data *src = cdat->src;
   const Dwg_Class *klass;
   Dwg_Class *classes, *copy;
+  char *dxfname;
   BITCODE_BL i;
 
   if (srcobj->type < 500)
@@ -1488,29 +1588,23 @@ copy_class_type (Copy_Chain *restrict cdat, const Dwg_Object *restrict srcobj,
   if (!classes)
     return DWG_ERR_OUTOFMEM;
   dst->dwg_class = classes;
+  *added = 1;
+  dxfname = strdup (klass->dxfname);
+  if (!dxfname)
+    return DWG_ERR_OUTOFMEM;
   copy = &classes[dst->num_classes];
   memcpy (copy, klass, sizeof (Dwg_Class));
   copy->number = (BITCODE_BS)(500 + dst->num_classes);
   copy->num_instances = 1;
-  copy->appname = copy->cppname = copy->dxfname = NULL;
-  copy->dxfname_u = NULL;
+  copy->dxfname = dxfname;
   dst->num_classes++;
-  copy->dxfname = strdup (klass->dxfname);
-  copy->appname = klass->appname;
-  copy->cppname = klass->cppname;
+  /* src's strings, which these replace with copies */
   copy_string (cdat, &copy->appname, COPY_T);
   copy_string (cdat, &copy->cppname, COPY_T);
-  if (klass->dxfname_u)
-    {
-      copy->dxfname_u = klass->dxfname_u;
-      copy_string (cdat, (char **)&copy->dxfname_u, COPY_TU);
-    }
+  copy_string (cdat, (char **)&copy->dxfname_u, COPY_TU);
   /* The next class added may move the array to where these slots were. */
   slots_clear (&cdat->slots);
-  if (!copy->dxfname)
-    return DWG_ERR_OUTOFMEM;
   *typep = copy->number;
-  *added = 1;
   return 0;
 }
 
@@ -1548,6 +1642,20 @@ copy_names (Dwg_Data *restrict dst, const Dwg_Data *restrict src,
   return 0;
 }
 
+/* Points dst's objects of a class, from index first on, at their class:
+   adding a class may move dst->dwg_class. */
+static void
+copy_point_at_classes (Dwg_Data *restrict dst, const BITCODE_BL first)
+{
+  BITCODE_BL i;
+  for (i = first; i < dst->num_objects; i++)
+    {
+      Dwg_Object *obj = &dst->object[i];
+      if (obj->type >= 500 && obj->type - 500u < dst->num_classes)
+        obj->klass = &dst->dwg_class[obj->type - 500];
+    }
+}
+
 int
 dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
                   const BITCODE_RLL *restrict handles,
@@ -1558,7 +1666,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
   Copy_Chain cdat;
   BITCODE_BL *src_index = NULL, *dst_index = NULL;
   dwg_inthash *seen = NULL;
-  BITCODE_BL i;
+  BITCODE_BL i, first;
   int realloced = 0, added_class = 0;
   int error = 0;
 
@@ -1637,6 +1745,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
 
   /* The copies and their handles, so that the walk can map references
      between them and recompute relative codes. */
+  first = dst->num_objects;
   for (i = 0; i < num_handles; i++)
     {
       const Dwg_Object *srcobj;
@@ -1672,19 +1781,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
       dwg_copy_map_set (map, srcobj->handle.value, obj->handle.value);
       dst_index[i] = idx;
     }
-  if (added_class)
-    for (i = 0; i < dst->num_objects; i++)
-      {
-        Dwg_Object *obj = &dst->object[i];
-        if (obj->type >= 500 && obj->type - 500u < dst->num_classes)
-          obj->klass = &dst->dwg_class[obj->type - 500];
-      }
-  for (i = 0; i < num_handles; i++)
-    {
-      Dwg_Object *obj = &dst->object[dst_index[i]];
-      if (obj->type >= 500)
-        obj->klass = &dst->dwg_class[obj->type - 500];
-    }
+  copy_point_at_classes (dst, added_class ? 0 : first);
 
   for (i = 0; i < num_handles; i++)
     {
@@ -1701,6 +1798,10 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
     }
 
 done:
+  error |= cdat.error;
+  // a class added before the copy failed may have moved dst->dwg_class
+  if (added_class && error >= DWG_ERR_CRITICAL)
+    copy_point_at_classes (dst, 0);
   // dst->object moved: the references' cached objects are stale
   if (realloced)
     dwg_resolve_objectrefs_silent (dst);
