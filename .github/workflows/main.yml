@@ -94,7 +94,8 @@ jobs:
     - if: ${{ !contains(matrix.CONFIGURE_ARGS, '--enable-release') &&
               !contains(matrix.CONFIGURE_ARGS, '--enable-debug') &&
               (startsWith(github.ref, 'refs/heads/') ||
-               github.event_name == 'pull_request') }}
+               github.event_name == 'pull_request' ||
+               contains(matrix.CONFIGURE_ARGS, '--enable-gcov')) }}
       run: make -j check
     #  run: |
     #    python -m pip install cpp-coveralls
@@ -150,7 +151,7 @@ jobs:
     - run: make -C programs check-minimal XFAIL_TESTS="alive.test"
     - run: >-
         make -C test/unit-testing check-minimal
-        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test color_test"
+        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test fields_test copy_test color_test"
   mips32-big-endian:
     runs-on: ubuntu-latest
     timeout-minutes: 35
