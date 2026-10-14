@@ -24,6 +24,7 @@
 #include "config.h"
 #include "dwg_api.h"
 #include "dwg_svg_api.h"
+#include "dwg_dynblock_api.h"
 %}
 
 %include "carrays.i"
@@ -61,3 +62,4 @@
 
 %include "dwg_api.h"
 %include "dwg_svg_api.h"
+%include "dwg_dynblock_api.h"
