@@ -1185,7 +1185,7 @@ line_to_proxy (Dwg_Object *obj, const unsigned char *data,
    data_size 0, is compared byte by byte. Here a LINE of Trees, and its
    copy in each Trees placement's block, becomes a proxy entity with 21
    bits of data: the same data, but for a full byte in R1's block and a bit
-   of the partial last byte in R2's. That bit, 0x08, is one bit_read_bits
+   of the partial last byte in R2's. That bit, 0x10, is one bit_read_bits
    fills whether it puts the 5 bits at the low or the high end of the
    byte. */
 static int
