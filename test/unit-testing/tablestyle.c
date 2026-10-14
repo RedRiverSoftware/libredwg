@@ -36,7 +36,11 @@ api_process (dwg_object *obj)
   CHK_ENTITY_TYPE (tblstyle, TABLESTYLE, is_title_suppressed, B);
   CHK_ENTITY_TYPE (tblstyle, TABLESTYLE, is_header_suppressed, B);
   CHK_ENTITY_TYPE (tblstyle, TABLESTYLE, num_rowstyles, BL);
-  if (num_rowstyles != 3)
+  // r2010+ table styles keep their row styles as cell styles, which are not
+  // decoded into rowstyles yet (P1-09-FU1).
+  if (num_rowstyles == 0 && dwg_version >= R_2010)
+    todo ("TABLESTYLE.num_rowstyles 0 in r2010+ (P1-09-FU1)");
+  else if (num_rowstyles != 3)
     fail ("TABLESTYLE.num_rowstyles %d != 3", num_rowstyles);
   if (!dwg_dynapi_entity_value (tblstyle, "TABLESTYLE", "rowstyles",
                                 &rowstyles, NULL))

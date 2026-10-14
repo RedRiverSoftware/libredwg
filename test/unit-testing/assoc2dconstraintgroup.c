@@ -36,7 +36,7 @@ api_process (dwg_object *obj)
     }
   CHK_ENTITY_TYPE (_obj, ASSOC2DCONSTRAINTGROUP, num_owned_params, BL);
   CHK_ENTITY_HV (_obj, ASSOC2DCONSTRAINTGROUP, owned_params, num_owned_params);
-  CHK_ENTITY_TYPE (_obj, ASSOCACTION, num_values, BL);
+  CHK_ENTITY_TYPE (_obj, ASSOC2DCONSTRAINTGROUP, num_values, BL);
   CHK_VALUEPARAM (num_values, values);
 
   // ASSOC2DCONSTRAINTGROUP
@@ -50,6 +50,14 @@ api_process (dwg_object *obj)
   CHK_ENTITY_HV (_obj, ASSOC2DCONSTRAINTGROUP, actions, num_actions);
   CHK_ENTITY_TYPE (_obj, ASSOC2DCONSTRAINTGROUP, num_nodes, BL);
   CHK_ENTITY_MAX (_obj, ASSOC2DCONSTRAINTGROUP, num_nodes, BL, 200);
+  // The nodes are not decoded yet: decoding stops at nodes[0].num_connections
+  // (P6-05 item 12). Once they are, remove this TODO so the loop below checks
+  // them again.
+  if (num_nodes)
+    {
+      todo ("ASSOC2DCONSTRAINTGROUP.nodes not decoded (P6-05 item 12)");
+      return;
+    }
   for (unsigned i = 0; i < num_nodes; i++)
     {
       CHK_SUBCLASS_TYPE (_obj->nodes[i], CONSTRAINTGROUPNODE, nodeid, BL);

@@ -115,13 +115,10 @@ if "$FILTER" '[.OBJECTS[] | select(.type == 48)] | length' "$DWG_R11_3D" >"$log"
         echo "PASS: TEXT entity query on r11/entities-3d.dwg ($result TEXT entities)"
         rm -f "$log"
     else
-        # r11/entities-3d may have issues; treat as TODO
-        echo "SKIP: TEXT query on r11/entities-3d.dwg (parse issue, result='$result')"
-        rm -f "$log"
+        fail "TEXT query result is not a number: '$result'" "$log"
     fi
 else
-    echo "SKIP: TEXT query on r11/entities-3d.dwg (dwgfilter failed)"
-    rm -f "$log"
+    fail "dwgfilter TEXT query on r11/entities-3d.dwg failed" "$log"
 fi
 
 # ---- Test 4: --help and --version (null input) ----
@@ -194,11 +191,10 @@ if "$FILTER" --debug '.HEADER.CLAYER' "$DWG" >"$log" 2>&1; then
         if [ -n "$tmpfile" ] && [ -f "$tmpfile" ]; then
             rm -f "$tmpfile"
         fi
+        rm -f "$log"
     else
-        # --debug succeeded but no "Keeping" message; still a pass
-        echo "PASS: --debug query succeeded"
+        fail "--debug did not report the kept JSON dump" "$log"
     fi
-    rm -f "$log"
 else
     fail "--debug query failed" "$log"
 fi

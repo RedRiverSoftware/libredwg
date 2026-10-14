@@ -43,12 +43,25 @@ api_process (dwg_object *obj)
 
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, rapidrt_version, BL);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, render_target, BL);
-  CHK_ENTITY_MAX (_obj, RAPIDRTRENDERSETTINGS, render_target, BL, 2);
+  // Two r2013 drawings read render_target and lighting_model out of range,
+  // and filter_height as NaN (P1-09-FU1).
+  if (dwg_version == R_2013 && render_target > 2)
+    todo ("RAPIDRTRENDERSETTINGS.render_target %u > 2 in r2013 (P1-09-FU1)",
+          (unsigned)render_target);
+  else
+    CHK_ENTITY_MAX (_obj, RAPIDRTRENDERSETTINGS, render_target, BL, 2);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, render_level, BL);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, render_time, BL);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, lighting_model, BL);
-  CHK_ENTITY_MAX (_obj, RAPIDRTRENDERSETTINGS, lighting_model, BL, 2);
+  if (dwg_version == R_2013 && lighting_model > 2)
+    todo ("RAPIDRTRENDERSETTINGS.lighting_model %u > 2 in r2013 (P1-09-FU1)",
+          (unsigned)lighting_model);
+  else
+    CHK_ENTITY_MAX (_obj, RAPIDRTRENDERSETTINGS, lighting_model, BL, 2);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, filter_type, BL);
   CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, filter_width, BD);
-  CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, filter_height, BD);
+  if (dwg_version == R_2013 && isnan (_obj->filter_height))
+    todo ("RAPIDRTRENDERSETTINGS.filter_height NaN in r2013 (P1-09-FU1)");
+  else
+    CHK_ENTITY_TYPE (_obj, RAPIDRTRENDERSETTINGS, filter_height, BD);
 }

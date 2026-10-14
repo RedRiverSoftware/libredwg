@@ -28,10 +28,10 @@ else
     TESTPROG="@LTEXEC@"
 fi
 
-# Our fork's dwg2SVG writes SVG for browsers rather than SVG 1.1 Basic: it
-# adds data-* attributes and vector-effect, which the cableflow viewer relies
-# on, so upstream's svg11-basic schema check (RUN_JING) cannot pass. Check
-# the output is well-formed XML instead, with whichever checker is available.
+# This dwg2SVG writes SVG for browsers rather than SVG 1.1 Basic: it adds
+# data-* attributes and vector-effect, so upstream's svg11-basic schema check
+# (RUN_JING) cannot pass. Check the output is well-formed XML instead, with
+# whichever checker is available.
 if command -v xmllint >/dev/null 2>&1; then
     check_xml () { xmllint --noout "$1"; }
 elif command -v python3 >/dev/null 2>&1; then
@@ -39,7 +39,8 @@ elif command -v python3 >/dev/null 2>&1; then
         python3 -c 'import sys, xml.dom.minidom; xml.dom.minidom.parse(sys.argv[1])' "$1"
     }
 else
-    check_xml () { :; }
+    echo "SKIP: no xmllint or python3 to check the SVG output"
+    exit 77
 fi
 
 i=0
