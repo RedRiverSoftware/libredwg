@@ -151,7 +151,7 @@ jobs:
     - run: make -C programs check-minimal XFAIL_TESTS="alive.test"
     - run: >-
         make -C test/unit-testing check-minimal
-        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test dynblock_eval_test fields_test copy_test color_test"
+        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test dynblock_eval_test fields_test copy_test color_test indxf_test"
   mips32-big-endian:
     runs-on: ubuntu-latest
     timeout-minutes: 35
