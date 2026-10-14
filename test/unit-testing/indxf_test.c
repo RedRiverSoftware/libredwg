@@ -77,6 +77,8 @@ import_dxf (const char *file, const char *dxf, Dwg_Data *dwg)
 {
   FILE *fp;
   int error;
+  // the callers free dwg on any critical error
+  memset (dwg, 0, sizeof (Dwg_Data));
   fp = fopen (file, "wb");
   if (!fp)
     {
@@ -85,7 +87,6 @@ import_dxf (const char *file, const char *dxf, Dwg_Data *dwg)
     }
   fwrite (dxf, 1, strlen (dxf), fp);
   fclose (fp);
-  memset (dwg, 0, sizeof (Dwg_Data));
   dwg->opts = tracelevel;
   dwg->header.version = R_2000;
   error = dxf_read_file (file, dwg);
