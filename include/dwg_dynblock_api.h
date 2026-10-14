@@ -160,10 +160,12 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    def's base point, and no EED or extension dictionary: AcDbBlockRepBTag,
    the placement and its values are the caller's.
 
-   Properties left out of values keep the definition's values, and so do
-   those given at them. A value that changes the geometry is evaluated
-   only for the kinds supported: VISIBILITY. Changing any other kind is
-   refused, as is a definition that is constraint-based (parametric).
+   Properties left out of values keep the definition's values. Only
+   VISIBILITY values change the geometry. A LINEAR or ROTATION value is
+   accepted at the definition's value and a FLIP value at 0, and refused
+   otherwise; a value of any other kind (XY, POLAR, POINT, LOOKUP,
+   CONSTRAINT or USER) is refused whatever it is. A definition that is
+   constraint-based (parametric) is refused.
 
    Returns the new block, with *errorp 0, or below DWG_ERR_CRITICAL the
    bits of the copy for data it left out (an array, or an EED group, it
@@ -190,9 +192,11 @@ dwg_dynblock_evaluate (Dwg_Object_BLOCK_HEADER *def,
 /* The outcome of checking one placement's representation block. */
 typedef enum DWG_DYNBLOCK_CHECK_STATUS
 {
-  /* every entity of the evaluation matches AutoCAD's */
+  /* every entity of the evaluation matches AutoCAD's, and the evaluation
+     left out no data */
   DWG_DYNBLOCK_CHECK_MATCH = 0,
-  /* the evaluation differs from AutoCAD's block */
+  /* the evaluation differs from AutoCAD's block, or left out data it
+     could not copy */
   DWG_DYNBLOCK_CHECK_MISMATCH,
   /* the evaluator refuses the placement's values or definition, or a stored
      value isn't read */
@@ -222,8 +226,9 @@ typedef struct _dwg_dynblock_check
      with its major axis reversed and its parameters turned by pi, as
      AutoCAD keeps one after some grip edits */
   BITCODE_BL num_equivalent;
-  /* UTF-8: what differs first, or why the check is unsupported or failed;
-     NULL for a match */
+  /* UTF-8: what differs first, preceded by the bits of the data the
+     evaluation left out, if it left some out; or why the check is
+     unsupported or failed; NULL for a match */
   char *reason;
 } Dwg_DynBlock_Check;
 
@@ -247,16 +252,23 @@ typedef struct _dwg_dynblock_check_report
    DWG_DYNBLOCK_CHECK_NO_VALUES.
 
    Entities compare by type, by their invisible flag, layer, colour,
-   linetype and lineweight, and field by field with the dynapi field
-   lists: numbers within tolerance, strings exactly, and references by
-   the entity they point at, paired by index within the blocks, so the
-   same handle matches, whether or not it resolves. An entry of either
-   block's entity list that doesn't resolve is a difference. An array
-   the comparison has no length for, unless empty in both, counts as a
+   linetype flags, linetype, linetype scale, lineweight, plot style flags
+   and plot style, and field by field with the dynapi field lists:
+   numbers within tolerance, strings exactly, and references by the
+   entity they point at, paired by index within the blocks, so the same
+   handle matches, whether or not it resolves. An entry of either block's
+   entity list that doesn't resolve is a difference. An array the
+   comparison has no length for, unless empty in both, counts as a
    difference. An ELLIPSE also matches the same curve with its major axis
    reversed, and is counted in num_equivalent. The blocks' base points
    compare too: a difference there is a mismatch, though not of an
-   entity.
+   entity. EED is not compared.
+
+   An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
+   copy left out (an array or an EED group it could not copy), is a
+   mismatch whatever the comparison finds, as the comparison doesn't see
+   all such data. Its reason gives those bits first, then what differs, if
+   anything.
 
    Each evaluation adds its block to dwg, so check a document that won't be
    written. Returns the report, which dwg_dynblock_free_check_report ()

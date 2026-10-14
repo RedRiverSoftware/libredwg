@@ -1044,6 +1044,109 @@ test_check_finds (Dwg_Data *dwg)
   return failures;
 }
 
+/* A placement whose evaluation left out data, here an EED group of a Trees
+   entity that couldn't be decoded, which the copy drops with
+   DWG_ERR_INVALIDEED, is not a match, though the comparison, which doesn't
+   compare EED, finds no difference. */
+static int
+test_check_copy_warning (Dwg_Data *dwg)
+{
+  const size_t n = sizeof (expected_checks) / sizeof (expected_checks[0]);
+  Dwg_Object_BLOCK_HEADER *trees = block_header (dwg, TREES);
+  Dwg_Object_BLOCK_HEADER *r1_block = block_header (dwg, 0xCFF7);
+  BITCODE_H acad = dwg_find_tablehandle (dwg, "ACAD", "APPID");
+  Dwg_Object *first;
+  Dwg_Object_Entity *ent;
+  Dwg_Eed *eed;
+  Dwg_DynBlock_Check_Report *report;
+  char bits[16];
+  BITCODE_BL num_trees = 0;
+  int failures = 0;
+  loglevel = test_loglevel;
+  first = trees && trees->entities && trees->num_owned
+              ? dwg_ref_object (dwg, trees->entities[0])
+              : NULL;
+  if (!first || first->supertype != DWG_SUPERTYPE_ENTITY || !r1_block
+      || !acad)
+    {
+      fail ("check copy warning: fixture objects not found");
+      return 1;
+    }
+  // an EED group with a size and no data, as the decoder leaves one it
+  // can't decode
+  ent = first->tio.entity;
+  eed = (Dwg_Eed *)realloc (ent->eed, (ent->num_eed + 1) * sizeof (Dwg_Eed));
+  if (!eed)
+    {
+      fail ("check copy warning: out of memory");
+      return 1;
+    }
+  ent->eed = eed;
+  memset (&eed[ent->num_eed], 0, sizeof (Dwg_Eed));
+  eed[ent->num_eed].size = 4;
+  eed[ent->num_eed].handle = acad->handleref;
+  ent->num_eed++;
+  // R1's block: its base point, a difference besides the copy's
+  r1_block->base_pt.x += 1.0;
+  snprintf (bits, sizeof (bits), "(0x%x)", (unsigned)DWG_ERR_INVALIDEED);
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check copy warning: no report");
+      return 1;
+    }
+  for (size_t i = 0; i < n; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      const Dwg_DynBlock_Check *c = find_check (report, e->insert, e->block);
+      if (e->status != DWG_DYNBLOCK_CHECK_MATCH)
+        continue;
+      if (c && c->definition == TREES)
+        {
+          // the comparison ran and found no entity differing
+          if (c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->evaluated
+              && c->num_entities && !c->num_differing && c->reason
+              && strstr (c->reason, bits)
+              && (e->insert != 0xC8E0 || strstr (c->reason, "base_pt")))
+            ok ("check copy warning " FORMAT_HV ": %s", e->insert, c->reason);
+          else
+            {
+              fail ("check copy warning " FORMAT_HV ": status %d, %u "
+                    "entities, %u differ: %s; expected a mismatch naming %s",
+                    e->insert, (int)c->status, (unsigned)c->num_entities,
+                    (unsigned)c->num_differing, c->reason ? c->reason : "",
+                    bits);
+              failures++;
+            }
+          num_trees++;
+        }
+      else if (!c || c->status != DWG_DYNBLOCK_CHECK_MATCH)
+        {
+          fail ("check copy warning " FORMAT_HV ": status %d, %s; expected a "
+                "match",
+                e->insert, c ? (int)c->status : -1,
+                c && c->reason ? c->reason : "");
+          failures++;
+        }
+    }
+  // R1, R2 and R3 among them
+  if (num_trees >= 3 && report->num_mismatch == num_trees
+      && report->num_match == 10 - num_trees)
+    ok ("check copy warning: %u Trees placements mismatch, %u match",
+        (unsigned)num_trees, (unsigned)report->num_match);
+  else
+    {
+      fail ("check copy warning: %u Trees placements, %u mismatch, %u match",
+            (unsigned)num_trees, (unsigned)report->num_mismatch,
+            (unsigned)report->num_match);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1087,6 +1190,14 @@ main (int argc, char *argv[])
   free_dwg (&dwg);
   read_dwg (fixture, &dwg);
   failures += test_check_finds (&dwg);
+  free_dwg (&dwg);
+  error = read_dwg (fixture, &dwg);
+  if (error & ~KNOWN_ERRORS)
+    {
+      fail ("dwg_read_file 0x%x", error);
+      return 1;
+    }
+  failures += test_check_copy_warning (&dwg);
   free_dwg (&dwg);
   return failures ? 1 : 0;
 }

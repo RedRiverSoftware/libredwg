@@ -1782,8 +1782,9 @@ compare_fields (Dynblock_Compare *c, const char *prefix,
 }
 
 /* The entity data both copies keep from their definition entity: the
-   visibility flag, layer, colour, linetype and lineweight. The owner,
-   links, reactors, extension dictionary and EED are the block's own. */
+   visibility flag, layer, colour, linetype and its scale, lineweight and
+   plot style. The owner, links, reactors, extension dictionary and EED
+   are the block's own. */
 static void
 compare_common (Dynblock_Compare *c, const Dwg_Object_Entity *a,
                 const Dwg_Object_Entity *b)
@@ -2049,6 +2050,7 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
   BITCODE_BL count = 0;
   BITCODE_RLL def_handle = 0;
   char reason[REASON_SIZE] = "";
+  char left_out[REASON_SIZE] = "";
   int error, oom = 0;
 
   if (!block_representation (dwg, insert))
@@ -2086,12 +2088,24 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
       oom = error & DWG_ERR_OUTOFMEM;
       goto done;
     }
-  // data the copy left out shows in the comparison, if it is compared
+  // below DWG_ERR_CRITICAL: the copy left out data, as reason says
+  if (error)
+    memcpy (left_out, reason, sizeof (left_out));
   reason[0] = '\0';
   compare_blocks (dwg, check->block, check->evaluated, tolerance, check,
                   reason, sizeof (reason));
   // compare_blocks fails only for memory
   oom = check->status == DWG_DYNBLOCK_CHECK_FAILED;
+  // The comparison doesn't see all the copy can leave out, such as an EED
+  // group, so an evaluation that left data out is never a match.
+  if (error && !oom)
+    {
+      char differs[REASON_SIZE];
+      memcpy (differs, reason, sizeof (differs));
+      set_reason (reason, sizeof (reason), "%s%s%s", left_out,
+                  differs[0] ? "; " : "", differs);
+      check->status = DWG_DYNBLOCK_CHECK_MISMATCH;
+    }
 done:
   dwg_dynblock_free_values (values, count);
   if (check->status != DWG_DYNBLOCK_CHECK_MATCH)
