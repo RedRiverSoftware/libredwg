@@ -1394,15 +1394,113 @@ test_linear_refusals (Dwg_Data *dwg)
         fail ("linear: 1e308 on a parameter 0.5 long");
         failures++;
       }
+    // a parameter 1e200 long set to 2e200 extends, though squaring its
+    // length overflows
+    width->def_endpt.x = width->def_basept.x + 1e200;
+    v.value = 2e200;
+    rep = evaluate (dwg, WINDOW, &v, 1, "linear 2e200");
+    copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+    if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
+        && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
+        && fabs (copy->tio.entity->tio.LWPOLYLINE->points[3].x / 1e200 - 1.0)
+               < 1e-9)
+      OK ("linear: a parameter 1e200 long set to 2e200 extends by 1e200");
+    else
+      {
+        fail ("linear: a parameter 1e200 long set to 2e200");
+        failures++;
+      }
     width->def_endpt = endpt;
     // 4 times as much is more than a double holds
     stretch->action_offset_x = 4.0;
+    v.value = 1e308;
     failures += test_refusal (dwg, WINDOW, &v, 1,
                               REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                               "a value an action can't move points by");
     stretch->action_offset_x = 1.0;
+    // 1.5e308 moves the frame's vertices 2 and 3 once each
+    v.value = 1.5e308;
+    rep = evaluate (dwg, WINDOW, &v, 1, "linear 1.5e308");
+    copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+    if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
+        && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
+        && isfinite (copy->tio.entity->tio.LWPOLYLINE->points[3].x)
+        && copy->tio.entity->tio.LWPOLYLINE->points[3].x > 1e308)
+      OK ("linear: 1.5e308 moves each stretched vertex once");
+    else
+      {
+        fail ("linear: 1.5e308");
+        failures++;
+      }
+    // LINE BBD7, wholly in 'Stretch Width''s frame, made to start at 1e308
+    {
+      Dwg_Object *line = dwg_resolve_handle (dwg, 0xBBD7);
+      const double x = line && line->fixedtype == DWG_TYPE_LINE
+                           ? line->tio.entity->tio.LINE->start.x
+                           : 0.0;
+      if (line && line->fixedtype == DWG_TYPE_LINE)
+        {
+          line->tio.entity->tio.LINE->start.x = 1e308;
+          v.value = 1e308;
+          failures += test_refusal (dwg, WINDOW, &v, 1,
+                                    REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                    "a move beyond what a double holds");
+          line->tio.entity->tio.LINE->start.x = x;
+        }
+      else
+        {
+          fail ("linear: LINE BBD7 not found");
+          failures++;
+        }
+    }
+    // and listed whole by 'Stretch Divider' too: its moves add up
+    {
+      Dwg_Object_BLOCKSTRETCHACTION *divider
+          = stretch_action (dwg, WINDOW, "Stretch Divider");
+      static const BITCODE_BL ends[] = { 0, 1 };
+      if (divider && add_stretch_entity (dwg, divider, 0xBBD7, ends, 2))
+        {
+          v.value = 1.2e308;
+          failures += test_refusal (dwg, WINDOW, &v, 1,
+                                    REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                    "moves adding up beyond a double");
+          pop_stretch_entity (divider);
+        }
+    }
     v.value = 24.0;
   }
+
+  // a parameter that another action moves far: Height 1e200 moves Width's
+  // end point to about (36, 1e200), so Width 2e200 then extends it
+  if (add_stretch_code (height_stretch, width->evalexpr.nodeid, 1))
+    {
+      const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, WINDOW);
+      const Dwg_Object_BLOCK_HEADER *rep;
+      const Dwg_Object *copy;
+      Dwg_DynValue w[2];
+      memset (w, 0, sizeof (w));
+      w[0].name = (char *)"Window Height";
+      w[0].value = 1e200;
+      w[1].name = (char *)"Window Width";
+      w[1].value = 2e200;
+      rep = evaluate (dwg, WINDOW, w, 2, "linear moved far");
+      copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+      // vertex 3, (36, 0), in Width's frame only, moves by about (36, 1e200)
+      if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
+          && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
+          && fabs (copy->tio.entity->tio.LWPOLYLINE->points[3].x - 72.0)
+                 < 1e-6
+          && fabs (copy->tio.entity->tio.LWPOLYLINE->points[3].y / 1e200
+                   - 1.0)
+                 < 1e-9)
+        OK ("linear: a parameter moved far by another action extends");
+      else
+        {
+          fail ("linear: a parameter moved far by another action");
+          failures++;
+        }
+      pop_stretch_code (height_stretch);
+    }
 
   // Width's stretch moves Height's end point, and Height chains its actions
   if (add_stretch_code (stretch, height->evalexpr.nodeid, 1))

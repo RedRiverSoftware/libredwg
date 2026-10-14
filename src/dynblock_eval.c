@@ -319,11 +319,11 @@ dwg_dynparam_kind_name (const Dwg_DynParam_Kind kind)
     }
 }
 
+/* hypot, as squaring a large component would overflow */
 static double
 distance_3d (const BITCODE_3BD *a, const BITCODE_3BD *b)
 {
-  const double dx = b->x - a->x, dy = b->y - a->y, dz = b->z - a->z;
-  return sqrt (dx * dx + dy * dy + dz * dz);
+  return hypot (hypot (b->x - a->x, b->y - a->y), b->z - a->z);
 }
 
 /* The angle of end about base, from the direction of base_angle, in
@@ -2095,6 +2095,185 @@ is_at (const BITCODE_3BD *a, const BITCODE_3BD *b)
   return a->x == b->x && a->y == b->y && a->z == b->z;
 }
 
+#define REACH(m, v) (m) = fmax ((m), fabs (v))
+#define REACH_2D(m, pt)                                                       \
+  do                                                                          \
+    {                                                                         \
+      REACH (m, (pt).x);                                                      \
+      REACH (m, (pt).y);                                                      \
+    }                                                                         \
+  while (0)
+#define REACH_3D(m, pt)                                                       \
+  do                                                                          \
+    {                                                                         \
+      REACH_2D (m, pt);                                                       \
+      REACH (m, (pt).z);                                                      \
+    }                                                                         \
+  while (0)
+
+/* The largest magnitude of a coordinate the evaluator moves of entity obj,
+   with the ATTRIBs an INSERT owns. */
+static double
+entity_reach (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  double m = 0.0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      REACH_3D (m, obj->tio.entity->tio.LINE->start);
+      REACH_3D (m, obj->tio.entity->tio.LINE->end);
+      break;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        for (BITCODE_BL i = 0; _obj->points && i < _obj->num_points; i++)
+          REACH_2D (m, _obj->points[i]);
+      }
+      break;
+    case DWG_TYPE_ARC:
+      REACH_3D (m, obj->tio.entity->tio.ARC->center);
+      break;
+    case DWG_TYPE_CIRCLE:
+      REACH_3D (m, obj->tio.entity->tio.CIRCLE->center);
+      break;
+    case DWG_TYPE_ELLIPSE:
+      REACH_3D (m, obj->tio.entity->tio.ELLIPSE->center);
+      break;
+    case DWG_TYPE_SPLINE:
+      {
+        const Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        for (BITCODE_BL i = 0; _obj->ctrl_pts && i < _obj->num_ctrl_pts; i++)
+          REACH_3D (m, _obj->ctrl_pts[i]);
+        for (BITCODE_BS i = 0; _obj->fit_pts && i < _obj->num_fit_pts; i++)
+          REACH_3D (m, _obj->fit_pts[i]);
+      }
+      break;
+    case DWG_TYPE_TEXT:
+      REACH_2D (m, obj->tio.entity->tio.TEXT->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.TEXT->alignment_pt);
+      break;
+    case DWG_TYPE_ATTDEF:
+      REACH_2D (m, obj->tio.entity->tio.ATTDEF->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.ATTDEF->alignment_pt);
+      break;
+    case DWG_TYPE_ATTRIB:
+      REACH_2D (m, obj->tio.entity->tio.ATTRIB->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.ATTRIB->alignment_pt);
+      break;
+    case DWG_TYPE_MTEXT:
+      REACH_3D (m, obj->tio.entity->tio.MTEXT->ins_pt);
+      break;
+    case DWG_TYPE_INSERT:
+      {
+        const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+        REACH_3D (m, _obj->ins_pt);
+        for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+          {
+            const Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+            if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+              m = fmax (m, entity_reach (dwg, attrib));
+          }
+      }
+      break;
+    case DWG_TYPE_HATCH:
+      {
+        const Dwg_Entity_HATCH *_obj = obj->tio.entity->tio.HATCH;
+        for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+          {
+            const Dwg_HATCH_Path *path = &_obj->paths[i];
+            const BITCODE_BL n = path->num_segs_or_paths;
+            for (BITCODE_BL j = 0;
+                 (path->flag & 2) && path->polyline_paths && j < n; j++)
+              REACH_2D (m, path->polyline_paths[j].point);
+            for (BITCODE_BL j = 0; !(path->flag & 2) && path->segs && j < n;
+                 j++)
+              {
+                const Dwg_HATCH_PathSeg *s = &path->segs[j];
+                REACH_2D (m, s->first_endpoint);
+                REACH_2D (m, s->second_endpoint);
+                REACH_2D (m, s->center);
+                for (BITCODE_BL k = 0;
+                     s->control_points && k < s->num_control_points; k++)
+                  REACH_2D (m, s->control_points[k].point);
+                for (BITCODE_BL k = 0; s->fitpts && k < s->num_fitpts; k++)
+                  REACH_2D (m, s->fitpts[k]);
+              }
+          }
+        for (BITCODE_BL i = 0; _obj->seeds && i < _obj->num_seeds; i++)
+          REACH_2D (m, _obj->seeds[i]);
+        for (BITCODE_BS i = 0; _obj->deflines && i < _obj->num_deflines; i++)
+          REACH_2D (m, _obj->deflines[i].pt0);
+      }
+      break;
+    default:
+      break;
+    }
+  return m;
+}
+
+static double
+move_size (const Dynblock_Move *m)
+{
+  return fabs (m->delta.x) + fabs (m->delta.y) + fabs (m->delta.z);
+}
+
+/* Refuses moves that could take a coordinate beyond what a double holds:
+   an entity's largest coordinate, plus the sum of its whole moves and of
+   the moves of the stretch point moved most, must stay finite. */
+static int
+check_reach (Dynblock_Plan *plan)
+{
+  const BITCODE_BL n = plan->num_moves;
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      const BITCODE_RLL entity = plan->moves[i].entity;
+      const Dwg_Object *obj;
+      double whole = 0.0, most = 0.0, reach;
+      int seen = 0;
+      // each entity once, at its first move
+      for (BITCODE_BL j = 0; j < i && !seen; j++)
+        seen = plan->moves[j].entity == entity;
+      if (seen)
+        continue;
+      for (BITCODE_BL j = i; j < n; j++)
+        {
+          const Dynblock_Move *m = &plan->moves[j];
+          double sum = 0.0;
+          int counted = 0;
+          if (m->entity != entity)
+            continue;
+          if (m->point < 0)
+            {
+              whole += move_size (m);
+              continue;
+            }
+          // each stretch point once, at its first move
+          for (BITCODE_BL k = i; k < j && !counted; k++)
+            counted = plan->moves[k].entity == entity
+                      && plan->moves[k].point == m->point;
+          if (counted)
+            continue;
+          for (BITCODE_BL k = j; k < n; k++)
+            if (plan->moves[k].entity == entity
+                && plan->moves[k].point == m->point)
+              sum += move_size (&plan->moves[k]);
+          most = fmax (most, sum);
+        }
+      obj = handle_object (plan->dwg, entity);
+      reach = (obj ? entity_reach (plan->dwg, obj) : 0.0) + whole + most;
+      if (!isfinite (reach))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "the actions would move %s " FORMAT_HV
+                      " beyond what a double holds",
+                      obj ? dwg_type_name (obj->fixedtype) : "entity",
+                      entity);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+    }
+  return 0;
+}
+
 /* Plans the LINEAR values of list, given in linear (a NaN where not given),
    for definition _def, whose evaluation graph is graph, into
    plan->moves. */
@@ -2224,7 +2403,7 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
                   "parameters in a cycle");
       return DYNBLOCK_REFUSED;
     }
-  return error;
+  return error ? error : check_reach (plan);
 }
 
 /* Moves pt, a 2D point of any of the 2D point types, by the x and y of
