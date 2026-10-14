@@ -9,6 +9,7 @@ api_process (dwg_object *obj)
   ASSOCPATHBASEDSURFACEACTIONBODY_fields;
   BITCODE_H *deps;
   BITCODE_BL class_version;
+  BITCODE_B b1;
 
   Dwg_Version_Type dwg_version = obj->parent->header.version;
   dwg_obj_assocrevolvedsurfaceactionbody *_obj
@@ -29,4 +30,5 @@ api_process (dwg_object *obj)
   CHK_ENTITY_TYPE (_obj, ASSOCREVOLVEDSURFACEACTIONBODY, pbsab_status, BL);
 
   CHK_ENTITY_TYPE (_obj, ASSOCREVOLVEDSURFACEACTIONBODY, class_version, BL);
+  CHK_ENTITY_TYPE (_obj, ASSOCREVOLVEDSURFACEACTIONBODY, b1, B);
 }

@@ -122,6 +122,17 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     set_tests_properties(dynblocks_test PROPERTIES
       ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
   endif()
+  add_executable(fields_test
+    fields_test.c
+    ../../src/logging.c
+    ../../src/classes.c
+    tests_common.h)
+  if(NOT MSVC)
+    add_test(fields_test ${TARGET_SYSTEM_EMULATOR} fields_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds test/test-data
+    set_tests_properties(fields_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  endif()
   add_executable(summaryinfo_test
     summaryinfo_test.c
     ../../src/bits.c

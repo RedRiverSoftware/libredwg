@@ -35146,6 +35146,21 @@ static int test_ASSOCREVOLVEDSURFACEACTIONBODY (const Dwg_Object *obj)
     assocrevolvedsurfaceactionbody->aab_version--;
   }
   {
+    BITCODE_B b1;
+    if (dwg_dynapi_entity_value (assocrevolvedsurfaceactionbody, "ASSOCREVOLVEDSURFACEACTIONBODY", "b1", &b1, NULL)
+        && b1 == assocrevolvedsurfaceactionbody->b1)
+      pass ();
+    else
+      fail ("ASSOCREVOLVEDSURFACEACTIONBODY.b1 [B] " FORMAT_B " != " FORMAT_B "", assocrevolvedsurfaceactionbody->b1, b1);
+    b1++;
+    if (dwg_dynapi_entity_set_value (assocrevolvedsurfaceactionbody, "ASSOCREVOLVEDSURFACEACTIONBODY", "b1", &b1, 0)
+        && b1 == assocrevolvedsurfaceactionbody->b1)
+      pass ();
+    else
+      fail ("ASSOCREVOLVEDSURFACEACTIONBODY.b1 [B] set+1 " FORMAT_B " != " FORMAT_B "", assocrevolvedsurfaceactionbody->b1, b1);
+    assocrevolvedsurfaceactionbody->b1--;
+  }
+  {
     BITCODE_BL class_version;
     if (dwg_dynapi_entity_value (assocrevolvedsurfaceactionbody, "ASSOCREVOLVEDSURFACEACTIONBODY", "class_version", &class_version, NULL)
         && class_version == assocrevolvedsurfaceactionbody->class_version)
@@ -35566,12 +35581,45 @@ static int test_ASSOCVALUEDEPENDENCY (const Dwg_Object *obj)
       fail ("ASSOCVALUEDEPENDENCY.assocdep.name [T] '%s' <> '%s'", assocdep_name, assocvaluedependency->assocdep.name);
   }
   {
+    BITCODE_BS class_version;
+    if (dwg_dynapi_entity_value (assocvaluedependency, "ASSOCVALUEDEPENDENCY", "class_version", &class_version, NULL)
+        && class_version == assocvaluedependency->class_version)
+      pass ();
+    else
+      fail ("ASSOCVALUEDEPENDENCY.class_version [BS] %hu != %hu", assocvaluedependency->class_version, class_version);
+    class_version++;
+    if (dwg_dynapi_entity_set_value (assocvaluedependency, "ASSOCVALUEDEPENDENCY", "class_version", &class_version, 0)
+        && class_version == assocvaluedependency->class_version)
+      pass ();
+    else
+      fail ("ASSOCVALUEDEPENDENCY.class_version [BS] set+1 %hu != %hu", assocvaluedependency->class_version, class_version);
+    assocvaluedependency->class_version--;
+  }
+  {
     struct _dwg_object_object* parent;
     if (dwg_dynapi_entity_value (assocvaluedependency, "ASSOCVALUEDEPENDENCY", "parent", &parent, NULL)
         && !memcmp (&parent, &assocvaluedependency->parent, sizeof (struct _dwg_object_object*)))
         pass ();
     else
         fail ("ASSOCVALUEDEPENDENCY.parent [struct _dwg_object_object*]");
+  }
+  {
+    Dwg_EvalVariant value;
+    if (dwg_dynapi_entity_value (assocvaluedependency, "ASSOCVALUEDEPENDENCY", "value", &value, NULL)
+        && !memcmp (&value, &assocvaluedependency->value, sizeof (Dwg_EvalVariant)))
+        pass ();
+    else
+        fail ("ASSOCVALUEDEPENDENCY.value [Dwg_EvalVariant]");
+  }
+  {
+    BITCODE_T value_name;
+    if (dwg_dynapi_entity_value (assocvaluedependency, "ASSOCVALUEDEPENDENCY", "value_name", &value_name, NULL)
+        && value_name
+           ? strEQ ((char *)value_name, (char *)assocvaluedependency->value_name)
+           : !assocvaluedependency->value_name)
+      pass ();
+    else
+      fail ("ASSOCVALUEDEPENDENCY.value_name [T] '%s' <> '%s'", value_name, assocvaluedependency->value_name);
   }
   if (failed && (is_class_unstable ("ASSOCVALUEDEPENDENCY") || is_class_debugging ("ASSOCVALUEDEPENDENCY")))
     {
@@ -35643,6 +35691,21 @@ static int test_ASSOCVARIABLE (const Dwg_Object *obj)
     else
       fail ("ASSOCVARIABLE.b290 [B] set+1 " FORMAT_B " != " FORMAT_B "", assocvariable->b290, b290);
     assocvariable->b290--;
+  }
+  {
+    BITCODE_BL bl90;
+    if (dwg_dynapi_entity_value (assocvariable, "ASSOCVARIABLE", "bl90", &bl90, NULL)
+        && bl90 == assocvariable->bl90)
+      pass ();
+    else
+      fail ("ASSOCVARIABLE.bl90 [BL] %u != %u", assocvariable->bl90, bl90);
+    bl90++;
+    if (dwg_dynapi_entity_set_value (assocvariable, "ASSOCVARIABLE", "bl90", &bl90, 0)
+        && bl90 == assocvariable->bl90)
+      pass ();
+    else
+      fail ("ASSOCVARIABLE.bl90 [BL] set+1 %u != %u", assocvariable->bl90, bl90);
+    assocvariable->bl90--;
   }
   {
     BITCODE_BS class_version;
@@ -42506,6 +42569,21 @@ static int test_BLOCKSCALEACTION (const Dwg_Object *obj)
         pass ();
     else
         fail ("BLOCKSCALEACTION.parent [struct _dwg_object_object*]");
+  }
+  {
+    BITCODE_RC xy_type;
+    if (dwg_dynapi_entity_value (blockscaleaction, "BLOCKSCALEACTION", "xy_type", &xy_type, NULL)
+        && xy_type == blockscaleaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKSCALEACTION.xy_type [RC] %u != %u", blockscaleaction->xy_type, xy_type);
+    xy_type++;
+    if (dwg_dynapi_entity_set_value (blockscaleaction, "BLOCKSCALEACTION", "xy_type", &xy_type, 0)
+        && xy_type == blockscaleaction->xy_type)
+      pass ();
+    else
+      fail ("BLOCKSCALEACTION.xy_type [RC] set+1 %u != %u", blockscaleaction->xy_type, xy_type);
+    blockscaleaction->xy_type--;
   }
   if (failed && (is_class_unstable ("BLOCKSCALEACTION") || is_class_debugging ("BLOCKSCALEACTION")))
     {

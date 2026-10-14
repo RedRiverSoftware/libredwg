@@ -566,7 +566,7 @@ free_3dsolid (Dwg_Object *restrict obj, Dwg_Entity_3DSOLID *restrict _obj)
       SUBCLASS (AcDb3dSolid);                                                 \
       FIELD_HANDLE (history_id, 4, 350);                                      \
     }                                                                         \
-  } else if (FIELD_VALUE (version) > 1                                        \
+  } else if (FIELD_VALUE (version) > 1 && dat->version >= R_2007a            \
              && (!IF_IS_DECODER || AVAIL_BITS (hdl_dat) >= 8)) {              \
       FIELD_HANDLE (history_id, 4, 350);                                      \
   }                                                                           \

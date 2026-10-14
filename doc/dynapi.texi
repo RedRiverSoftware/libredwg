@@ -6838,6 +6838,8 @@ Dwg_ASSOCSURFACEACTIONBODY
 BL,	DXF 90
 @item class_version
 BL,	DXF 90
+@item b1
+B,	DXF 290
 
 @end vtable
 @end indentedblock
@@ -6934,6 +6936,12 @@ BD,	DXF 40
 struct _dwg_object_object*
 @item assocdep
 Dwg_Object_ASSOCDEPENDENCY
+@item class_version
+BS,	DXF 90
+@item value_name
+T,	DXF 1
+@item value
+Dwg_EvalVariant
 
 @end vtable
 @end indentedblock
@@ -6989,6 +6997,8 @@ B,	DXF 290
 T,	DXF 1
 @item b290
 B,	DXF 290
+@item bl90
+BL,	DXF 90
 
 @end vtable
 @end indentedblock
@@ -8453,6 +8463,8 @@ Dwg_BLOCKACTION_connectionpts
 B,	DXF 280
 @item base_pt
 3BD,	DXF 1012
+@item xy_type
+RC
 
 @end vtable
 @end indentedblock

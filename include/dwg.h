@@ -6352,6 +6352,10 @@ typedef struct _dwg_object_ASSOCVALUEDEPENDENCY
 {
   struct _dwg_object_object *parent;
   Dwg_Object_ASSOCDEPENDENCY assocdep;
+  // AcDbAssocValueDependency
+  BITCODE_BS class_version; /*!< DXF 90 */
+  BITCODE_T value_name;     /*!< DXF 1 */
+  Dwg_EvalVariant value;
 } Dwg_Object_ASSOCVALUEDEPENDENCY;
 
 // stable
@@ -6490,6 +6494,7 @@ typedef struct _dwg_object_ASSOCVARIABLE
   BITCODE_B has_t78;
   BITCODE_T t78;
   BITCODE_B b290;
+  BITCODE_BL bl90;
 } Dwg_Object_ASSOCVARIABLE;
 
 // NodeInfo
@@ -6816,6 +6821,7 @@ typedef struct _dwg_object_ASSOCREVOLVEDSURFACEACTIONBODY
   ASSOCPATHBASEDSURFACEACTIONBODY_fields;
   // AcDbAssocRevolvedSurfaceActionBody
   BITCODE_BL class_version;       /*!< DXF 90  */
+  BITCODE_B b1;                   /*!< DXF 290 */
 } Dwg_Object_ASSOCREVOLVEDSURFACEACTIONBODY;
 
 typedef struct _dwg_object_ASSOCSWEPTSURFACEACTIONBODY
@@ -8640,6 +8646,7 @@ typedef struct _dwg_object_BLOCKSCALEACTION
 {
   struct _dwg_object_object *parent;
   BLOCKACTION_WITHBASEPT_fields(5);
+  BITCODE_RC xy_type; /* not in DXF */
 } Dwg_Object_BLOCKSCALEACTION;
 
 typedef struct _dwg_BLOCKSTRETCHACTION_handles {

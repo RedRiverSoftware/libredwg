@@ -5743,6 +5743,8 @@ static const Dwg_DYNAPI_field _dwg_ASSOCREVOLVEDSURFACEACTIONBODY_fields[] = {
     0,0,0, 90 },
   { "class_version",	"BL", sizeof (BITCODE_BL),  OFF (struct _dwg_object_ASSOCREVOLVEDSURFACEACTIONBODY, class_version),
     0,0,0, 90 },
+  { "b1",	"B", sizeof (BITCODE_B),  OFF (struct _dwg_object_ASSOCREVOLVEDSURFACEACTIONBODY, b1),
+    0,0,0, 290 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_ASSOCROTATEDDIMACTIONBODY: (sorted by offset) */
@@ -5811,6 +5813,12 @@ static const Dwg_DYNAPI_field _dwg_ASSOCVALUEDEPENDENCY_fields[] = {
     1,1,0, 0 },
   { "assocdep",	"Dwg_Object_ASSOCDEPENDENCY", sizeof (Dwg_Object_ASSOCDEPENDENCY),  OFF (struct _dwg_object_ASSOCVALUEDEPENDENCY, assocdep),
     0,0,0, 0 },
+  { "class_version",	"BS", sizeof (BITCODE_BS),  OFF (struct _dwg_object_ASSOCVALUEDEPENDENCY, class_version),
+    0,0,0, 90 },
+  { "value_name",	"T", sizeof (BITCODE_T),  OFF (struct _dwg_object_ASSOCVALUEDEPENDENCY, value_name),
+    1,1,1, 1 },
+  { "value",	"Dwg_EvalVariant", sizeof (Dwg_EvalVariant),  OFF (struct _dwg_object_ASSOCVALUEDEPENDENCY, value),
+    0,0,0, 0 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_ASSOCVARIABLE: (sorted by offset) */
@@ -5859,6 +5867,8 @@ static const Dwg_DYNAPI_field _dwg_ASSOCVARIABLE_fields[] = {
     1,1,1, 1 },
   { "b290",	"B", sizeof (BITCODE_B),  OFF (struct _dwg_object_ASSOCVARIABLE, b290),
     0,0,0, 290 },
+  { "bl90",	"BL", sizeof (BITCODE_BL),  OFF (struct _dwg_object_ASSOCVARIABLE, bl90),
+    0,0,0, 90 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_ASSOCVERTEXACTIONPARAM: (sorted by offset) */
@@ -7085,6 +7095,8 @@ static const Dwg_DYNAPI_field _dwg_BLOCKSCALEACTION_fields[] = {
     0,0,0, 280 },
   { "base_pt",	"3BD", sizeof (BITCODE_3BD),  OFF (struct _dwg_object_BLOCKSCALEACTION, base_pt),
     1,0,0, 1012 },
+  { "xy_type",	"RC", sizeof (BITCODE_RC),  OFF (struct _dwg_object_BLOCKSCALEACTION, xy_type),
+    0,0,0, 0 },
   {NULL,	NULL,	0,	0,	0,0,0, 0},
 };
 /* from typedef struct _dwg_object_BLOCKSTRETCHACTION: (sorted by offset) */
