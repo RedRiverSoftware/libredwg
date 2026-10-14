@@ -43,6 +43,7 @@ libredwg_la_SOURCES = \
 	reedsolomon.c \
 	print.c \
 	free.c \
+	copy.c \
 	hash.c \
 	dynapi.c \
 	classes.c \
@@ -118,6 +119,7 @@ EXTRA_HEADERS = \
 	decode_r11.h \
 	dec_macros.h \
 	free.h \
+	copy.h \
 	print.h \
 	logging.h \
 	reedsolomon.h \

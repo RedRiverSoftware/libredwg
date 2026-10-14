@@ -35,6 +35,23 @@ bits_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/bits.lo
 common_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/codepages.lo
+# copy_test includes copy.c, which calls internal functions of these
+# objects. They define exported functions too: copy_test calls those
+# directly, not through a Windows import library, which would define them
+# again.
+copy_test_CFLAGS = $(AM_CFLAGS) -DDLL_EXPORT
+copy_test_LDADD = \
+	$(top_builddir)/src/bits.lo \
+	$(top_builddir)/src/codepages.lo \
+	$(top_builddir)/src/common.lo \
+	$(top_builddir)/src/decode.lo \
+	$(top_builddir)/src/decode2.lo \
+	$(top_builddir)/src/decode_r2007.lo \
+	$(top_builddir)/src/dwg.lo \
+	$(top_builddir)/src/encode.lo \
+	$(top_builddir)/src/encode2.lo \
+	$(top_builddir)/src/hash.lo \
+	$(LDADD)
 decode_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/bits.lo \
 	$(top_builddir)/src/codepages.lo \
@@ -398,6 +415,7 @@ if USE_WRITE
 check_minimal += add_test$(EXEEXT)
 check_minimal += dynblocks_test$(EXEEXT)
 check_minimal += summaryinfo_test$(EXEEXT)
+check_minimal += copy_test$(EXEEXT)
 endif
 if !HAVE_MINGW
 check_minimal += decode_test$(EXEEXT)

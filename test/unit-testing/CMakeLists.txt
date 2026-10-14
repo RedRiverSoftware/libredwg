@@ -127,4 +127,24 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   if(NOT MSVC)
     add_test(summaryinfo_test ${TARGET_SYSTEM_EMULATOR} summaryinfo_test${CMAKE_EXECUTABLE_SUFFIX})
   endif()
+  # copy_test includes copy.c, which calls internal functions of these
+  add_executable(copy_test
+    copy_test.c
+    ../../src/bits.c
+    ../../src/codepages.c
+    ../../src/common.c
+    ../../src/decode.c
+    ../../src/decode2.c
+    ../../src/decode_r2007.c
+    ../../src/dwg.c
+    ../../src/encode.c
+    ../../src/encode2.c
+    ../../src/hash.c
+    ../../src/logging.c
+    ../../src/objects.c
+    ../../src/classes.c
+    tests_common.h)
+  if(NOT MSVC)
+    add_test(copy_test ${TARGET_SYSTEM_EMULATOR} copy_test${CMAKE_EXECUTABLE_SUFFIX})
+  endif()
 endif(NOT LIBREDWG_DISABLE_WRITE)
