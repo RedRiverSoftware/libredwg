@@ -17,6 +17,7 @@ api_process (dwg_object *obj)
   BITCODE_B has_t78;
   BITCODE_T t78;
   BITCODE_B b290;
+  BITCODE_BL bl90;
 
   Dwg_Version_Type dwg_version = obj->parent->header.version;
   // #ifdef DEBUG_CLASSES
@@ -79,5 +80,6 @@ api_process (dwg_object *obj)
   CHK_ENTITY_TYPE (_obj, ASSOCVARIABLE, has_t78, B);
   CHK_ENTITY_UTF8TEXT (_obj, ASSOCVARIABLE, t78);
   CHK_ENTITY_TYPE (_obj, ASSOCVARIABLE, b290, B);
+  CHK_ENTITY_TYPE (_obj, ASSOCVARIABLE, bl90, BL);
   // #endif
 }

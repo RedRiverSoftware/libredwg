@@ -1641,11 +1641,16 @@ DWG_OBJECT_END
   FIELD_BL (num_clip_verts, 0);                                         \
   VALUEOUTOFBOUNDS (num_clip_verts, 5000)                               \
     FIELD_2RD_VECTOR (clip_verts, num_clip_verts, 11);                  \
-  if (FIELD_VALUE (flag) & 16)                                          \
-    {                                                                   \
-      FIELD_BS0 (num_clip_inverts, 170);                                \
-      FIELD_2RD_VECTOR (clip_inverts, num_clip_inverts, 12);            \
-    }                                                                   \
+  /* r2004 stores no inverted clip, even with flag 16 set (AutoCAD's   \
+     r2004 DXF has no 170 either). Unverified for r2007+. */           \
+  IF_FREE_OR_SINCE (R_2007a)                                            \
+  {                                                                     \
+    if (FIELD_VALUE (flag) & 16)                                        \
+      {                                                                 \
+        FIELD_BS0 (num_clip_inverts, 170);                              \
+        FIELD_2RD_VECTOR (clip_inverts, num_clip_inverts, 12);          \
+      }                                                                 \
+  }                                                                     \
   COMMON_ENTITY_HANDLE_DATA;
 
 DWG_ENTITY (PDFUNDERLAY)
@@ -1934,9 +1939,14 @@ DWG_OBJECT_END
     SUB_HANDLE_VECTOR (pab,deps, num_deps, 4, 360);         \
     SUB_FIELD_BL (pab,l4, 90);                              \
     SUB_FIELD_BL (pab,num_values, 90);                      \
-    if (!FIELD_VALUE (pab.num_values)) {                    \
-      SUB_FIELD_BL (pab,l5, 90);                            \
-      SUB_FIELD_HANDLE (pab,assocdep, 5, 330);              \
+    /* Not in r2004: with no values the surface action     \
+       body follows (ASSOCPLANESURFACEACTIONBODY in AutoCAD's \
+       r2004 DXF). Unverified for r2007+. */                \
+    IF_FREE_OR_SINCE (R_2007a) {                            \
+      if (!FIELD_VALUE (pab.num_values)) {                  \
+        SUB_FIELD_BL (pab,l5, 90);                          \
+        SUB_FIELD_HANDLE (pab,assocdep, 5, 330);            \
+      }                                                     \
     }                                                       \
     REPEAT (pab.num_values, pab.values, Dwg_VALUEPARAM)     \
     REPEAT_BLOCK                                            \
@@ -2028,6 +2038,10 @@ DWG_OBJECT (ASSOCREVOLVEDSURFACEACTIONBODY)
   AcDbAssocPathBasedSurfaceActionBody_fields; // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   SUBCLASS (AcDbAssocRevolvedSurfaceActionBody)
   FIELD_BL (class_version, 90);
+  // in AutoCAD's r2004 DXF and DWG. Unverified for r2007+
+  PRE (R_2007a) {
+    FIELD_B (b1, 290);
+  }
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
@@ -3168,6 +3182,10 @@ DWG_OBJECT_END
 DWG_OBJECT (ASSOCVALUEDEPENDENCY)
   HANDLE_UNKNOWN_BITS;
   AcDbAssocDependency_fields; // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
+  SUBCLASS (AcDbAssocValueDependency);
+  FIELD_BS (class_version, 90);
+  FIELD_T (value_name, 1);
+  AcDbEvalVariant_fields (value); // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
@@ -3279,6 +3297,8 @@ DWG_OBJECT_END
   FIELD_BL (conn_pt.code, dxf1);                                              \
   FIELD_T (conn_pt.name, dxf2)
 
+// conn_pts[start] to conn_pts[start + n - 1]. dxf1 and dxf2 are the DXF
+// codes of conn_pts[0]: conn_pts[i] has dxf1 + i and dxf2 + i.
 #define BlockAction_ConnectionPts(conn_pts, start, n, dxf1, dxf2)             \
   DXF {                                                                       \
     for (vcount = start; vcount < (start + n); vcount++) {                    \
@@ -3508,7 +3528,8 @@ DWG_OBJECT_END
 DWG_OBJECT (BLOCKROTATEACTION)
   AcDbBlockActionWithBasePt_fields; // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   SUBCLASS (AcDbBlockRotationAction);
-  BlockAction_ConnectionPts (conn_pts, 2, 1, 94, 303);
+  // after the base point's two, as DXF 94 and 303
+  BlockAction_ConnectionPts (conn_pts, 2, 1, 92, 301);
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
@@ -3521,7 +3542,10 @@ DWG_OBJECT_END
 DWG_OBJECT (BLOCKSCALEACTION)
   AcDbBlockActionWithBasePt_fields; // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   SUBCLASS (AcDbBlockScaleAction);
-  BlockAction_ConnectionPts (conn_pts, 0, 3, 94, 303);
+  // after the base point's two, as DXF 94-96 and 303-305
+  BlockAction_ConnectionPts (conn_pts, 2, 3, 92, 301);
+  // as BLOCKMOVEACTION's, but not in AutoCAD's DXF
+  FIELD_RC (xy_type, 0);
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
@@ -3603,7 +3627,11 @@ DWG_OBJECT_END
 DWG_ENTITY (PLANESURFACE)
   HANDLE_UNKNOWN_BITS;
   ACTION_3DSOLID;
-  FIELD_BS (modeler_format_version, 70); //def 1
+  // Not in r2004: the isolines follow (AutoCAD's r2004 DXF has one 70, the
+  // ACIS version). Unverified for r2007+.
+  SINCE (R_2007a) {
+    FIELD_BS (modeler_format_version, 70); //def 1
+  }
   //FIELD_BL (bindata_size, 90);
   //FIELD_TF (bindata, FIELD_VALUE (bindata_size), 1); // in DXF as encrypted ASCII
 
@@ -5707,8 +5735,12 @@ DWG_OBJECT (ASSOCVARIABLE)
   FIELD_T (desc, 1);
   AcDbEvalVariant_fields(value); // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   FIELD_B (has_t78, 290);
-  FIELD_T (t78, 1);
+  // has_t78 is 0 in every AutoCAD sample, whose DXF has no 1 here
+  if (FIELD_VALUE (has_t78) || IF_IS_FREE) {
+    FIELD_T (t78, 1);
+  }
   FIELD_B (b290, 290);
+  FIELD_BL (bl90, 90);
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
@@ -5728,7 +5760,7 @@ DWG_OBJECT_END
     { \
       FIELD_BS (child_status, 90); \
       FIELD_BL (child_id, 90); \
-      FIELD_HANDLE (child_param, 3, 330); \
+      FIELD_HANDLE (child_param, 4, 330); \
     } \
   if (FIELD_VALUE (child_id)) \
     { \
@@ -5756,6 +5788,9 @@ DWG_OBJECT_END
 DWG_OBJECT (ASSOCOSNAPPOINTREFACTIONPARAM)
   HANDLE_UNKNOWN_BITS;
   AcDbAssocActionParam_fields;
+  // The child fields always follow the params here (DXF 90 90 330 in
+  // AutoCAD's r2000-r2018 DXF), unlike in ASSOCPATHACTIONPARAM
+  FIELD_VALUE (has_child_param) = 1;
   AcDbAssocCompoundActionParam_fields;
   SUBCLASS (AcDbAssocPathActionParam);
   SUBCLASS (ACDBASSOCOSNAPPOINTREFACTIONPARAM);
