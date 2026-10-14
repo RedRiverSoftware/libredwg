@@ -318,6 +318,8 @@ main (int argc, char *argv[])
                 out_dat.version = R_2010;
               if (dwg_encode (&dwg, &out_dat) >= DWG_ERR_CRITICAL)
                 exit (0);
+              dwg_free (&dwg);
+              memset (&dwg, 0, sizeof (Dwg_Data));
               if (dwg_decode (&out_dat, &dwg) >= DWG_ERR_CRITICAL)
                 exit (0);
               free (out_dat.chain);
@@ -396,6 +398,9 @@ main (int argc, char *argv[])
         default:
           exit (1);
         }
+      // the next iteration decodes into dwg again
+      dwg_free (&dwg);
+      memset (&dwg, 0, sizeof (Dwg_Data));
       free (out_dat.chain);
       fclose (out_dat.fh);
     }

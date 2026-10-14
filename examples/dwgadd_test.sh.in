@@ -187,16 +187,7 @@ if [ -z "$DISABLE_DXF" ]; then
     echo "readdxf \"dwgadd_test.dxf\"" >$tmp
     echo "point (10 0 0)" >>$tmp
     cat $tmp
-    if [ "$HAVE_ASAN" = "yes" ]
-    then
-        # indxf still leaks, GH #151. env cannot run the dwgaddtest function,
-        # so set ASAN_OPTIONS in a subshell, which dwgaddtest's exit 1 leaves.
-        ( ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
-          export ASAN_OPTIONS
-          dwgaddtest AC1015 r2000 $tmp ) || exit 1
-    else
-        dwgaddtest AC1015 r2000 $tmp
-    fi
+    dwgaddtest AC1015 r2000 $tmp
 fi
 
 if [ -z "$DISABLE_DXF" ] && [ -z "$DISABLE_JSON" ]; then

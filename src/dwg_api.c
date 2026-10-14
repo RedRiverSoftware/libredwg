@@ -30894,6 +30894,8 @@ dwg_add_PDFUNDERLAY (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
     // name = "dxf - 1";
     // search/register in NOD
     base = split_filepath (filename, &ext);
+    if (!base)
+      return NULL;
     snprintf (name, 80, "%d", i);
     snprintf (base_1, 80, "%s - %d", base, i);
     defsref = dwg_find_dictionary (dwg, "ACAD_PDFDEFINITIONS");
@@ -30941,6 +30943,7 @@ dwg_add_PDFUNDERLAY (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
         if (!def) // matching def + dict not found, add entry
           dwg_add_DICTIONARY_item (_dict, base_1, 0);
       }
+    free (base);
     if (!def)
       {
         API_ADD_OBJECT (PDFDEFINITION);

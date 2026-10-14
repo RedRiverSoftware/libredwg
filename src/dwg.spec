@@ -617,7 +617,8 @@ DWG_ENTITY (BLOCK)
   }
   VERSIONS (R_2_0b, R_11) {
     FIELD_2RD (base_pt, 10);
-    if (R11OPTS (2))
+    // the DXF importer sets it without the opts bit
+    if (R11OPTS (2) || IF_IS_FREE)
       FIELD_TV (xref_pname, 1);
     if (R11OPTS (4)) {
       FIELD_TV (name, 2);
@@ -707,6 +708,9 @@ DWG_ENTITY (BLOCK)
   SINCE (R_13b1) {
     BLOCK_NAME (name, 2) // special pre-R13 naming rules
     COMMON_ENTITY_HANDLE_DATA;
+    FREE { // the DXF importer sets it
+      FIELD_TV (xref_pname, 1);
+    }
   }
 #endif
 
@@ -2665,6 +2669,11 @@ DWG_ENTITY (SPLINE)
     FIELD_3BD (end_tan_vec, 13);
     FIELD_BL (num_fit_pts, 0);
     FIELD_3DPOINT_VECTOR (fit_pts, num_fit_pts, 11);
+#ifdef IS_FREE
+    // the DXF importer sets them also for a fit-point spline
+    FIELD_VECTOR (knots, BD, num_knots, 40);
+    END_REPEAT (ctrl_pts);
+#endif
   }
 
   COMMON_ENTITY_HANDLE_DATA;
@@ -2975,6 +2984,9 @@ DWG_ENTITY (MTEXT)
               }
           }
       }
+  }
+  FREE { // the DXF importer sets them for any version and column type
+    FIELD_VECTOR (column_heights, BD, num_column_heights, 46);
   }
   COMMON_ENTITY_HANDLE_DATA;
 DWG_ENTITY_END
@@ -3707,6 +3719,9 @@ DWG_TABLE (LTYPE)
       }
     } // r2007
   } // r13
+  FREE { // the DXF importer sets it for every version
+    FIELD_BINARY (strings_area, 256, 0);
+  }
 
   SINCE (R_13b1) {
     START_OBJECT_HANDLE_STREAM;

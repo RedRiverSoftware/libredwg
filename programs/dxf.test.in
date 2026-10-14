@@ -27,13 +27,7 @@ elif [ -n "$TESTS_ENVIRONMENT" ]; then
 else
     TESTPROG="@LTEXEC@"
 fi
-# shellcheck disable=SC2157
-if [ -n "@HAVE_ASAN@" ]
-then
-    DXF2DWG="env ASAN_OPTIONS=detect_leaks=0 $TESTPROG ./dxf2dwg${EXEEXT}"
-else
-    DXF2DWG="$TESTPROG ./dxf2dwg${EXEEXT}"
-fi
+DXF2DWG="$TESTPROG ./dxf2dwg${EXEEXT}"
 HAVE_ODA="@HAVE_ODA@"
 ODAFileConverter="@ODAFILECONVERTER@"
 if [ -n "$HAVE_ODA" ]; then
@@ -88,9 +82,26 @@ convert_year_dxf() {
     esac
 }
 
+# Converts $dwg to $tgt with dwg2dxf and the given options. A non-zero exit,
+# such as a crash or a sanitizer report, counts as a failure, with stderr in
+# the log.
+dwg2dxf_tgt() {
+    errlog="$(basename "$tgt" .dxf).dwg2dxf.log"
+    rm -f "$tgt"
+    $TESTPROG "./dwg2dxf${EXEEXT}" -y "$@" -o "$tgt" "$dwg" >/dev/null 2>"$errlog"
+    ret=$?
+    if [ "$ret" -ne 0 ]; then
+        echo "dwg2dxf $* -o $tgt $dwg failed with $ret"
+        tail -n 40 "$errlog"
+        i=$((i+1))
+        return 1
+    fi
+    rm -f "$errlog"
+}
+
 check_subentity() {
     if [ -f "$dwg" ] && [ -f "$dxf" ]; then
-        $TESTPROG "./dwg2dxf${EXEEXT}" -y -v4 -o "$tgt" "$dwg" 2>/dev/null
+        dwg2dxf_tgt -v4 || return
         grep -A8 ^VERTEX "$dxf" >tmp1
         grep -A8 ^VERTEX "$tgt" >tmp2
         d="$(diff -b -U1 tmp1 tmp2)"
@@ -160,7 +171,7 @@ done
 
 check_acdb_dxfname() {
     if [ -f "$dwg" ] && [ -f "$dxf" ]; then
-        $TESTPROG "./dwg2dxf${EXEEXT}" -y -v0 -o "$tgt" "$dwg" 2>/dev/null >/dev/null
+        dwg2dxf_tgt -v0 || return
         expect="$(grep -c "^$dxfname" "$dxf")"
         if [ -n "$1" ]; then expect="$1"; fi
         got=$(grep -c "^$dxfname" "$tgt")
@@ -222,7 +233,7 @@ done
 # check vertex - seqend order
 check_pline_order() {
     if [ -f "$dwg" ] && [ -f "$dxf" ]; then
-        $TESTPROG "./dwg2dxf${EXEEXT}" -y -v0 -o "$tgt" "$dwg" 2>/dev/null >/dev/null
+        dwg2dxf_tgt -v0 || return
         got="$(grep -E '^(POLYLINE|VERTEX|SEQEND)' "$tgt")"
         expect="$(grep -E '^(POLYLINE|VERTEX|SEQEND)' "$dxf")"
         if [ "$got" = "$expect" ]
@@ -239,7 +250,7 @@ check_pline_order() {
 # check insert - attrib - seqend order
 check_insert_order() {
     if [ -f "$dwg" ] && [ -f "$dxf" ]; then
-        $TESTPROG "./dwg2dxf${EXEEXT}" -y -v0 -o "$tgt" "$dwg" 2>/dev/null >/dev/null
+        dwg2dxf_tgt -v0 || return
         got="$(grep -E '^(INSERT|ATTRIB|SEQEND)' "$tgt")"
         expect="$(grep -E '^(INSERT|ATTRIB|SEQEND)' "$dxf")"
         if [ "$got" = "$expect" ]
@@ -265,10 +276,14 @@ check_roundtrip() {
             echo "dwg2dxf $dwg failed"
             exit 1
         fi
-        if ! $DXF2DWG -y -v0 -o "$tgt" "$dxf" 2>/dev/null >/dev/null; then
-            echo "$DXF2DWG -y -v0 -o $tgt $dxf failed with $?"
+        $DXF2DWG -y -v0 -o "$tgt" "$dxf" 2>"$tgt.dxf2dwg.log" >/dev/null
+        ret=$?
+        if [ "$ret" -ne 0 ]; then
+            echo "$DXF2DWG -y -v0 -o $tgt $dxf failed with $ret"
+            tail -n 40 "$tgt.dxf2dwg.log"
             exit 1
         fi
+        rm -f "$tgt.dxf2dwg.log"
         if ! $TESTPROG "./dwgread${EXEEXT}" -v2 "$tgt" 2>"$log2" >/dev/null; then
             echo "dwgread $tgt failed with $?"
             exit 1

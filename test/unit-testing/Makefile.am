@@ -427,6 +427,7 @@ endif
 endif
 if USE_WRITE
 check_minimal += color_test$(EXEEXT)
+check_minimal += indxf_test$(EXEEXT)
 check_minimal += svg_api_test$(EXEEXT)
 endif
 
@@ -453,16 +454,9 @@ TESTS = $(check_PROGRAMS)
 if HAVE_PERL
 TESTS += check-objects.pl
 endif
-if HAVE_ASAN
-TESTS_ENVIRONMENT = \
-  @AM_TESTS_ENVIRONMENT@ \
-  top_srcdir="$(top_srcdir)" \
-  ASAN_OPTIONS="detect_leaks=0"
-else
 TESTS_ENVIRONMENT = \
   @AM_TESTS_ENVIRONMENT@ \
   top_srcdir="$(top_srcdir)"
-endif
 
 check-minimal: $(check_minimal)
 	$(MAKE) check check_PROGRAMS="$(check_minimal)"

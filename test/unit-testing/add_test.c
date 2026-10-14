@@ -1590,6 +1590,7 @@ test_names (void)
   if (!dwg_is_valid_name (dwg, "\xa3\xc1"))
     fail ("dwg_is_valid_name(A3C1) U+FF21 LETTER CP949/r2000");
   dwg_free (dwg);
+  free (dwg);
 
   dwg = dwg_new_Document (R_2007, 0, tracelevel);
   dwg->header.codepage = CP_ANSI_1253; // ANSI Greek
@@ -1628,6 +1629,7 @@ test_names (void)
     fail ("dwg_is_valid_name (\"0\") ANSI_949/r2007");
 
   dwg_free (dwg);
+  free (dwg);
   if (!numfailed ())
     ok ("names");
   return numfailed ();
