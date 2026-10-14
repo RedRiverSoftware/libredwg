@@ -326,6 +326,66 @@ remove_NOD_item_null_itemhandles_test (void)
   ok ("remove_NOD_item: survives NULL itemhandles with numitems > 0");
 }
 
+static int
+string_bit (const unsigned char *s, size_t pos)
+{
+  return (s[pos / 8] >> (7 - pos % 8)) & 1;
+}
+
+/* The bits of an object decoded into unknown_bits or unknown_rest encode
+   back to the same bits, those of a partial last byte too. */
+static void
+unknown_bits_round_trip_test (void)
+{
+  static const unsigned char src[] = { 0xCA, 0x5B, 0xE7, 0x3C };
+  Dwg_Data dwg;
+  memset (&dwg, 0, sizeof (dwg));
+  dwg.header.version = dwg.header.from_version = R_2000;
+
+  for (unsigned numbits = 1; numbits <= 24; numbits++)
+    for (int rest = 0; rest <= 1; rest++)
+      {
+        const char *what = rest ? "unknown_rest" : "unknown_bits";
+        // unknown_rest runs to bitsize, unknown_bits to the object's end
+        const size_t start = rest ? numbits % 5 : 8 * sizeof (src) - numbits;
+        Dwg_Object obj;
+        Bit_Chain dat, out;
+        unsigned wrong = numbits;
+        int error;
+
+        memset (&obj, 0, sizeof (obj));
+        obj.parent = &dwg;
+        obj.size = sizeof (src);
+        obj.bitsize = (BITCODE_RL)(start + numbits);
+        bitprepare (&dat, sizeof (src));
+        memcpy (dat.chain, src, sizeof (src));
+        bit_set_position (&dat, start);
+        error = rest ? dwg_decode_unknown_rest (&dat, &obj)
+                     : dwg_decode_unknown_bits (&dat, &obj);
+
+        bitprepare (&out, sizeof (src) + 1);
+        bit_advance_position (&out, 3);
+        if (rest)
+          dwg_encode_unknown_rest (&out, &obj);
+        else
+          dwg_encode_unknown_bits (&out, &obj);
+        for (unsigned i = 0; i < numbits && wrong == numbits; i++)
+          if (string_bit (out.chain, 3 + i) != string_bit (src, start + i))
+            wrong = i;
+        if (!error && wrong == numbits && bit_position (&out) == 3 + numbits)
+          ok ("%s: %u bits encode as decoded", what, numbits);
+        else
+          fail ("%s: %u bits encode as decoded: error %d, bit %u differs, "
+                "%u bits written",
+                what, numbits, error, wrong,
+                (unsigned)(bit_position (&out) - 3));
+        free (obj.unknown_bits);
+        free (obj.unknown_rest);
+        bitfree (&dat);
+        bitfree (&out);
+      }
+}
+
 int
 main (int argc, char const *argv[])
 {
@@ -342,5 +402,6 @@ main (int argc, char const *argv[])
   compress_R2004_section_tests ();
   common_entity_handle_data_double_free_test ();
   remove_NOD_item_null_itemhandles_test ();
+  unknown_bits_round_trip_test ();
   return failed;
 }
