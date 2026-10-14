@@ -1486,8 +1486,8 @@ box_add (double *lo, double *hi, const double x, const double y)
 static int
 hatch_box (const Dwg_Entity_HATCH *_obj, double *lo, double *hi)
 {
-  lo[0] = lo[1] = INFINITY;
-  hi[0] = hi[1] = -INFINITY;
+  lo[0] = lo[1] = HUGE_VAL;
+  hi[0] = hi[1] = -HUGE_VAL;
   for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
     {
       const Dwg_HATCH_Path *path = &_obj->paths[i];
@@ -1970,7 +1970,7 @@ is_at (const BITCODE_3BD *a, const BITCODE_3BD *b)
   return a->x == b->x && a->y == b->y && a->z == b->z;
 }
 
-/* Plans the LINEAR values of list, given in linear (NAN where not given),
+/* Plans the LINEAR values of list, given in linear (a NaN where not given),
    for definition _def, whose evaluation graph is graph, into
    plan->moves. */
 static int
@@ -2313,7 +2313,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       goto done;
     }
   // the visibility state chosen for each property, + 1, or 0; and the
-  // LINEAR value, or NAN
+  // LINEAR value, or a NaN
   state = (BITCODE_BL *)calloc (list.count + 1, sizeof (BITCODE_BL));
   linear = (double *)malloc ((list.count + 1) * sizeof (double));
   if (!state || !linear)
@@ -2322,7 +2322,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       goto done;
     }
   for (BITCODE_BL j = 0; j < list.count; j++)
-    linear[j] = NAN;
+    linear[j] = nan ("");
   for (BITCODE_BL i = 0; i < num_values; i++)
     {
       const Dwg_DynValue *v = &values[i];
