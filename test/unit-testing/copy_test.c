@@ -309,8 +309,9 @@ compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
   compare_handle (c, name, ta, tb);
 }
 
-/* Whether b is a without its bytes from 0x80 up, and a has some: the loss
-   a document built with the add API reads back, see ADD_API_ACAD_APPID. */
+/* Whether b equals a with a's bytes from 0x80 up removed, and a has at
+   least one: the loss a document built with the add API reads back, see
+   ADD_API_ACAD_APPID. */
 static int
 lost_non_ascii (const char *a, const char *b)
 {
