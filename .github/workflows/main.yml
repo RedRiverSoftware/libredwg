@@ -34,7 +34,7 @@ jobs:
           - --enable-gcov --disable-bindings --disable-docs CFLAGS="-O0 -g"
           - --disable-write --disable-docs
           - --host=i686-linux-gnu --disable-bindings --disable-docs
-          - CFLAGS="-O2 -fno-omit-frame-pointer -fsanitize=undefined -fno-var-tracking" --disable-bindings --disable-docs --enable-check-less
+          - CFLAGS="-O2 -fno-omit-frame-pointer -fsanitize=undefined -fno-sanitize-recover=undefined -fno-var-tracking" --disable-bindings --disable-docs
           - --enable-debug
     steps:
     - if: ${{ startsWith(github.ref, 'refs/tags/') }}
@@ -91,23 +91,28 @@ jobs:
     - run: ./configure ${{ matrix.CONFIGURE_ARGS }}
     - if: ${{ !contains(matrix.CONFIGURE_ARGS, '--enable-release') }}
       run: make -j
-    - if: ${{ !contains(matrix.CONFIGURE_ARGS, '--enable-gcov') &&
-              !contains(matrix.CONFIGURE_ARGS, '--enable-release') &&
+    - if: ${{ !contains(matrix.CONFIGURE_ARGS, '--enable-release') &&
               !contains(matrix.CONFIGURE_ARGS, '--enable-debug') &&
               (startsWith(github.ref, 'refs/heads/') ||
-               github.event_name == 'pull_request') }}
+               github.event_name == 'pull_request' ||
+               contains(matrix.CONFIGURE_ARGS, '--enable-gcov')) }}
       run: make -j check
     #  run: |
     #    python -m pip install cpp-coveralls
     #    make gcov
     #    coveralls -e test -e bindings
     - if: contains(matrix.CONFIGURE_ARGS, '--enable-gcov')
+      id: codecov-token
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      run: echo "set=${CODECOV_TOKEN:+yes}" >> "$GITHUB_OUTPUT"
+    # Codecov rejects uploads without a token: skip the upload where none is set.
+    - if: steps.codecov-token.outputs.set == 'yes'
       timeout-minutes: 65
       name: Run make codecov if --enable-gcov
       env:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       run: make codecov
-      continue-on-error: true
     - if: contains(matrix.CONFIGURE_ARGS, '--enable-release')
       name: Run make distcheck if --enable-release
       run: |
@@ -141,8 +146,12 @@ jobs:
     - run: CC="ccache powerpc64-linux-gnu-gcc" ./configure --host=powerpc64-linux-gnu --disable-bindings --disable-python
     - run: make -j
     - run: cd /lib64 && sudo ln -s /usr/powerpc64-linux-gnu/lib/ld64.so.1
-    - run: make -j check-minimal
-      continue-on-error: true
+    # Big-endian reading and writing are broken, so these tests are expected
+    # to fail here (P1-09-FU3). One that passes (XPASS) fails the job.
+    - run: make -C programs check-minimal XFAIL_TESTS="alive.test"
+    - run: >-
+        make -C test/unit-testing check-minimal
+        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test fields_test copy_test color_test"
   mips32-big-endian:
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -262,9 +271,8 @@ jobs:
         submodules: recursive
     - shell: msys2 {0}
       run: sh ./autogen.sh
-      continue-on-error: true
     - shell: msys2 {0}
-      run: ./configure --disable-dependency-tracking --enable-check-less
+      run: ./configure --disable-dependency-tracking
     - shell: msys2 {0}
       run: make -j
     - if: failure()

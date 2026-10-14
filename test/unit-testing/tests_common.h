@@ -66,8 +66,8 @@ static void ATTRIBUTE_FORMAT (1, 2) fail (const char *fmt, ...)
   va_start (ap, fmt);
   vsnprintf (buffer, sizeof (buffer), fmt, ap);
   va_end (ap);
-  if (loglevel >= 2)
-    printf ("not ok %d\t# %s\n", ++num, buffer);
+  // always, as reading a DWG resets loglevel to the DWG's
+  printf ("not ok %d\t# %s\n", ++num, buffer);
 }
 
 #if 1
@@ -79,8 +79,7 @@ void ATTRIBUTE_FORMAT (1, 2) todo (const char *fmt, ...)
   va_start (ap, fmt);
   vsnprintf (buffer, sizeof (buffer), fmt, ap);
   va_end (ap);
-  if (loglevel >= 2)
-    printf ("not ok %d\t# TODO %s\n", ++num, buffer);
+  printf ("not ok %d\t# TODO %s\n", ++num, buffer);
   passed++;
 }
 #endif

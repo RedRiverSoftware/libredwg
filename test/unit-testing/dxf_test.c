@@ -36,6 +36,18 @@ int g_counter;
 int g_max_count;
 int g_all;
 
+/* Classes whose objects are known to differ from AutoCAD's DXF, mostly in
+   how this test maps DXF groups to fields (P1-09-FU2). Their failures count
+   as TODO. Once all their tested objects match, the test fails, so that the
+   class is turned back into a strict check. */
+#define KNOWN_FAILURES_TASK "P1-09-FU2"
+static const char *const known_failures[]
+    = { "ACSH_CHAMFER_CLASS", "BLOCKSTRETCHACTION", "TABLESTYLE" };
+#define NUM_KNOWN_FAILURES                                                    \
+  (sizeof (known_failures) / sizeof (known_failures[0]))
+static unsigned known_tested[NUM_KNOWN_FAILURES];
+static unsigned known_failed[NUM_KNOWN_FAILURES];
+
 void object_alias (char *restrict name);
 void entity_alias (char *restrict name);
 ATTRIBUTE_MALLOC char *dwg_dynapi_subclass_name (const char *restrict type);
@@ -84,13 +96,8 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
             fail ("%s[%d].%s: %d <=> \"%s\" [%s]", fieldname, index, key,
                   (int)color.index, f->value, field.type);
           else
-            {
-              if (g_counter > g_max_count)
-                pass ();
-              else
-                ok ("%s[%d].%s: %d <=> \"%s\" [CMC] (TODO)", fieldname, index,
-                    key, (int)color.index, f->value);
-            }
+            fail ("%s[%d].%s: %d <=> \"%s\" [CMC]", fieldname, index, key,
+                  (int)color.index, f->value);
         }
       return;
     }
@@ -249,13 +256,8 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
               fail ("%s[%d].%s: %d <=> \"%s\" [INT8 %s]", fieldname, index,
                     key, value, f->value, field.type);
             else
-              {
-                if (g_counter > g_max_count)
-                  pass ();
-                else
-                  ok ("%s[%d].%s: %d <=> \"%s\" [INT8] (TODO)", fieldname,
-                      index, key, value, f->value);
-              }
+              fail ("%s[%d].%s: %d <=> \"%s\" [INT8]", fieldname, index, key,
+                    value, f->value);
           }
       }
       break;
@@ -277,13 +279,8 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
               fail ("%s[%d].%s: %d <=> \"%s\" [INT16 %s]", fieldname, index,
                     key, (int)value, f->value, field.type);
             else
-              {
-                if (g_counter > g_max_count)
-                  pass ();
-                else
-                  ok ("%s[%d].%s: %d <=> \"%s\" [INT16] (TODO)", fieldname,
-                      index, key, (int)value, f->value);
-              }
+              fail ("%s[%d].%s: %d <=> \"%s\" [INT16]", fieldname, index, key,
+                    (int)value, f->value);
           }
       }
       break;
@@ -314,13 +311,8 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
               fail ("%s[%d].%s: %u <=> \"%s\" [INT32 %s]", fieldname, index,
                     key, (unsigned)value, f->value, field.type);
             else
-              {
-                if (g_counter > g_max_count)
-                  pass ();
-                else
-                  ok ("%s[%d].%s: %u <=> \"%s\" [INT32] (TODO)", fieldname,
-                      index, key, (unsigned)value, f->value);
-              }
+              fail ("%s[%d].%s: %u <=> \"%s\" [INT32]", fieldname, index, key,
+                    (unsigned)value, f->value);
           }
       }
       break;
@@ -338,17 +330,9 @@ test_subclass (const Dwg_Data *restrict dwg, const void *restrict ptr,
                 else
                   ok ("%s[%d].%s: %ld", fieldname, index, key, (long)value);
               }
-            else if (field.type)
+            else
               fail ("%s[%d].%s: %ld <=> \"%s\" [INT64]", fieldname, index, key,
                     (long)value, f->value);
-            else
-              {
-                if (g_counter > g_max_count)
-                  pass ();
-                else
-                  ok ("%s[%d].%s: %ld <=> \"%s\" [INT64] (TODO)", fieldname,
-                      index, key, (long)value, f->value);
-              }
           }
       }
       break;
@@ -501,13 +485,8 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
                 fail ("%s.%s: %d <=> \"%s\" [%s %d]", name, f->name,
                       (int)color.index, f->value, field.type, field.dxf);
               else
-                {
-                  if (g_counter > g_max_count)
-                    pass ();
-                  else
-                    ok ("%s.%s: %d <=> \"%s\" [CMC] (TODO)", name, f->name,
-                        (int)color.index, f->value);
-                }
+                fail ("%s.%s: %d <=> \"%s\" [CMC]", name, f->name,
+                      (int)color.index, f->value);
             }
           continue;
         }
@@ -663,13 +642,8 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
                   fail ("%s.%s: %d <=> \"%s\" [%s %d] INT8", name, f->name,
                         value, f->value, field.type, field.dxf);
                 else
-                  {
-                    if (g_counter > g_max_count)
-                      pass ();
-                    else
-                      ok ("%s.%s: %d <=> \"%s\" INT8 (TODO)", name, f->name,
-                          value, f->value);
-                  }
+                  fail ("%s.%s: %d <=> \"%s\" INT8", name, f->name, value,
+                        f->value);
               }
           }
           break;
@@ -694,13 +668,8 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
                   fail ("%s.%s: %d <=> \"%s\" [%s %d] INT16", name, f->name,
                         (int)value, f->value, field.type, field.dxf);
                 else
-                  {
-                    if (g_counter > g_max_count)
-                      pass ();
-                    else
-                      ok ("%s.%s: %d <=> \"%s\" INT16 (TODO)", name, f->name,
-                          (int)value, f->value);
-                  }
+                  fail ("%s.%s: %d <=> \"%s\" INT16", name, f->name,
+                        (int)value, f->value);
               }
           }
           break;
@@ -733,13 +702,8 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
                   fail ("%s.%s: %u <=> \"%s\" [%s %d] INT32", name, f->name,
                         (unsigned)value, f->value, field.type, field.dxf);
                 else
-                  {
-                    if (g_counter > g_max_count)
-                      pass ();
-                    else
-                      ok ("%s.%s: %u <=> \"%s\" INT32 (TODO)", name, f->name,
-                          (unsigned)value, f->value);
-                  }
+                  fail ("%s.%s: %u <=> \"%s\" INT32", name, f->name,
+                        (unsigned)value, f->value);
               }
           }
           break;
@@ -764,13 +728,8 @@ test_object (const Dwg_Data *restrict dwg, const Dwg_Object *restrict obj,
                   fail ("%s.%s: %ld <=> \"%s\" [%s %d] INT64", name, f->name,
                         (long)value, f->value, field.type, field.dxf);
                 else
-                  {
-                    if (g_counter > g_max_count)
-                      pass ();
-                    else
-                      ok ("%s.%s: %ld <=> \"%s\" INT64 (TODO)", name, f->name,
-                          (long)value, f->value);
-                  }
+                  fail ("%s.%s: %ld <=> \"%s\" INT64", name, f->name,
+                        (long)value, f->value);
               }
           }
           break;
@@ -851,7 +810,27 @@ test_dxf (const struct _unknown_dxf *dxf, const char *restrict name,
           if (strNE (dwg.object[i].dxfname, dxf->name))
             LOG_WARN ("Invalid handle 0x%X for %s", dxf->handle, dxf->name);
           else
-            error += test_object (&dwg, &dwg.object[i], dxf, name);
+            {
+              unsigned k;
+              error += test_object (&dwg, &dwg.object[i], dxf, name);
+              for (k = 0; k < NUM_KNOWN_FAILURES; k++)
+                if (strEQ (dxf->name, known_failures[k]))
+                  break;
+              if (k < NUM_KNOWN_FAILURES)
+                {
+                  known_tested[k]++;
+                  if (error)
+                    {
+                      known_failed[k]++;
+                      todo ("%s %X in %s: %d known failures (%s)", dxf->name,
+                            dxf->handle, dxf->dxf, error, KNOWN_FAILURES_TASK);
+                      error = 0;
+                    }
+                }
+              else if (error)
+                printf ("# %s %X in %s: %d failed\n", dxf->name, dxf->handle,
+                        dxf->dxf, error);
+            }
           break;
         }
     }
@@ -985,6 +964,14 @@ main (int argc, char *argv[])
         error += test_dxf (dxf, name, dwgfile);
       free (dwgfile);
     }
-  // so far all unknown objects are debugging or unstable. ignore all errors
-  return 0;
+  // with --class or --file only some objects of a class were tested
+  for (unsigned k = 0; !class && !file && k < NUM_KNOWN_FAILURES; k++)
+    if (known_tested[k] && !known_failed[k])
+      {
+        fail ("%s matches AutoCAD's DXF now: remove it from known_failures "
+              "(%s)",
+              known_failures[k], KNOWN_FAILURES_TASK);
+        error++;
+      }
+  return error ? 1 : 0;
 }

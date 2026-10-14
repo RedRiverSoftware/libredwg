@@ -1679,7 +1679,7 @@ mtext_parse (const char *src, double base_text_height)
         {
           /* Tabs aren't reliable in SVG.  Substitute four spaces — matches
              the visual width that engineering-note MTEXTs are built around
-             (e.g. "SC3-1 & 2:[TAB]CT CABLING…"). */
+             (e.g. "1.[TAB]NOTE TEXT…"). */
           mtext_buf_append (&p.buf, "    ", 4);
           i++;
           continue;
@@ -1931,8 +1931,8 @@ output_MTEXT (Dwg_Object *obj)
   ty = transform_Y (pt.y);
 
   /* Fast path: a single run with no style overrides produces byte-equal
-     output to the legacy renderer.  Most simple labels (e.g. NEWCL.dwg's
-     "CL") and ByLayer-only J607 notes hit this path. */
+     output to the legacy renderer.  Labels and notes that fit on one
+     line, with no inline formatting, hit this path. */
   if (runs.count <= 1
       && (runs.count == 0 || mtext_run_is_plain (&runs.runs[0])))
     {
@@ -3092,7 +3092,7 @@ static void
 output_SPLINE (Dwg_Object *obj)
 {
   Dwg_Entity_SPLINE *spline = obj->tio.entity->tio.SPLINE;
-  /* The DWG model space in LRPS1_LAYOUT carries 4961 splines, most of
+  /* A large drawing's model space can carry thousands of splines, most of
      which need at most ~50 samples; this static buffer is comfortably
      larger than any reasonable control polygon and avoids a per-call
      malloc.  Thread-local because dwg2SVG can be linked into a library
@@ -5010,8 +5010,8 @@ compute_entity_extents (Extents *ext, Dwg_Object *obj)
            ins_pt is already in the parent's coordinate system), not in
            the block-local frame, so they aren't covered by the block
            bounding box above and must be added separately.  Without this
-           pass, long or rotated ATTRIB labels (e.g. vertical "ESTOP",
-           "LIQUOR RETURN PUMP" tags) get clipped by the viewBox. */
+           pass, long or rotated ATTRIB labels (e.g. a vertical tag, or a
+           long description) get clipped by the viewBox. */
         if (insert->has_attribs && insert->num_owned > 0
             && insert->attribs)
           {
@@ -5248,9 +5248,9 @@ table_name_is (const Dwg_Data *dwg, char *name, const char *want)
 static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
 
 /* Zoom-extents framing breaks down when a drawing scatters geometry
-   absurdly far apart — e.g. a GA drawn at Ordnance-Survey millimetre
-   coordinates (~5.5e8) plus a leftover title block near the origin.  The
-   viewBox then spans hundreds of kilometres and every entity shrinks to a
+   absurdly far apart — e.g. a site plan drawn in millimetres at map-grid
+   coordinates (~1e8 and up) plus a stray block near the origin.  The
+   viewBox then spans 100 km or more and every entity shrinks to a
    sub-pixel speck.  AutoCAD and TrueView look fine on such files only
    because they open the drawing's saved model view: the "*Active" VPORT
    table entry.  When the computed extents dwarf that saved view by more
@@ -5259,7 +5259,7 @@ static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
    authored drawings stay on fit-to-content extents framing. */
 /* 1000: an author plausibly saves zoomed ~100x into a detail of a large
    drawing, but nobody works at 1000x — beyond that the extents are junk
-   (the motivating file breaches by ~11,500x). */
+   (the example above, against a saved view 20 m across, is 5000x or more). */
 #define VPORT_RESCUE_RATIO 1000.0
 
 static void
@@ -5744,8 +5744,8 @@ main (int argc, char *argv[])
   /* Default stdout buffer (typically 4 KiB) causes a flush every few
      formatted writes when the destination isn't a tty.  Large drawings
      emit tens of MiB through hundreds of thousands of printf calls; a
-     1 MiB fully-buffered stdout takes the CLI from ~27 s to ~1 s for
-     LRPS1_LAYOUT.dwg.  Has no effect on the library API (dwg_svg_api.c
+     1 MiB fully-buffered stdout makes the CLI many times faster for
+     a large drawing.  Has no effect on the library API (dwg_svg_api.c
      routes printf through its own writer callback). */
   setvbuf (stdout, NULL, _IOFBF, 1 << 20);
   memset (&g_dwg, 0, sizeof (Dwg_Data));
