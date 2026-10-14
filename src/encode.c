@@ -5779,9 +5779,8 @@ dwg_encode_unknown_bits (Bit_Chain *restrict dat, Dwg_Object *restrict obj)
       bit_write_TF (dat, obj->unknown_bits, len);
       if (mod)
         {
-          const BITCODE_TF tail = obj->unknown_bits + len;
-          for (int i = 0; i < mod; i++)
-            bit_write_B (dat, (tail[0] >> i) & 1);
+          // a partial last byte, in the bit order bit_read_bits stores it
+          bit_write_bits (dat, obj->unknown_bits + len, mod);
           len++;
         }
       LOG_TRACE ("unknown_bits: %d/%u [TF]\n", len,
@@ -6449,9 +6448,8 @@ dwg_encode_unknown_rest (Bit_Chain *restrict dat, Dwg_Object *restrict obj)
       bit_write_TF (dat, obj->unknown_rest, len);
       if (mod)
         {
-          const BITCODE_TF tail = obj->unknown_rest + len;
-          for (int i = 0; i < mod; i++)
-            bit_write_B (dat, (tail[0] >> i) & 1);
+          // a partial last byte, in the bit order bit_read_bits stores it
+          bit_write_bits (dat, obj->unknown_rest + len, mod);
           len++;
         }
       LOG_TRACE ("unknown_rest: %u/%u [TF]\n", len,
