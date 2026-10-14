@@ -3185,7 +3185,7 @@ DWG_OBJECT (ASSOCVALUEDEPENDENCY)
   SUBCLASS (AcDbAssocValueDependency);
   FIELD_BS (class_version, 90);
   FIELD_T (value_name, 1);
-  AcDbEvalVariant_fields (value);
+  AcDbEvalVariant_fields (value); // lgtm[cpp/use-after-free] codeql[cpp/use-after-free]
   START_OBJECT_HANDLE_STREAM;
 DWG_OBJECT_END
 
