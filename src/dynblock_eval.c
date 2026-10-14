@@ -1603,7 +1603,12 @@ count_value (const Dwg_DYNAPI_field *f, const void *base)
 
 /* The number of elements of array field f of the struct at base, or -1
    when there is no rule for it: num_<name>, <name>_size for binary chunks,
-   or the counts the specs keep elsewhere. */
+   or the counts the specs keep elsewhere.
+
+   A proxy entity's data is data_numbits bits long, in whole bytes: the
+   decoder leaves its data_size 0. The bits of a partial last byte that
+   bit_read_bits doesn't fill are 0, so comparing the whole byte compares
+   the bits it holds, whichever end of the byte they are at. */
 static int64_t
 array_length (const char *structname, const Dwg_DYNAPI_field *fields,
               const Dwg_DYNAPI_field *f, const void *base)
@@ -1611,21 +1616,27 @@ array_length (const char *structname, const Dwg_DYNAPI_field *fields,
   static const struct
   {
     const char *structname, *field, *count;
-  } rules[] = { { "INSERT", "attribs", "num_owned" },
-                { "MINSERT", "attribs", "num_owned" },
-                { "POLYLINE_2D", "vertex", "num_owned" },
-                { "POLYLINE_3D", "vertex", "num_owned" },
-                { "POLYLINE_MESH", "vertex", "num_owned" },
-                { "POLYLINE_PFACE", "vertex", "num_owned" },
-                { "HATCH_Path", "segs", "num_segs_or_paths" },
-                { "HATCH_Path", "polyline_paths", "num_segs_or_paths" },
-                { NULL, NULL, NULL } };
+    int bits; /* count is in bits */
+  } rules[] = { { "INSERT", "attribs", "num_owned", 0 },
+                { "MINSERT", "attribs", "num_owned", 0 },
+                { "POLYLINE_2D", "vertex", "num_owned", 0 },
+                { "POLYLINE_3D", "vertex", "num_owned", 0 },
+                { "POLYLINE_MESH", "vertex", "num_owned", 0 },
+                { "POLYLINE_PFACE", "vertex", "num_owned", 0 },
+                { "HATCH_Path", "segs", "num_segs_or_paths", 0 },
+                { "HATCH_Path", "polyline_paths", "num_segs_or_paths", 0 },
+                { "PROXY_ENTITY", "data", "data_numbits", 1 },
+                { NULL, NULL, NULL, 0 } };
   const Dwg_DYNAPI_field *count = NULL;
+  int bits = 0;
   char name[96];
   for (int i = 0; rules[i].field; i++)
     if (strEQ (structname, rules[i].structname)
         && strEQ (f->name, rules[i].field))
-      count = find_field (fields, rules[i].count);
+      {
+        count = find_field (fields, rules[i].count);
+        bits = count && rules[i].bits;
+      }
   if (!count)
     {
       snprintf (name, sizeof (name), "num_%s", f->name);
@@ -1636,7 +1647,11 @@ array_length (const char *structname, const Dwg_DYNAPI_field *fields,
       snprintf (name, sizeof (name), "%s_size", f->name);
       count = find_field (fields, name);
     }
-  return count ? (int64_t)count_value (count, base) : -1;
+  if (!count)
+    return -1;
+  if (bits)
+    return (int64_t)((count_value (count, base) + 7) / 8);
+  return (int64_t)count_value (count, base);
 }
 
 static size_t
@@ -1870,7 +1885,11 @@ compare_object (Dynblock_Compare *c, const Dwg_Object *a, const Dwg_Object *b)
       c->equivalent++;
       return;
     }
-  name = dwg_type_name (a->fixedtype);
+  // dwg_type_name gives a proxy entity its DXF name, ACAD_PROXY_ENTITY;
+  // dynapi lists its fields as PROXY_ENTITY
+  name = a->fixedtype == DWG_TYPE_PROXY_ENTITY
+             ? "PROXY_ENTITY"
+             : dwg_type_name (a->fixedtype);
   fields = name ? dwg_dynapi_entity_fields (name) : NULL;
   if (!fields)
     {

@@ -328,15 +328,15 @@ typedef struct _dwg_dynblock_check_report
    Entities compare by type, by their invisible flag, layer, colour,
    linetype flags, linetype, linetype scale, lineweight, plot style flags
    and plot style, and field by field with the dynapi field lists:
-   numbers within tolerance, strings exactly, and references by the
-   entity they point at, paired by index within the blocks, so the same
-   handle matches, whether or not it resolves. An entry of either block's
-   entity list that doesn't resolve is a difference. An array the
-   comparison has no length for, unless empty in both, counts as a
-   difference. An ELLIPSE also matches the same curve with its major axis
-   reversed, and is counted in num_equivalent. The blocks' base points
-   compare too: a difference there is a mismatch, though not of an
-   entity. EED is not compared.
+   numbers within tolerance, strings and binary data, such as a proxy
+   entity's, exactly, and references by the entity they point at, paired
+   by index within the blocks, so the same handle matches, whether or not
+   it resolves. An entry of either block's entity list that doesn't
+   resolve is a difference. An array the comparison has no length for,
+   unless empty in both, counts as a difference. An ELLIPSE also matches
+   the same curve with its major axis reversed, and is counted in
+   num_equivalent. The blocks' base points compare too: a difference there
+   is a mismatch, though not of an entity. EED is not compared.
 
    An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
    copy left out (an array or an EED group it could not copy), is a

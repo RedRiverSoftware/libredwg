@@ -1147,6 +1147,141 @@ test_check_copy_warning (Dwg_Data *dwg)
   return failures;
 }
 
+/* Turns LINE obj into a proxy entity holding numbits bits of data, with
+   data_size 0, as the decoder leaves one. Returns 0 when obj is not a LINE
+   or memory runs out. */
+static int
+line_to_proxy (Dwg_Object *obj, const unsigned char *data,
+               const BITCODE_BL numbits)
+{
+  const size_t size = ((size_t)numbits + 7) / 8;
+  Dwg_Entity_PROXY_ENTITY *proxy;
+  if (!obj || obj->fixedtype != DWG_TYPE_LINE)
+    return 0;
+  proxy = (Dwg_Entity_PROXY_ENTITY *)calloc (1,
+                                             sizeof (Dwg_Entity_PROXY_ENTITY));
+  if (!proxy)
+    return 0;
+  proxy->data = (BITCODE_RC *)malloc (size);
+  if (!proxy->data)
+    {
+      free (proxy);
+      return 0;
+    }
+  memcpy (proxy->data, data, size);
+  proxy->data_numbits = numbits;
+  proxy->proxy_id = DWG_TYPE_PROXY_ENTITY;
+  proxy->parent = obj->tio.entity;
+  // a LINE holds no pointer but its parent
+  free (obj->tio.entity->tio.LINE);
+  obj->tio.entity->tio.PROXY_ENTITY = proxy;
+  obj->type = obj->fixedtype = DWG_TYPE_PROXY_ENTITY;
+  obj->name = (char *)"PROXY_ENTITY";
+  obj->dxfname = (char *)"ACAD_PROXY_ENTITY";
+  return 1;
+}
+
+/* A proxy entity's data, which the decoder keeps as data_numbits bits with
+   data_size 0, is compared byte by byte. Here a LINE of Trees, and its
+   copy in each Trees placement's block, becomes a proxy entity with 21
+   bits of data: the same data, but for a full byte in R1's block and a bit
+   of the partial last byte in R2's. That bit, 0x08, is one bit_read_bits
+   fills whether it puts the 5 bits at the low or the high end of the
+   byte. */
+static int
+test_check_proxy (Dwg_Data *dwg)
+{
+  static const unsigned char data[] = { 0x5a, 0xc3, 0x18 };
+  static const unsigned char r1_data[] = { 0x5b, 0xc3, 0x18 };
+  static const unsigned char r2_data[] = { 0x5a, 0xc3, 0x08 };
+  const size_t n = sizeof (expected_checks) / sizeof (expected_checks[0]);
+  Dwg_Object *r1_line = first_of_type (dwg, 0xCFF7, DWG_TYPE_LINE);
+  Dwg_DynBlock_Check_Report *report;
+  BITCODE_RL idx = 0;
+  BITCODE_RLL self = 0;
+  BITCODE_BL num_trees = 0, num_found = 0;
+  int failures = 0;
+  loglevel = test_loglevel;
+  if (!r1_line || !etag (dwg, r1_line, &idx, &self)
+      || !line_to_proxy (rep_entity (dwg, TREES, idx), data, 21))
+    {
+      fail ("check proxy: fixture LINE of Trees not found");
+      return 1;
+    }
+  for (size_t i = 0; i < n; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      Dwg_Object_BLOCK_HEADER *def = NULL;
+      Dwg_DynValue *values = NULL;
+      BITCODE_BL count = 0;
+      const unsigned char *d = e->block == 0xCFF7   ? r1_data
+                               : e->block == 0xD24A ? r2_data
+                                                    : data;
+      int error = dwg_dynblock_get_values (insert_entity (dwg, e->insert),
+                                           &def, &values, &count);
+      dwg_dynblock_free_values (values, count);
+      if (error >= DWG_ERR_CRITICAL || !def || block_handle (def) != TREES)
+        continue;
+      if (!line_to_proxy (rep_entity (dwg, e->block, idx), d, 21))
+        {
+          fail ("check proxy: " FORMAT_HV " has no LINE with index %u",
+                e->block, (unsigned)idx);
+          return 1;
+        }
+      num_trees++;
+    }
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check proxy: no report");
+      return 1;
+    }
+  for (size_t i = 0; i < n; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      const Dwg_DynBlock_Check *c = find_check (report, e->insert, e->block);
+      const int differs = e->block == 0xCFF7 || e->block == 0xD24A;
+      if (!c || c->definition != TREES)
+        continue;
+      if (differs
+              ? c->status == DWG_DYNBLOCK_CHECK_MISMATCH
+                    && c->num_differing == 1 && c->reason
+                    && strstr (c->reason, "PROXY_ENTITY")
+                    && strstr (c->reason, "data differs")
+              : c->status == DWG_DYNBLOCK_CHECK_MATCH && !c->num_differing)
+        {
+          ok ("check proxy " FORMAT_HV ": %s", e->insert,
+              c->reason ? c->reason : "match");
+          num_found += differs;
+        }
+      else
+        {
+          fail ("check proxy " FORMAT_HV ": status %d, %u differ, %s; "
+                "expected %s",
+                e->insert, (int)c->status, (unsigned)c->num_differing,
+                c->reason ? c->reason : "",
+                differs ? "the data to differ" : "a match");
+          failures++;
+        }
+    }
+  // R1, R2 and R3 among them
+  if (num_trees >= 3 && num_found == 2 && report->num_mismatch == 2
+      && report->num_match == 10 - 2)
+    ok ("check proxy: %u Trees placements, 2 differ in their data",
+        (unsigned)num_trees);
+  else
+    {
+      fail ("check proxy: %u Trees placements, %u mismatch, %u match",
+            (unsigned)num_trees, (unsigned)report->num_mismatch,
+            (unsigned)report->num_match);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -1198,6 +1333,14 @@ main (int argc, char *argv[])
       return 1;
     }
   failures += test_check_copy_warning (&dwg);
+  free_dwg (&dwg);
+  error = read_dwg (fixture, &dwg);
+  if (error & ~KNOWN_ERRORS)
+    {
+      fail ("dwg_read_file 0x%x", error);
+      return 1;
+    }
+  failures += test_check_proxy (&dwg);
   free_dwg (&dwg);
   return failures ? 1 : 0;
 }
