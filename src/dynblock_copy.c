@@ -264,7 +264,7 @@ find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj)
       = control_of (dwg_get_first_object (dst, DWG_TYPE_BLOCK_CONTROL));
   size_t len, dst_len;
   const char *name = block_name (src, srcobj, &len);
-  BITCODE_BS i;
+  BITCODE_BL i;
   if (!name || !ctrl || !ctrl->entries)
     return 0;
   for (i = 0; i < ctrl->num_entries; i++)
@@ -313,7 +313,7 @@ find_record (const Dwg_Data *dst, const Dwg_Object *srcobj)
                          ? srcobj->tio.object->tio.APPID->name
                          : NULL;
   BITCODE_H extra[2] = { NULL, NULL };
-  BITCODE_BS i;
+  BITCODE_BL i;
   if (!name || !ctrl)
     return 0;
   /* the linetypes ByLayer and ByBlock aren't among the entries */
@@ -758,6 +758,12 @@ add_to_table (Dwg_Data *restrict dst, const Dwg_Object *restrict obj)
       LOG_ERROR ("dwg_dynblock_copy_block: dst has no table for %s",
                  obj->name);
       return DWG_ERR_INVALIDHANDLE;
+    }
+  if (ctrl->num_entries == 0xFFFF)
+    {
+      LOG_ERROR ("dwg_dynblock_copy_block: dst's table for %s is full",
+                 obj->name);
+      return DWG_ERR_VALUEOUTOFBOUNDS;
     }
   entries = (BITCODE_H *)realloc (ctrl->entries, (ctrl->num_entries + 1)
                                                      * sizeof (BITCODE_H));

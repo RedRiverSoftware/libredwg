@@ -81,8 +81,9 @@ extern "C" {
  *                  with something left out: DWG_ERR_INVALIDHANDLE for a
  *                  reference that could be neither matched nor copied and is
  *                  NULL in the copy, DWG_ERR_VALUEOUTOFBOUNDS for data that
- *                  could not be copied, and DWG_ERR_INVALIDEED for an EED
- *                  group whose items could not be decoded.
+ *                  could not be copied or a copy that a full table of dst
+ *                  (65535 records) could not list, and DWG_ERR_INVALIDEED
+ *                  for an EED group whose items could not be decoded.
  * @return dst's definition, or NULL when the copy was refused or failed.
  */
 EXPORT Dwg_Object_BLOCK_HEADER *
