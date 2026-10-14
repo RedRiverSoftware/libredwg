@@ -1731,8 +1731,7 @@ test_api_version (void)
   if (major + minor == i0 + i1 + i2)
     ok ("so_version %s matches major %d + minor %d", version, major, minor);
   else
-    // FIXME: change to fail() for the 0.14.0 release
-    todo ("so_version %s: %d + %d != %ld + %ld + %ld", version, major, minor,
+    fail ("so_version %s: %d + %d != %ld + %ld + %ld", version, major, minor,
           i0, i1, i2);
 
 #ifndef IS_RELEASE
