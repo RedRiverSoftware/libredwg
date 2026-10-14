@@ -1237,7 +1237,7 @@ typedef struct _dynblock_plan
 {
   const Dwg_Data *dwg;
   dwg_inthash *entities; /* def's own entities */
-  const Dwg_Object **nodes; /* the evaluation graph's nodes */
+  const Dwg_Object **nodes; /* the evaluation graph's elements */
   BITCODE_BL num_nodes;
   dwg_inthash *node_handles;
   Dynblock_Linear *linear;
@@ -1351,16 +1351,54 @@ is_parameter (const Dwg_Object *obj)
     }
 }
 
-/* Refuses action a moving points of the parameter with node id nodeid,
-   other than a linear one, when it chains its actions: AutoCAD would run
-   them too. */
+/* Whether obj is of a type of evaluation graph node whose struct starts
+   as Dynblock_Element does: a parameter, an action, a grip, a grip
+   location component or a proxy node. */
 static int
-check_chained (Dynblock_Plan *plan, const Dynblock_Action *a,
-               const BITCODE_BL nodeid)
+is_graph_element (const Dwg_Object *obj)
+{
+  BITCODE_BL n;
+  if (is_parameter (obj) || action_connections (obj, &n))
+    return 1;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLOOKUPACTION:
+    case DWG_TYPE_BLOCKALIGNMENTGRIP:
+    case DWG_TYPE_BLOCKFLIPGRIP:
+    case DWG_TYPE_BLOCKLINEARGRIP:
+    case DWG_TYPE_BLOCKLOOKUPGRIP:
+    case DWG_TYPE_BLOCKPOLARGRIP:
+    case DWG_TYPE_BLOCKROTATIONGRIP:
+    case DWG_TYPE_BLOCKVISIBILITYGRIP:
+    case DWG_TYPE_BLOCKXYGRIP:
+    case DWG_TYPE_BLOCKPROPERTIESTABLEGRIP:
+    case DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT:
+    case DWG_TYPE_DYNAMICBLOCKPROXYNODE:
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* Checks the node with node id nodeid, other than a linear parameter,
+   whose points action a moves: refuses an id the evaluation graph doesn't
+   have, and a parameter that chains its actions, as AutoCAD would run them
+   too. */
+static int
+check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
+                     const BITCODE_BL nodeid)
 {
   const Dwg_Object *obj = find_node (plan, nodeid);
+  if (!obj)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "action '%s' selects node %u, which the evaluation graph "
+                  "doesn't have",
+                  a->name, (unsigned)nodeid);
+      return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+    }
   // every parameter starts with BLOCKPARAMETER_fields
-  if (!obj || !is_parameter (obj)
+  if (!is_parameter (obj)
       || !obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
     return 0;
   set_reason (plan->reason, plan->reason_size,
@@ -1802,7 +1840,7 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
       const int k = find_linear (plan, c->bl95);
       if (k < 0 && c->indexes && c->num_indexes)
         {
-          error = check_chained (plan, a, c->bl95);
+          error = check_selected_node (plan, a, c->bl95);
           if (error)
             return error;
         }
@@ -1859,7 +1897,7 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
     {
       const int k = find_linear (plan, _a->actions[i]);
       if (k < 0)
-        error = check_chained (plan, a, _a->actions[i]);
+        error = check_selected_node (plan, a, _a->actions[i]);
       else
         {
           Dynblock_Linear *q = &plan->linear[k];
@@ -2078,7 +2116,7 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
     {
       const Dwg_Object *obj
           = ref_object (plan->dwg, _graph->nodes[i].evalexpr);
-      if (obj)
+      if (obj && is_graph_element (obj))
         {
           plan->nodes[plan->num_nodes++] = obj;
           hash_set (plan->node_handles, obj->handle.value, 1);

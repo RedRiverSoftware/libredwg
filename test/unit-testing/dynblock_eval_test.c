@@ -1762,8 +1762,8 @@ test_stretch_whole (Dwg_Data *dwg)
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
   if (!line || !arc || !circle || !mirrored || !ellipse || !elliptical_arc
-      || !spline || !text || !unstored || !centred || !attdef || !mtext || !insert
-      || !attrib || !boundary || !lwpline || !crossing || !point)
+      || !spline || !text || !unstored || !centred || !attdef || !mtext
+      || !insert || !attrib || !boundary || !lwpline || !crossing || !point)
     {
       fail ("stretch whole: could not add the entities");
       return 1;
@@ -1960,29 +1960,95 @@ test_move (Dwg_Data *dwg)
   return failures;
 }
 
-/* A parameter of another kind than linear that an action moves, and that
-   chains its actions, would run them: here the Door's flip parameter
-   'swing', which MoveSwing moves, and which 'Stretch' is made to move. */
+/* Appends node id nodeid to the parameters move action a moves. */
 static int
-test_chained (Dwg_Data *dwg)
+add_move_node (Dwg_Object_BLOCKMOVEACTION *a, const BITCODE_BL nodeid)
+{
+  BITCODE_BL *actions = (BITCODE_BL *)realloc (
+      a->actions, (a->num_actions + 1) * sizeof (BITCODE_BL));
+  if (!actions)
+    return 0;
+  a->actions = actions;
+  actions[a->num_actions++] = nodeid;
+  return 1;
+}
+
+/* The nodes of the Door's graph that its actions select: an id the graph
+   doesn't have is refused, and a graph entry that is no element of the
+   graph, here its PLACEHOLDER, is not taken for one. A parameter of
+   another kind than linear that an action moves, and that chains its
+   actions, would run them: here the Door's flip parameter 'swing', which
+   MoveSwing moves, and which 'Stretch' is made to move. */
+static int
+test_selected_nodes (Dwg_Data *dwg)
 {
   Dwg_Object *swing
       = graph_node (dwg, DOOR, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
   Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
   Dwg_Object_BLOCKSTRETCHACTION *stretch
       = stretch_action (dwg, DOOR, "Stretch");
+  Dwg_Object_EVALUATION_GRAPH *graph = definition_graph (dwg, DOOR);
+  Dwg_Object *placeholder = NULL;
   Dwg_Object_BLOCKFLIPPARAMETER *_swing;
   Dwg_DynValue v;
   int failures = 0;
   memset (&v, 0, sizeof (v));
-  if (!swing || !move || !stretch)
+  for (BITCODE_BL i = 0; i < dwg->num_objects && !placeholder; i++)
+    if (dwg->object[i].fixedtype == DWG_TYPE_PLACEHOLDER)
+      placeholder = &dwg->object[i];
+  if (!swing || !move || !stretch || !graph || !graph->nodes
+      || !placeholder)
     {
-      fail ("chained: fixture objects not found");
+      fail ("selected nodes: fixture objects not found");
       return 1;
     }
-  _swing = swing->tio.object->tio.BLOCKFLIPPARAMETER;
   v.name = (char *)"Wall Thickness";
   v.value = 6.0;
+
+  if (add_stretch_code (stretch, 99999, 1))
+    {
+      failures += test_refusal (dwg, DOOR, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a stretch of a node the graph doesn't have");
+      pop_stretch_code (stretch);
+    }
+  if (add_move_node (move, 99999))
+    {
+      failures += test_refusal (dwg, DOOR, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a move of a node the graph doesn't have");
+      move->num_actions--;
+    }
+
+  // a flip grip, made the PLACEHOLDER
+  {
+    BITCODE_BL grip = graph->num_nodes;
+    for (BITCODE_BL i = 0; i < graph->num_nodes && grip == graph->num_nodes;
+         i++)
+      {
+        const Dwg_Object *obj = dwg_ref_object (dwg, graph->nodes[i].evalexpr);
+        if (obj && obj->fixedtype == DWG_TYPE_BLOCKFLIPGRIP)
+          grip = i;
+      }
+    if (grip < graph->num_nodes)
+      {
+        BITCODE_H node = graph->nodes[grip].evalexpr;
+        graph->nodes[grip].evalexpr
+            = dwg_add_handleref (dwg, 4, placeholder->handle.value, NULL);
+        if (evaluate (dwg, DOOR, &v, 1, "a graph entry that is no element"))
+          OK ("evaluate takes a PLACEHOLDER in the graph for no element");
+        else
+          failures++;
+        graph->nodes[grip].evalexpr = node;
+      }
+    else
+      {
+        fail ("selected nodes: the Door has no flip grip");
+        failures++;
+      }
+  }
+
+  _swing = swing->tio.object->tio.BLOCKFLIPPARAMETER;
   _swing->chain_actions = 1;
   failures += test_refusal (dwg, DOOR, &v, 1,
                             REFUSED (DWG_ERR_NOTYETSUPPORTED),
@@ -2999,7 +3065,7 @@ test_linear_all (Dwg_Data *dwg)
   failures += test_angle_offset (dwg);
   failures += test_stretch_whole (dwg);
   failures += test_move (dwg);
-  failures += test_chained (dwg);
+  failures += test_selected_nodes (dwg);
   return failures;
 }
 

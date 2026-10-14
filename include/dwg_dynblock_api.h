@@ -280,7 +280,8 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    owns, that doesn't resolve or isn't an entity, a node of def's
    evaluation graph that doesn't resolve, or an action selecting an object
    that is neither one of def's entities nor a node of its evaluation
-   graph; DWG_ERR_VALUEOUTOFBOUNDS for a name no
+   graph, or a node id the graph doesn't have; DWG_ERR_VALUEOUTOFBOUNDS for
+   a name no
    property has, a name given twice, a value that isn't finite, a LINEAR
    value below 0, a state the parameter doesn't have, or a flip value other
    than 0 or 1; DWG_ERR_INVALIDTYPE when def is not a dynamic block
