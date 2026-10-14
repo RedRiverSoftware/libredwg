@@ -8667,7 +8667,7 @@ add_AcDbBlockRotationAction (Dwg_Object *restrict obj, Bit_Chain *restrict dat)
 {
   Dwg_Data *dwg = obj->parent;
   Dxf_Pair *pair;
-  pair = add_BlockAction_ConnectionPts (obj, dat, 2, 1, 96, 305);
+  pair = add_BlockAction_ConnectionPts (obj, dat, 2, 1, 94, 303);
   if (pair)
     return pair;
   return NULL;
