@@ -675,8 +675,10 @@ in_array (const void *slot, const BITCODE_H *array, const BITCODE_BL num)
 /* What becomes of a reference the copy into dst left NULL: every object
    that could be matched was in the map before the copy, so these are the
    references that are left out. Reactors and a block's INSERTs are dropped
-   afterwards, and a table record loses its extension dictionary. Returns
-   DWG_ERR_INVALIDHANDLE for any other. */
+   afterwards, and a table record loses its extension dictionary. A
+   reference to an object src doesn't have stays NULL with a warning, as
+   src is broken there already. Returns DWG_ERR_INVALIDHANDLE for any
+   other. */
 static int
 left_out (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u,
           const BITCODE_BL first)

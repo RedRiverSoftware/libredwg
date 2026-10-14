@@ -232,10 +232,12 @@ typedef struct _compare
   const Dwg_Copy_Map *map;
   /* within one document references outside the copy keep their target */
   int same_document;
-  /* Doubles read back may differ from those written by less than 1e-12:
-     bit_write_DD writes a value that close to its default (for LWPOLYLINE
-     points, the previous point) as the default, as a plain dwgrewrite of
-     example_2004.dwg shows too. Copies must match exactly. */
+  /* Set for a read back. Doubles read back may differ from those written
+     by less than 1e-12: bit_write_DD writes a value that close to its
+     default (for LWPOLYLINE points, the previous point) as the default, as
+     a plain dwgrewrite of example_2004.dwg shows too. Objects and EED read
+     back may hold raw bits and bytes again, which a copy mustn't keep.
+     Copies must match exactly. */
   int dd_tolerance;
   int is_tu;
   /* the documents' version, which sizes LTYPE.strings_area */
@@ -244,8 +246,8 @@ typedef struct _compare
      unwritten_last_byte () */
   unsigned unwritten;
   /* a read back of a document built with the add API, see
-     ADD_API_ACAD_APPID, and the strings with characters outside ASCII
-     that differ in it */
+     ADD_API_ACAD_APPID, and the strings in it that lost their characters
+     outside ASCII */
   int add_api_readback;
   unsigned non_ascii;
   const char *what;
@@ -307,13 +309,22 @@ compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
   compare_handle (c, name, ta, tb);
 }
 
+/* Whether b is a without its bytes from 0x80 up, and a has some: the loss
+   a document built with the add API reads back, see ADD_API_ACAD_APPID. */
 static int
-has_non_ascii (const char *s)
+lost_non_ascii (const char *a, const char *b)
 {
-  for (; s && *s; s++)
-    if ((unsigned char)*s >= 0x80)
-      return 1;
-  return 0;
+  int lost = 0;
+  if (!a)
+    return 0;
+  if (!b)
+    b = "";
+  for (; *a; a++)
+    if ((unsigned char)*a >= 0x80)
+      lost = 1;
+    else if (*b++ != *a)
+      return 0;
+  return lost && !*b;
 }
 
 static void
@@ -332,12 +343,12 @@ compare_string (Compare *c, const char *name, const char *a, const char *b,
       lb = b ? strlen (b) : 0;
     }
   if ((la != lb || (la && memcmp (a, b, la))) && c->add_api_readback && !wide
-      && has_non_ascii (a))
+      && lost_non_ascii (a, b))
     {
       // see ADD_API_ACAD_APPID
       if (c->non_ascii++ < (unsigned)max_reported && test_loglevel >= 2)
-        printf ("  # TODO %s: %s: \"%s\", expected \"%s\"\n", c->what, name,
-                b ? b : "", a);
+        printf ("  # TODO P3-06 %s: %s: \"%s\", expected \"%s\"\n", c->what,
+                name, b ? b : "", a);
     }
   else if (la != lb || (la && memcmp (a, b, la)))
     compare_fail (c, "%s: \"%s\", expected \"%s\"", name,
@@ -2721,10 +2732,15 @@ check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
    dataflags afresh (dwg_set_dataflags), which may differ from AutoCAD's
    for the same values. A read back of such a document is compared with
    both allowed for. The encoder also takes its 8-bit strings to be UTF-8,
-   as the add API makes them, and converts them to the codepage, while a
-   copy holds its source's codepage bytes: characters outside ASCII are
-   lost. Until the copy converts its strings, compare_string () reports
-   those as TODO. */
+   as the add API makes them, and converts them to the codepage
+   (bit_utf8_to_TV ()), while a copy holds its source's codepage bytes. A
+   byte from 0x80 to 0xBF, or from 0xF0 up, doesn't start a UTF-8 sequence
+   and is dropped: "Open 30\xBA" (0xBA is the masculine ordinal in codepage
+   1252) reads back as "Open 30". A byte from 0xC0 to 0xEF starts one,
+   takes the bytes after it along, and changes more than itself. Until the
+   copy converts its strings (runbook task P3-06, which makes these strict
+   checks again), compare_string () reports a string that lost only its
+   bytes from 0x80 up as TODO, and fails any other difference. */
 #define ADD_API_ACAD_APPID 0x12
 
 /* The EED of a, but for the groups whose APPID map maps to dropped_appid,
@@ -3004,10 +3020,11 @@ check_block_readback (const char *what, Dwg_Data *dst, const BITCODE_BL first,
   if (readback.num_objects == dst->num_objects
       && found.copies == dst->num_objects - first && !c.failed)
     OK ("%s: %u objects read back, the %u copies with their sources' "
-        "fields, but %u PROXY data last bytes and %u ACAD EED groups of "
-        "blocks (not written into an add API document)",
-        what, (unsigned)readback.num_objects, found.copies, c.unwritten,
-        found.dropped);
+        "fields, but for what a document built with the add API doesn't "
+        "write: %u ACAD EED groups of blocks and the characters outside "
+        "ASCII of %u strings",
+        what, (unsigned)readback.num_objects, found.copies, found.dropped,
+        c.non_ascii);
   else
     FAIL ("%s: %u objects read back of %u, %u copies of %u, %d field "
           "differences",
@@ -3016,8 +3033,9 @@ check_block_readback (const char *what, Dwg_Data *dst, const BITCODE_BL first,
   if (c.non_ascii)
     {
       loglevel = test_loglevel;
-      todo ("%s: %u strings with characters outside ASCII lose them in a "
-            "document built with the add API",
+      todo ("%s: %u strings read back without their characters outside "
+            "ASCII, and with nothing else changed, from a document built "
+            "with the add API (runbook task P3-06)",
             what, c.non_ascii);
     }
   check_refs (what, &readback, 0);

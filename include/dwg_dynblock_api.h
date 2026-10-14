@@ -45,9 +45,14 @@ extern "C" {
  * table; a plot style dst lacks becomes dst's default one, and another
  * style dst lacks is a NULL reference. Blocks the definition inserts are
  * copied with it, unless dst has a block of the same name. Classes are
- * added to dst as needed. The definition's list of INSERTs, and reactors to
- * objects outside the copy, such as groups, are not copied: the copy has no
- * placements yet.
+ * added to dst as needed. The definition's list of INSERTs is not copied:
+ * the copy has no placements yet. A reactor (a link back to an object that
+ * watches this one) is matched or copied as any other reference is, so one
+ * to a block, table record or style that dst has, or that is copied, is
+ * kept, pointing at dst's object; other reactors to objects outside the
+ * definition, such as groups, are dropped, with no error. A reference to an
+ * object src doesn't have is NULL in the copy, with a warning logged but no
+ * error, as src is broken there already.
  *
  * Names: a dynamic block definition is stored as an anonymous block named
  * "*U", and its name is in its AcDbDynamicBlockTrueName (or
@@ -79,11 +84,12 @@ extern "C" {
  *                  of memory (DWG_ERR_OUTOFMEM), after which dst may hold
  *                  copies that no table lists. Below it, the copy was made
  *                  with something left out: DWG_ERR_INVALIDHANDLE for a
- *                  reference that could be neither matched nor copied and is
- *                  NULL in the copy, DWG_ERR_VALUEOUTOFBOUNDS for data that
- *                  could not be copied or a copy that a full table of dst
- *                  (65535 records) could not list, and DWG_ERR_INVALIDEED
- *                  for an EED group whose items could not be decoded.
+ *                  reference to an object of src that could be neither
+ *                  matched nor copied and is NULL in the copy,
+ *                  DWG_ERR_VALUEOUTOFBOUNDS for data that could not be
+ *                  copied or a copy that a full table of dst (65535
+ *                  records) could not list, and DWG_ERR_INVALIDEED for an
+ *                  EED group whose items could not be decoded.
  * @return dst's definition, or NULL when the copy was refused or failed.
  */
 EXPORT Dwg_Object_BLOCK_HEADER *
