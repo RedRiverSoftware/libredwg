@@ -652,17 +652,29 @@ static int
 slot_first_visit (Copy_Chain *restrict cdat, const void *slot)
 {
   Copy_Slots *s = &cdat->slots;
-  size_t i;
-  if (slot_visited (cdat, slot))
-    return 0;
-  if (s->count * 2 >= s->size && slots_grow (s))
+  size_t i = 0;
+  if (s->size)
     {
-      cdat->error |= DWG_ERR_OUTOFMEM;
-      return -1;
+      i = slot_hash (slot) & (s->size - 1);
+      while (s->keys[i])
+        {
+          if (s->keys[i] == slot)
+            return 0;
+          i = (i + 1) & (s->size - 1);
+        }
     }
-  i = slot_hash (slot) & (s->size - 1);
-  while (s->keys[i])
-    i = (i + 1) & (s->size - 1);
+  // the set grows at half full, so a probe always meets an empty key
+  if (s->count * 2 >= s->size)
+    {
+      if (slots_grow (s))
+        {
+          cdat->error |= DWG_ERR_OUTOFMEM;
+          return -1;
+        }
+      i = slot_hash (slot) & (s->size - 1);
+      while (s->keys[i])
+        i = (i + 1) & (s->size - 1);
+    }
   s->keys[i] = slot;
   s->count++;
   return 1;
@@ -1548,11 +1560,11 @@ copy_check_documents (const Dwg_Data *restrict dst,
 }
 
 /* The copy's type: a fixed type, or the number of dst's class of the same
-   name, which is added from src's class when dst has none. *added is set
+   name, which is added from src's class when dst has none. *movedp is set
    once dst's classes may have moved, also when adding one then fails. */
 static int
 copy_class_type (Copy_Chain *restrict cdat, const Dwg_Object *restrict srcobj,
-                 BITCODE_BS *restrict typep, int *restrict added)
+                 BITCODE_BS *restrict typep, int *restrict movedp)
 {
   Dwg_Data *dst = cdat->dst;
   const Dwg_Data *src = cdat->src;
@@ -1588,7 +1600,7 @@ copy_class_type (Copy_Chain *restrict cdat, const Dwg_Object *restrict srcobj,
   if (!classes)
     return DWG_ERR_OUTOFMEM;
   dst->dwg_class = classes;
-  *added = 1;
+  *movedp = 1;
   dxfname = strdup (klass->dxfname);
   if (!dxfname)
     return DWG_ERR_OUTOFMEM;
@@ -1667,7 +1679,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
   BITCODE_BL *src_index = NULL, *dst_index = NULL;
   dwg_inthash *seen = NULL;
   BITCODE_BL i, first;
-  int realloced = 0, added_class = 0;
+  int realloced = 0, classes_moved = 0;
   int error = 0;
 
   if (unresolvedp)
@@ -1761,8 +1773,9 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
       if (rc < 0)
         realloced = 1;
       srcobj = &src->object[src_index[i]];
-      error |= copy_class_type (&cdat, srcobj, &type, &added_class);
-      if (error >= DWG_ERR_CRITICAL)
+      error |= copy_class_type (&cdat, srcobj, &type, &classes_moved);
+      // its class's names may have failed to copy too
+      if ((error | cdat.error) >= DWG_ERR_CRITICAL)
         goto done;
       obj = &dst->object[idx];
       obj->supertype = srcobj->supertype;
@@ -1781,7 +1794,8 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
       dwg_copy_map_set (map, srcobj->handle.value, obj->handle.value);
       dst_index[i] = idx;
     }
-  copy_point_at_classes (dst, added_class ? 0 : first);
+  copy_point_at_classes (dst, classes_moved ? 0 : first);
+  classes_moved = 0;
 
   for (i = 0; i < num_handles; i++)
     {
@@ -1799,8 +1813,8 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
 
 done:
   error |= cdat.error;
-  // a class added before the copy failed may have moved dst->dwg_class
-  if (added_class && error >= DWG_ERR_CRITICAL)
+  // classes added before a failure may have moved dst->dwg_class
+  if (classes_moved)
     copy_point_at_classes (dst, 0);
   // dst->object moved: the references' cached objects are stale
   if (realloced)

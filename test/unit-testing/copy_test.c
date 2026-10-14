@@ -212,12 +212,14 @@ is_copyable (const Dwg_Object *obj)
 }
 
 /* An empty document with src's version and header, for copies of all of
-   src's objects. Its handles start at src's next one, so that a handle
-   left pointing into src stands out. */
+   src's objects, or NULL. Its handles start at src's next one, so that a
+   handle left pointing into src stands out. */
 static Dwg_Data *
 new_document_like (const Dwg_Data *src)
 {
   Dwg_Data *dwg = (Dwg_Data *)calloc (1, sizeof (Dwg_Data));
+  if (!dwg)
+    return NULL;
   dwg->opts = src->opts;
   dwg->header = src->header;
   dwg->header.section = NULL;
@@ -1605,7 +1607,7 @@ test_clone (const char *name, Dwg_Version_Type version)
     FAIL ("%s: %d field differences between copies and sources", what,
           c.failed);
   check_refs (what, dst, first);
-  if (c.relative && !c.wrong_relative)
+  if (!c.wrong_relative)
     OK ("%s: %u relative references recomputed", what, c.relative);
   else
     FAIL ("%s: %u of %u relative references wrong", what, c.wrong_relative,
@@ -1798,7 +1800,7 @@ test_same_document (const char *name)
   else
     FAIL ("%s: %d field differences between copies and sources", what,
           c.failed);
-  if (c.relative && !c.wrong_relative)
+  if (!c.wrong_relative)
     OK ("%s: %u relative references recomputed", what, c.relative);
   else
     FAIL ("%s: %u of %u relative references wrong", what, c.wrong_relative,
@@ -2531,7 +2533,7 @@ test_eed_unread_string (void)
     }
   dst = new_document_like (&drawn);
   map = dwg_copy_map_new ();
-  if (!map)
+  if (!dst || !map)
     {
       FAIL ("%s: out of memory", what);
       goto cleanup;
@@ -2756,6 +2758,11 @@ test_eed_partly_decoded (void)
     }
 
   dst = new_document_like (&drawn);
+  if (!dst)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &drawn, handles, 2, map, &unresolved,
                             &num_unresolved);
@@ -2802,8 +2809,8 @@ cleanup:
 
 /* Copies objects of src into a new document, then frees it: an empty
    document like src, or one the add API makes, whose names the copy
-   duplicates. Only the copy's allocations count, from alloc_calls 0 on.
-   Returns the copy's error. */
+   duplicates. Only copy.c's allocations during the copy count, from
+   alloc_calls 0 on. Returns the copy's error. */
 static int
 copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
                const BITCODE_BL num_handles, const int add_api)
@@ -2835,13 +2842,14 @@ copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
   return error;
 }
 
-/* Each allocation of the copy, failed in turn, as it copies the objects of
-   the drawing into a new document: the copy returns DWG_ERR_OUTOFMEM, and
-   leaves the new document with nothing of the source's, so that freeing it
-   leaves the source as it was read. Under ASan a double free or a use after
-   free shows here too. add_api: into a document made with the add API,
-   with the model space entities only; else into an empty one, with every
-   object. */
+/* Each allocation copy.c makes, failed in turn, as it copies the objects
+   of the drawing into a new document: the copy returns DWG_ERR_OUTOFMEM,
+   and leaves the new document with nothing of the source's, so that
+   freeing it leaves the source as it was read. Under ASan a double free or
+   a use after free shows here too. The allocations of the functions copy.c
+   calls in other files (dwg_add_object, dwg_add_handleref, the hash's)
+   aren't failed. add_api: into a document made with the add API, with the
+   model space entities only; else into an empty one, with every object. */
 static int
 test_out_of_memory (const char *name, const int add_api)
 {
@@ -2907,7 +2915,9 @@ test_out_of_memory (const char *name, const int add_api)
         }
     }
   if (!not_made && !wrong)
-    OK ("%s: each of %ld allocations failed in turn, DWG_ERR_OUTOFMEM", what,
+    OK ("%s: each of copy.c's %ld allocations failed in turn, "
+        "DWG_ERR_OUTOFMEM",
+        what,
         allocations);
   else
     FAIL ("%s: of %ld allocations, %u not made, %u failed without "
@@ -3133,6 +3143,27 @@ test_refused (void)
       return 1;
     }
   dst = new_document_like (&src2004);
+  beta = new_document_like (&src2004);
+  if (!dst || !beta)
+    {
+      FAIL ("refused: out of memory");
+      if (dst)
+        {
+          free_dwg (dst);
+          free (dst);
+        }
+      if (beta)
+        {
+          free_dwg (beta);
+          free (beta);
+        }
+      free_dwg (&src2004);
+      free_dwg (&src2000);
+      free_dwg (&src2007);
+      dwg_copy_map_free (map);
+      return 1;
+    }
+  beta->header.from_version = R_2007b;
 
   handles[0] = src2000.object[src2000.num_objects - 1].handle.value;
   check_refused ("an r2000 object into an r2004 document",
@@ -3147,7 +3178,6 @@ test_refused (void)
   check_refused ("an r2007 alpha document, within itself",
                  DWG_ERR_NOTYETSUPPORTED, &src2004, &src2004, handles, 1, map);
   src2004.header.from_version = R_2007b;
-  beta = new_document_like (&src2004);
   check_refused ("an r2007 beta document, into another",
                  DWG_ERR_NOTYETSUPPORTED, beta, &src2004, handles, 1, map);
   src2004.header.from_version = R_2004;
