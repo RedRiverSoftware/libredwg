@@ -12,14 +12,19 @@
 /*****************************************************************************/
 
 /* src/copy.c, the deep copy of objects with their handles remapped:
-   - every object of public r2004 and r2000 drawings copied into an empty
-     document, compared field by field with its source, then written and
-     read back and compared again;
+   - every object of public r2004, r2000 and r14 drawings, and of
+     example_r13.dwg, copied into an empty document, compared field by
+     field with its source, then written and read back and compared again;
+     example_2000.dwg also written as r2004;
    - copies within one document;
    - references to objects outside the copy, reported and then resolved;
-   - EED, also a string the decoder left unread;
+   - EED, also a string the decoder left unread: copied in a group made in
+     memory; in a group read from a file, the group is left out;
+   - EED groups the decoder read in part, left out;
+   - each of copy.c's allocations failed in turn: DWG_ERR_OUTOFMEM, and
+     both documents can be freed;
    - linetype dash texts in the linetype's strings_area;
-   - refused copies;
+   - refused copies, r2007 alpha and beta documents among them;
    - block definitions, with their dynamic-block data, copied by
      dwg_dynblock_copy_block () into a new document and into a public
      drawing: compared with their sources, written and read back. */
@@ -229,6 +234,12 @@ new_document_like (const Dwg_Data *src)
   dwg->auxheader = src->auxheader;
   dwg->header_vars.HANDSEED = dwg_add_handleref (
       dwg, 0, src->header_vars.HANDSEED->absolute_ref, NULL);
+  if (!dwg->header_vars.HANDSEED)
+    {
+      free_dwg (dwg);
+      free (dwg);
+      return NULL;
+    }
   return dwg;
 }
 
@@ -415,8 +426,8 @@ compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
   const BITCODE_RLL ta = a ? a->absolute_ref : 0;
   const BITCODE_RLL tb = b ? b->absolute_ref : 0;
   check_relative_ref (c, name, b);
-  // code 0 handles are values, which keep their value unless they name a
-  // copied object
+  // code 0 handles are values, which keep their value unless map has an
+  // entry for them, a copy or not
   if (a && !a->handleref.code && c->map && !dwg_copy_map_get (c->map, ta))
     {
       if (ta != tb)
@@ -1511,8 +1522,15 @@ test_clone (const char *name, Dwg_Version_Type version)
             dwg_version_type (version));
   first = src.header_vars.HANDSEED->absolute_ref;
   dst = new_document_like (&src);
-
   handles = (BITCODE_RLL *)calloc (src.num_objects, sizeof (BITCODE_RLL));
+  map = dwg_copy_map_new ();
+  if (!dst || !handles || !map)
+    {
+      FAIL ("%s: out of memory", what);
+      free_dwg (&src);
+      goto cleanup;
+    }
+
   for (BITCODE_BL i = 0; i < src.num_objects; i++)
     {
       const Dwg_Object *obj = &src.object[i];
@@ -1525,7 +1543,6 @@ test_clone (const char *name, Dwg_Version_Type version)
       else
         skipped++;
     }
-  map = dwg_copy_map_new ();
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &src, handles, num_handles, map, &unresolved,
                             &num_unresolved);
@@ -2865,10 +2882,15 @@ test_out_of_memory (const char *name, const int add_api)
   failed = 0;
   snprintf (what, sizeof (what), "out of memory copying %s into %s", name,
             add_api ? "a document made with the add API" : "an empty document");
-  if (!test_file (name, path, sizeof (path))
-      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+  if (!test_file (name, path, sizeof (path)))
+    {
+      FAIL ("%s: %s not found", what, name);
+      return 1;
+    }
+  if (read_dwg (path, &src) >= DWG_ERR_CRITICAL)
     {
       FAIL ("%s: read failed", what);
+      free_dwg (&src);
       return 1;
     }
   if (add_api)

@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// the library sets loglevel from the document's opts; ok and fail need ours
+// the library sets loglevel from the document's opts; ok needs ours
 static unsigned int test_loglevel;
 
 #include "config.h"
@@ -208,7 +208,8 @@ render_mspace (Dwg_Data *dwg, size_t *len)
   return svg;
 }
 
-/* The model space of a new document, or NULL, after a failed check. */
+/* The model space of a new document, or NULL, after a failed check. Sets
+   *dwgp in both cases, to the document or NULL, for the caller to free. */
 static Dwg_Object_BLOCK_HEADER *
 new_document (Dwg_Data **dwgp)
 {
@@ -348,7 +349,7 @@ done:
 static void
 test_long_write (void)
 {
-  // before the document, which sets loglevel to its own
+  // before any check, so that done: frees both whichever check fails
   char *value = (char *)malloc (2 * LONG_REPEAT + 1);
   char *expected = (char *)malloc (6 * LONG_REPEAT + sizeof ("</text>"));
   Dwg_Data *dwg = NULL;
