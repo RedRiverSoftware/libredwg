@@ -456,7 +456,7 @@ test_refusals (Dwg_Data *dwg)
                             REFUSED (DWG_ERR_NOTYETSUPPORTED),
                             "a constraint-based block");
   v[0].name = (char *)"Window Width";
-  v[0].value = NAN;
+  v[0].value = nan ("");
   failures += test_refusal (dwg, WINDOW, v, 1,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a value that isn't finite");
