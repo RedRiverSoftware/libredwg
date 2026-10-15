@@ -371,9 +371,11 @@ typedef struct _dwg_dynblock_check
   BITCODE_BL kinds;
   BITCODE_BL num_entities;  /* entities compared */
   BITCODE_BL num_differing; /* of which differ */
-  /* of which match only as the same curve stored another way: an ELLIPSE
+  /* of which match only as the same entity stored another way: an ELLIPSE
      with its major axis reversed and its parameters turned by pi, as
-     AutoCAD keeps one after some grip edits */
+     AutoCAD keeps one after some grip edits; or text that differs only in
+     what AutoCAD measures from its layout, which the evaluation can't do
+     (see dwg_dynblock_check ()) */
   BITCODE_BL num_equivalent;
   /* UTF-8: what differs first, preceded by the bits of the data the
      evaluation left out, if it left some out; or why the check is
@@ -413,9 +415,17 @@ typedef struct _dwg_dynblock_check_report
    either block's entity list that doesn't resolve is a difference. An
    array the comparison has no length for, unless empty in both, counts as
    a difference. An ELLIPSE also matches the same curve with its major
-   axis reversed, and is counted in num_equivalent. The blocks' base
-   points compare too: a difference there is a mismatch, though not of an
-   entity. EED is not compared.
+   axis reversed, and is counted in num_equivalent. So does text that
+   differs only in what AutoCAD measures from the laid-out text, which the
+   evaluation can't do: an MTEXT's extents_width and extents_height where
+   one side has them unmeasured (0 or -1), and the insertion point of an
+   attribute definition that isn't constant, justified other than left on
+   the baseline, aligned or fit, where the alignment point matches and
+   the insertion point differs only along the baseline. AutoCAD derives
+   that insertion point from the alignment point and the width of the
+   tag in a definition, but of the default value in the blocks it
+   evaluates. The blocks' base points compare too: a difference there is
+   a mismatch, though not of an entity. EED is not compared.
 
    An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
    copy left out (such as an array, 3DSOLID ACIS data or an EED group it

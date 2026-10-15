@@ -4799,6 +4799,312 @@ test_check_utf8 (Dwg_Data *dwg)
   return failures;
 }
 
+/* Turns LINE obj into an ATTDEF tagged "TAG", of default value "value",
+   with the given justification, rotation and insertion and alignment
+   points. Returns 0 when obj is not a LINE or memory runs out. */
+static int
+line_to_attdef (Dwg_Object *obj, const BITCODE_BS horiz,
+                const BITCODE_BS vert, const double rotation,
+                const double x, const double y, const double ax,
+                const double ay)
+{
+  Dwg_Entity_ATTDEF *_attdef;
+  if (!obj || obj->fixedtype != DWG_TYPE_LINE)
+    return 0;
+  _attdef = (Dwg_Entity_ATTDEF *)calloc (1, sizeof (Dwg_Entity_ATTDEF));
+  if (!_attdef)
+    return 0;
+  _attdef->tag = strdup ("TAG");
+  _attdef->default_value = strdup ("value");
+  _attdef->prompt = strdup ("Prompt");
+  if (!_attdef->tag || !_attdef->default_value || !_attdef->prompt)
+    {
+      free (_attdef->tag);
+      free (_attdef->default_value);
+      free (_attdef->prompt);
+      free (_attdef);
+      return 0;
+    }
+  _attdef->extrusion.z = 1.0;
+  _attdef->height = 1.0;
+  _attdef->width_factor = 1.0;
+  _attdef->horiz_alignment = horiz;
+  _attdef->vert_alignment = vert;
+  _attdef->rotation = rotation;
+  _attdef->ins_pt.x = x;
+  _attdef->ins_pt.y = y;
+  _attdef->alignment_pt.x = ax;
+  _attdef->alignment_pt.y = ay;
+  _attdef->parent = obj->tio.entity;
+  // a LINE holds no pointer but its parent
+  free (obj->tio.entity->tio.LINE);
+  obj->tio.entity->tio.ATTDEF = _attdef;
+  obj->type = obj->fixedtype = DWG_TYPE_ATTDEF;
+  obj->name = (char *)"ATTDEF";
+  obj->dxfname = (char *)"ATTDEF";
+  return 1;
+}
+
+/* Turns LINE obj into an MTEXT with the given extents. Returns 0 when obj
+   is not a LINE or memory runs out. */
+static int
+line_to_mtext (Dwg_Object *obj, const double width, const double height)
+{
+  Dwg_Entity_MTEXT *_mtext;
+  if (!obj || obj->fixedtype != DWG_TYPE_LINE)
+    return 0;
+  _mtext = (Dwg_Entity_MTEXT *)calloc (1, sizeof (Dwg_Entity_MTEXT));
+  if (!_mtext)
+    return 0;
+  _mtext->text = strdup ("mtext");
+  if (!_mtext->text)
+    {
+      free (_mtext);
+      return 0;
+    }
+  _mtext->extrusion.z = 1.0;
+  _mtext->x_axis_dir.x = 1.0;
+  _mtext->text_height = 1.0;
+  _mtext->rect_width = 10.0;
+  _mtext->attachment = 1;
+  _mtext->flow_dir = 1;
+  _mtext->linespace_factor = 1.0;
+  _mtext->extents_width = width;
+  _mtext->extents_height = height;
+  _mtext->parent = obj->tio.entity;
+  free (obj->tio.entity->tio.LINE);
+  obj->tio.entity->tio.MTEXT = _mtext;
+  obj->type = obj->fixedtype = DWG_TYPE_MTEXT;
+  obj->name = (char *)"MTEXT";
+  obj->dxfname = (char *)"MTEXT";
+  return 1;
+}
+
+/* The text in the Trees definition and its placements' blocks, made from
+   LINEs of the same index in each, as the definition and AutoCAD's blocks
+   hold it, for test_check_measured: a text entity in all five blocks, then
+   how AutoCAD's block of each placement differs. */
+enum
+{
+  M_CENTRED,     // ATTDEF centred on the middle
+  M_CENTRED_90,  // the same, turned a quarter turn
+  M_LEFT,        // ATTDEF left on the baseline
+  M_CONSTANT,    // constant ATTDEF, centred on the middle
+  M_ALIGNED,     // ATTDEF aligned
+  M_FIT,         // ATTDEF fit
+  M_TEXT,        // TEXT centred on the middle
+  M_UNMEASURED,  // MTEXT, the definition's extents unmeasured
+  M_MEASURED,    // MTEXT, the definition's extents measured
+  NUM_MEASURED
+};
+
+/* Makes text entity k of test_check_measured from the LINE obj, as the
+   definition has it. Returns 0 on failure. */
+static int
+measured_entity (Dwg_Object *obj, const int k)
+{
+  switch (k)
+    {
+    case M_CENTRED:
+      return line_to_attdef (obj, 1, 2, 0.0, 1.0, 2.0, 2.0, 2.5);
+    case M_CENTRED_90:
+      return line_to_attdef (obj, 1, 2, M_PI / 2.0, 5.5, 1.0, 5.0, 2.0);
+    case M_LEFT:
+      return line_to_attdef (obj, 0, 0, 0.0, 1.0, 4.0, 0.0, 0.0);
+    case M_CONSTANT:
+      if (!line_to_attdef (obj, 1, 2, 0.0, 1.0, 6.0, 2.0, 6.5))
+        return 0;
+      obj->tio.entity->tio.ATTDEF->flags = 2;
+      return 1;
+    case M_ALIGNED:
+      return line_to_attdef (obj, 3, 0, 0.0, 1.0, 8.0, 3.0, 8.0);
+    case M_FIT:
+      return line_to_attdef (obj, 5, 0, 0.0, 1.0, 12.0, 3.0, 12.0);
+    case M_TEXT:
+      if (!line_to_text (obj, "text"))
+        return 0;
+      obj->tio.entity->tio.TEXT->horiz_alignment = 1;
+      obj->tio.entity->tio.TEXT->vert_alignment = 2;
+      obj->tio.entity->tio.TEXT->ins_pt.x = 1.0;
+      obj->tio.entity->tio.TEXT->ins_pt.y = 10.0;
+      obj->tio.entity->tio.TEXT->alignment_pt.x = 2.0;
+      obj->tio.entity->tio.TEXT->alignment_pt.y = 10.5;
+      return 1;
+    case M_UNMEASURED:
+      return line_to_mtext (obj, -1.0, -1.0);
+    case M_MEASURED:
+      return line_to_mtext (obj, 4.0, 1.0);
+    default:
+      return 0;
+    }
+}
+
+/* What AutoCAD measures from laid-out text matches as equivalent: an
+   attribute definition's insertion point moved along the baseline, where
+   it is justified so that its alignment point places it, and an MTEXT's
+   extents where one side has none measured. Text of the Trees definition
+   and of its 4 placements' blocks, made from LINEs: in AutoCAD's blocks,
+   R1's 2 centred attribute definitions moved along the baseline, and the
+   unmeasured MTEXT measured and the measured one unmeasured, match; R2's
+   centred one moved across the baseline differs, and its measured MTEXT
+   with extents 0, as AutoCAD writes them unmeasured too, matches; R3's
+   moves differ for an alignment point, a left, a constant, an aligned and
+   a fit attribute definition and a TEXT; and C145's MTEXT measured
+   differently differs. */
+static int
+test_check_measured (Dwg_Data *dwg)
+{
+  static const BITCODE_RLL blocks[] = { TREES, 0xCFF7, 0xD24A, 0xD49D,
+                                        0xB6AC };
+  const Dwg_Object_BLOCK_HEADER *r1 = block_header (dwg, 0xCFF7);
+  BITCODE_RL idx[NUM_MEASURED];
+  Dwg_DynBlock_Check_Report *report;
+  const Dwg_DynBlock_Check *c;
+  int n = 0, failures = 0;
+  loglevel = test_loglevel;
+  // LINEs of the same index in the definition and all 4 blocks
+  for (BITCODE_BL i = 0; r1 && i < r1->num_owned && n < NUM_MEASURED; i++)
+    {
+      const Dwg_Object *obj = dwg_ref_object (dwg, r1->entities[i]);
+      BITCODE_RLL self = 0;
+      int all = 1;
+      if (!obj || obj->fixedtype != DWG_TYPE_LINE
+          || !etag (dwg, obj, &idx[n], &self))
+        continue;
+      for (size_t b = 0; b < sizeof (blocks) / sizeof (blocks[0]); b++)
+        {
+          const Dwg_Object *line = rep_entity (dwg, blocks[b], idx[n]);
+          all = all && line && line->fixedtype == DWG_TYPE_LINE;
+        }
+      if (all)
+        n++;
+    }
+  if (n < NUM_MEASURED)
+    {
+      fail ("check measured: %d of %d LINEs found in Trees", n,
+            NUM_MEASURED);
+      return 1;
+    }
+  for (size_t b = 0; b < sizeof (blocks) / sizeof (blocks[0]); b++)
+    for (int k = 0; k < NUM_MEASURED; k++)
+      if (!measured_entity (rep_entity (dwg, blocks[b], idx[k]), k))
+        {
+          fail ("check measured: no text %d in " FORMAT_HV, k, blocks[b]);
+          return 1;
+        }
+  // R1's block
+  rep_entity (dwg, 0xCFF7, idx[M_CENTRED])->tio.entity->tio.ATTDEF->ins_pt.x
+      += 0.4;
+  rep_entity (dwg, 0xCFF7, idx[M_CENTRED_90])
+      ->tio.entity->tio.ATTDEF->ins_pt.y
+      += 0.4;
+  {
+    Dwg_Entity_MTEXT *m
+        = rep_entity (dwg, 0xCFF7, idx[M_UNMEASURED])->tio.entity->tio.MTEXT;
+    m->extents_width = 5.0;
+    m->extents_height = 1.2;
+    m = rep_entity (dwg, 0xCFF7, idx[M_MEASURED])->tio.entity->tio.MTEXT;
+    m->extents_width = -1.0;
+    m->extents_height = -1.0;
+  }
+  // R2's block
+  rep_entity (dwg, 0xD24A, idx[M_CENTRED])->tio.entity->tio.ATTDEF->ins_pt.y
+      += 0.4;
+  {
+    Dwg_Entity_MTEXT *m
+        = rep_entity (dwg, 0xD24A, idx[M_MEASURED])->tio.entity->tio.MTEXT;
+    m->extents_width = 0.0;
+    m->extents_height = 0.0;
+  }
+  // R3's block
+  {
+    Dwg_Entity_ATTDEF *a
+        = rep_entity (dwg, 0xD49D, idx[M_CENTRED])->tio.entity->tio.ATTDEF;
+    a->ins_pt.x += 0.4;
+    a->alignment_pt.x += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_LEFT])->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_CONSTANT])
+        ->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_ALIGNED])->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_FIT])->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_TEXT])->tio.entity->tio.TEXT->ins_pt.x
+        += 0.4;
+  }
+  // C145's block
+  rep_entity (dwg, 0xB6AC, idx[M_MEASURED])
+      ->tio.entity->tio.MTEXT->extents_width
+      = 4.5;
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check measured: no report");
+      return 1;
+    }
+  c = find_check (report, 0xC8E0, 0xCFF7);
+  if (c && c->status == MATCH && !c->num_differing && c->num_equivalent == 4)
+    OK ("check measured: R1 matches 2 attribute definitions moved along "
+        "the baseline and 2 MTEXTs measured on one side");
+  else
+    {
+      fail ("check measured R1: status %d, %u differ, %u equivalent, %s",
+            c ? (int)c->status : -1, c ? (unsigned)c->num_differing : 0,
+            c ? (unsigned)c->num_equivalent : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC8E1, 0xD24A);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 1
+      && c->num_equivalent == 1 && c->reason && strstr (c->reason, "ATTDEF")
+      && strstr (c->reason, "ins_pt[1]"))
+    OK ("check measured: R2 finds an attribute definition moved across "
+        "the baseline: %s",
+        c->reason);
+  else
+    {
+      fail ("check measured R2: status %d, %u differ, %u equivalent, %s",
+            c ? (int)c->status : -1, c ? (unsigned)c->num_differing : 0,
+            c ? (unsigned)c->num_equivalent : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC8E2, 0xD49D);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 6
+      && !c->num_equivalent)
+    OK ("check measured: R3 finds an alignment point, a left, a constant, "
+        "an aligned and a fit attribute definition and a TEXT moved: %s",
+        c->reason ? c->reason : "");
+  else
+    {
+      fail ("check measured R3: status %d, %u differ, %u equivalent, %s",
+            c ? (int)c->status : -1, c ? (unsigned)c->num_differing : 0,
+            c ? (unsigned)c->num_equivalent : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC145, 0xB6AC);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 1
+      && !c->num_equivalent && c->reason && strstr (c->reason, "MTEXT")
+      && strstr (c->reason, "extents_width"))
+    OK ("check measured: C145 finds MTEXT extents measured differently: %s",
+        c->reason);
+  else
+    {
+      fail ("check measured C145: status %d, %u differ, %u equivalent, %s",
+            c ? (int)c->status : -1, c ? (unsigned)c->num_differing : 0,
+            c ? (unsigned)c->num_equivalent : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
 /* The object or entity obj's EED, of *countp entries. */
 static Dwg_Eed *
 object_eed (Dwg_Object *obj, BITCODE_BL *countp)
@@ -5199,6 +5505,7 @@ main (int argc, char *argv[])
   failures += on_fixture (test_check_mleader);
   failures += on_fixture (test_check_owned);
   failures += on_fixture (test_check_utf8);
+  failures += on_fixture (test_check_measured);
   failures += on_fixture (test_check_status);
   failures += on_fixture (test_check_cycle);
   return failures ? 1 : 0;
