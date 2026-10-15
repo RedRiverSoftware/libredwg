@@ -22,13 +22,15 @@
      into others, compared field by field, strings as UTF-8, and written
      and read back with their layers' flags and their texts;
    - a binary chunk the specs don't walk, left out rather than shared;
-   - XRECORD strings converted between the codepage and UTF-8;
+   - XRECORD strings converted between the codepage and UTF-8, NULs inside
+     them kept;
    - references to objects outside the copy, reported and then resolved;
    - EED, also a string the decoder left unread: copied in a group made in
      memory; in a group read from a file, the group is left out;
    - EED groups the decoder read in part, left out;
    - each of copy.c's allocations failed in turn: DWG_ERR_OUTOFMEM, and
-     both documents can be freed;
+     both documents can be freed; and each allocation of the block copy's
+     name matching between kinds: DWG_ERR_OUTOFMEM, nothing copied again;
    - linetype dash texts in the linetype's strings_area, also copied into
      another document and one built with the add API;
    - refused copies, r2007 alpha and beta documents among them;
@@ -65,9 +67,11 @@ static int test_loglevel;
 #include "copy.h"
 #include "logging.h"
 #include "dwg_api.h"
+#include "dwg_dynblock_api.h"
 
-/* Allocation failures in copy.c, for test_out_of_memory (): while
-   alloc_counting is set, copy.c's allocations count in alloc_calls, and
+/* Allocation failures in copy.c and dynblock_copy.c, for
+   test_out_of_memory () and test_copy_block_out_of_memory (): while
+   alloc_counting is set, their allocations count in alloc_calls, and
    while alloc_countdown is above 0, the one that brings it to 0 fails, and
    sets alloc_failed. */
 static int alloc_counting;
@@ -125,12 +129,13 @@ test_strdup (const char *s)
 /* The copy itself, for its internals and for its spec macros, which copy
    the header variables of the documents the clone test builds. */
 #include "copy.c"
+/* The block copy, for the map its copies are made through, and its name
+   matching. */
+#include "dynblock_copy.c"
 #undef malloc
 #undef calloc
 #undef realloc
 #undef strdup
-/* The block copy, for the map its copies are made through. */
-#include "dynblock_copy.c"
 #include "tests_common.h"
 #include "dwg_api.h"
 #ifndef DISABLE_JSON
@@ -3850,23 +3855,37 @@ done:
 
 /* Texts of a document built with the add API, which holds UTF-8, copied
    into an empty document of a DWG file's kind, which holds the codepage:
-   "caf\xC3\xA9" becomes "caf\xE9"; "caf\xE9", which isn't UTF-8, is kept as
-   it is, with DWG_ERR_VALUEOUTOFBOUNDS. Not written: the encoder of a
-   document built with the add API can't write the second. */
+   "caf\xC3\xA9" becomes "caf\xE9"; a text that isn't UTF-8 (a sequence cut
+   short, at the end or before another character, a stray continuation
+   byte, an overlong sequence, a surrogate), or that has a character beyond
+   U+FFFF, which \U+XXXX can't hold, is kept as it is, with
+   DWG_ERR_VALUEOUTOFBOUNDS. Not written: the encoder of a document built
+   with the add API can't write those. */
 static int
 test_not_utf8 (void)
 {
   const char *what = "a text that isn't UTF-8";
-  const char *const texts[] = { "caf\xC3\xA9", "caf\xE9" };
-  const char *const expected[] = { "caf\xE9", "caf\xE9" };
-  const int errors[] = { 0, DWG_ERR_VALUEOUTOFBOUNDS };
+  const char *const texts[]
+      = { "caf\xC3\xA9",     "caf\xE9",          "caf\xE9 au lait",
+          "Open 30\xBA",     "\xC0\xAF",         "\xE0\x80\xAF",
+          "\xED\xA0\x80",    "smile \xF0\x9F\x98\x80" };
+  const char *const expected[]
+      = { "caf\xE9",         "caf\xE9",          "caf\xE9 au lait",
+          "Open 30\xBA",     "\xC0\xAF",         "\xE0\x80\xAF",
+          "\xED\xA0\x80",    "smile \xF0\x9F\x98\x80" };
+  const char *const labels[]
+      = { "UTF-8",           "cut short at the end",
+          "cut short before a space", "a stray continuation byte",
+          "an overlong 2-byte sequence", "an overlong 3-byte sequence",
+          "a surrogate",     "U+1F600" };
+  const int num_texts = (int)(sizeof (texts) / sizeof (texts[0]));
   const dwg_point_3d pt = { 0.0, 0.0, 0.0 };
   Dwg_Data *src = dwg_new_Document (R_2004, 0, tracelevel);
   Dwg_Object *ms = src ? dwg_model_space_object (src) : NULL;
 
   failed = 0;
   loglevel = test_loglevel;
-  for (int i = 0; i < 2 && ms; i++)
+  for (int i = 0; i < num_texts && ms; i++)
     {
       Dwg_Entity_TEXT *text = dwg_add_TEXT (
           ms->tio.object->tio.BLOCK_HEADER, "placeholder", &pt, 1.0);
@@ -3898,14 +3917,16 @@ test_not_utf8 (void)
                                 &num_unresolved);
       loglevel = test_loglevel;
       copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
-      if (error == errors[i] && copy && copy->fixedtype == DWG_TYPE_TEXT
+      // the first is UTF-8, converted; the others are kept as they are
+      if (error == (i ? DWG_ERR_VALUEOUTOFBOUNDS : 0) && copy
+          && copy->fixedtype == DWG_TYPE_TEXT
           && copy->tio.entity->tio.TEXT->text_value
           && strEQ (copy->tio.entity->tio.TEXT->text_value, expected[i]))
-        OK ("%s: text %d copied as codepage 1252 \"caf\\xE9\" (error 0x%x)",
-            what, i, (unsigned)error);
+        OK ("%s: text %d, %s, copied as %s (error 0x%x)", what, i, labels[i],
+            i ? "it is" : "codepage 1252", (unsigned)error);
       else
-        FAIL ("%s: text %d: error 0x%x, expected 0x%x, copy %p", what, i,
-              (unsigned)error, (unsigned)errors[i], (const void *)copy);
+        FAIL ("%s: text %d, %s: error 0x%x, copy %p", what, i, labels[i],
+              (unsigned)error, (const void *)copy);
       free_dwg (dst);
       free (dst);
       dwg_copy_map_free (map);
@@ -4080,6 +4101,163 @@ test_xrecord_strings (void)
 
 done:
   free_dwg (&readback);
+  if (back)
+    {
+      free_dwg (back);
+      free (back);
+    }
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  free_dwg (&src);
+  dwg_copy_map_free (map);
+  dwg_copy_map_free (map2);
+  free (unresolved);
+  return numfailed ();
+}
+
+/* The last item of the XRECORD with the handle in dwg, if a string. */
+static const Dwg_Resbuf *
+last_xrecord_string (const Dwg_Data *dwg, const BITCODE_RLL handle,
+                     BITCODE_BL *xdata_sizep)
+{
+  const Dwg_Object *obj = dwg_resolve_handle (dwg, handle);
+  const Dwg_Resbuf *last;
+  if (!obj || obj->fixedtype != DWG_TYPE_XRECORD)
+    return NULL;
+  *xdata_sizep = obj->tio.object->tio.XRECORD->xdata_size;
+  last = obj->tio.object->tio.XRECORD->xdata;
+  while (last && last->nextrb)
+    last = last->nextrb;
+  if (!last || dwg_resbuf_value_type (last->type) != DWG_VT_STRING
+      || !last->value.str.u.data)
+    return NULL;
+  return last;
+}
+
+/* An XRECORD string with NULs inside it and at its end, as the decoder
+   keeps them: copied into a document built with the add API, each part
+   between the NULs is converted to UTF-8 and the NULs are kept, and so
+   copied back. One of example_2004.dwg's XRECORDs with such a string in
+   codepage 1252 added. Not written: the encoder of a document built with
+   the add API converts such a string up to its first NUL. */
+static int
+test_xrecord_nul (void)
+{
+  const char *what = "an XRECORD string with NULs";
+  static const char text[] = "30\xB0"
+                             "\0"
+                             "caf\xE9"
+                             "\0";
+  static const char utf8[] = "30\xC2\xB0"
+                             "\0"
+                             "caf\xC3\xA9"
+                             "\0";
+  const size_t text_size = sizeof (text) - 1, utf8_size = sizeof (utf8) - 1;
+  char path[256];
+  Dwg_Data src;
+  Dwg_Data *dst = NULL, *back = NULL;
+  Dwg_Object_XRECORD *xrecord = NULL;
+  Dwg_Resbuf *added = NULL;
+  const Dwg_Resbuf *last;
+  Dwg_Copy_Map *map = dwg_copy_map_new (), *map2 = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0, xdata_size = 0, copy_size = 0;
+  BITCODE_RLL handle = 0, copied;
+  int error;
+
+  failed = 0;
+  if (!map || !map2 || !test_file ("example_2004.dwg", path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: example_2004.dwg read failed", what);
+      dwg_copy_map_free (map);
+      dwg_copy_map_free (map2);
+      return 1;
+    }
+  for (BITCODE_BL i = 0; i < src.num_objects && !xrecord; i++)
+    if (src.object[i].fixedtype == DWG_TYPE_XRECORD
+        && src.object[i].tio.object->tio.XRECORD->xdata)
+      {
+        xrecord = src.object[i].tio.object->tio.XRECORD;
+        handle = src.object[i].handle.value;
+      }
+  added = (Dwg_Resbuf *)calloc (1, sizeof (Dwg_Resbuf));
+  if (!xrecord || !added
+      || !(added->value.str.u.data = (char *)malloc (text_size + 1)))
+    {
+      FAIL ("%s: no XRECORD with data, or out of memory", what);
+      free (added);
+      goto done;
+    }
+  // as the decoder reads it: size bytes, then a NUL
+  memcpy (added->value.str.u.data, text, text_size + 1);
+  added->type = 1;
+  added->value.str.size = (BITCODE_RS)text_size;
+  added->value.str.codepage = (BITCODE_RC)src.header.codepage;
+  for (Dwg_Resbuf *rbuf = xrecord->xdata; rbuf; rbuf = rbuf->nextrb)
+    if (!rbuf->nextrb)
+      {
+        rbuf->nextrb = added;
+        break;
+      }
+  xrecord->num_xdata++;
+  xrecord->xdata_size += 5 + added->value.str.size;
+  xdata_size = xrecord->xdata_size;
+
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  loglevel = tracelevel;
+  error = dst ? dwg_copy_objects (dst, &src, &handle, 1, map, &unresolved,
+                                  &num_unresolved)
+              : DWG_ERR_OUTOFMEM;
+  loglevel = test_loglevel;
+  free (unresolved);
+  unresolved = NULL;
+  copied = dwg_copy_map_get (map, handle);
+  last = dst ? last_xrecord_string (dst, copied, &copy_size) : NULL;
+  if (!error && last && last->value.str.size == utf8_size
+      && !memcmp (last->value.str.u.data, utf8, utf8_size + 1)
+      && copy_size == xdata_size + (utf8_size - text_size))
+    OK ("%s: copied into a document built with the add API, each part in "
+        "UTF-8, the NULs kept, %u bytes",
+        what, (unsigned)utf8_size);
+  else
+    {
+      FAIL ("%s: copy error 0x%x, a string of %u bytes, xdata_size %u for "
+            "%u",
+            what, (unsigned)error, last ? (unsigned)last->value.str.size : 0,
+            (unsigned)copy_size,
+            (unsigned)(xdata_size + (utf8_size - text_size)));
+      goto done;
+    }
+
+  // and back, from the document built with the add API
+  back = new_document_like (&src);
+  if (back)
+    back->opts &= ~DWG_OPTS_IN;
+  loglevel = tracelevel;
+  error = back ? dwg_copy_objects (back, dst, &copied, 1, map2, &unresolved,
+                                   &num_unresolved)
+               : DWG_ERR_OUTOFMEM;
+  loglevel = test_loglevel;
+  last = back ? last_xrecord_string (back, dwg_copy_map_get (map2, copied),
+                                     &copy_size)
+              : NULL;
+  if (!error && last && last->value.str.size == text_size
+      && !memcmp (last->value.str.u.data, text, text_size + 1)
+      && copy_size == xdata_size)
+    OK ("%s: copied back into a document read from a DWG file in codepage "
+        "1252, the NULs kept",
+        what);
+  else
+    FAIL ("%s: copy back error 0x%x, a string of %u bytes, xdata_size %u "
+          "for %u",
+          what, (unsigned)error, last ? (unsigned)last->value.str.size : 0,
+          (unsigned)copy_size, (unsigned)xdata_size);
+
+done:
   if (back)
     {
       free_dwg (back);
@@ -4613,7 +4791,8 @@ copy_and_check_block (const char *what, Dwg_Data *dst, Dwg_Data *src,
 {
   const BITCODE_BL first = dst->num_objects;
   const BITCODE_BS num_classes = dst->num_classes;
-  const BITCODE_RLL existing = find_block (dst, src, blk);
+  int match_error = 0;
+  const BITCODE_RLL existing = find_block (dst, src, blk, &match_error);
   Dwg_Copy_Map *map = dwg_copy_map_new ();
   Dwg_Object_BLOCK_HEADER *copy, *again;
   const Dwg_Object *copyobj;
@@ -4632,6 +4811,11 @@ copy_and_check_block (const char *what, Dwg_Data *dst, Dwg_Data *src,
       else
         FAIL ("%s: not refused: error 0x%x, %u objects added", what,
               (unsigned)error, (unsigned)(dst->num_objects - first));
+      goto done;
+    }
+  if (match_error)
+    {
+      FAIL ("%s: matching error 0x%x", what, (unsigned)match_error);
       goto done;
     }
   if (existing)
@@ -4838,6 +5022,7 @@ test_copy_all_blocks (void)
   const Dwg_Object **blocks;
   BITCODE_BL num_blocks, first;
   unsigned refused = 0, copied = 0, existing = 0, layouts = 0, objects = 0;
+  int match_error = 0;
   Compare c;
 
   failed = 0;
@@ -4871,7 +5056,7 @@ test_copy_all_blocks (void)
           continue;
         }
       // copied already, with a block that inserts it
-      if (find_block (dst, &src, blk))
+      if (find_block (dst, &src, blk, &match_error))
         {
           existing++;
           continue;
@@ -4904,14 +5089,16 @@ test_copy_all_blocks (void)
         }
       dwg_copy_map_free (map);
     }
-  if (refused == DYNBLOCKS_REFUSED && !c.failed && !numfailed ())
+  if (refused == DYNBLOCKS_REFUSED && !c.failed && !match_error
+      && !numfailed ())
     OK ("%s: %u blocks copied, %u objects in all, each with its source's "
         "fields; %u copied already with others, %u refused, %u layout "
         "blocks left",
         what, copied, objects, existing, refused, layouts);
   else
-    FAIL ("%s: %u blocks copied, %u refused, %d field differences", what,
-          copied, refused, c.failed);
+    FAIL ("%s: %u blocks copied, %u refused, %d field differences, "
+          "matching error 0x%x",
+          what, copied, refused, c.failed, (unsigned)match_error);
   free (blocks);
   check_tables (what, dst);
   check_inserts (what, dst, first);
@@ -5466,7 +5653,9 @@ dictionary_object (const Dwg_Data *dwg, const char *dict,
 {
   const Dwg_Object *nod = named_object_dictionary (dwg);
   const Match_Name key = field_name (dwg, dict);
-  const BITCODE_RLL d = dictionary_entry (dwg, dictionary_of (nod), &key);
+  int error = 0;
+  const BITCODE_RLL d
+      = dictionary_entry (dwg, dictionary_of (nod), &key, &error);
   for (BITCODE_BL i = 0; d && i < dwg->num_objects; i++)
     if (dwg->object[i].fixedtype == type && owner_of (&dwg->object[i]) == d)
       return &dwg->object[i];
@@ -5490,6 +5679,7 @@ test_copy_block_matching (void)
   Dwg_Object a, b;
   Block_Copy bc;
   Dwg_Copy_Unresolved u;
+  int match_error = 0;
 
   failed = 0;
   if (!test_file (DYNBLOCKS, path, sizeof (path))
@@ -5504,11 +5694,12 @@ test_copy_block_matching (void)
       = dictionary_object (&src, "ACAD_MLINESTYLE", DWG_TYPE_MLINESTYLE);
   scale = dictionary_object (&src, "ACAD_SCALELIST", DWG_TYPE_SCALE);
   if (plotstyle && mlinestyle && scale
-      && find_dictionary_entry (&src, &src, plotstyle)
+      && find_dictionary_entry (&src, &src, plotstyle, &match_error)
              == plotstyle->handle.value
-      && find_dictionary_entry (&src, &src, mlinestyle)
+      && find_dictionary_entry (&src, &src, mlinestyle, &match_error)
              == mlinestyle->handle.value
-      && !find_dictionary_entry (&src, &src, scale))
+      && !find_dictionary_entry (&src, &src, scale, &match_error)
+      && !match_error)
     OK ("%s: a plot style and a multiline style match the entry of their "
         "key, a scale doesn't",
         what);
@@ -5534,15 +5725,15 @@ test_copy_block_matching (void)
   sa.is_shape = sb.is_shape = 1;
   sa.font_file = (char *)"ltypeshp.shx";
   sb.font_file = (char *)"myshapes.shx";
-  if (!same_record (&a, &b))
+  if (!same_record (&a, &b, &match_error))
     {
       sb.font_file = (char *)"LTYPESHP.SHX";
-      if (same_record (&a, &b))
+      if (same_record (&a, &b, &match_error))
         {
           sa.name = (char *)"Standard";
           sb.name = (char *)"STANDARD";
           sb.font_file = (char *)"myshapes.shx";
-          if (same_record (&a, &b))
+          if (same_record (&a, &b, &match_error) && !match_error)
             OK ("%s: unnamed text styles match by their shape files, named "
                 "ones by name",
                 what);
@@ -5792,6 +5983,198 @@ done:
   return numfailed ();
 }
 
+/* The block copy's name matching between a document read from a DWG file
+   and one built with the add API, which converts names, with each of its
+   allocations failed in turn: DWG_ERR_OUTOFMEM, rather than names taken to
+   differ, so that nothing of dst's is copied again under its name. First
+   Door - Imperial's first layer, renamed "T\xFCr" as in
+   test_copy_block_matching_utf8 (), met by the copy, with dst's
+   "T\xC3\xBCr": it isn't scheduled for copying. Then Door - Imperial
+   copied into a document with a block of its name: nothing is added. */
+static int
+test_copy_block_out_of_memory (void)
+{
+  const char *what = "block copy matching out of memory";
+  char path[256];
+  Dwg_Data src;
+  Dwg_Data *dst = NULL;
+  const Dwg_Object *door, *entity = NULL, *layerobj = NULL;
+  const Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Object_LAYER *dst_layer = NULL;
+  BITCODE_RLL dst_layer_handle = 0;
+  long n;
+  unsigned failures = 0, wrong = 0;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  door = dynamic_block (&src, "Door - Imperial");
+  blk = door ? door->tio.object->tio.BLOCK_HEADER : NULL;
+  if (blk && blk->num_owned && blk->entities)
+    entity = dwg_resolve_handle (&src, ref_target (blk->entities[0]));
+  if (entity && entity->supertype == DWG_SUPERTYPE_ENTITY)
+    layerobj = dwg_resolve_handle (&src,
+                                   ref_target (entity->tio.entity->layer));
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  loglevel = test_loglevel;
+  if (dst)
+    dst_layer = dwg_add_LAYER (dst, "placeholder");
+  loglevel = test_loglevel;
+  if (!layerobj || layerobj->fixedtype != DWG_TYPE_LAYER || !dst_layer)
+    {
+      FAIL ("%s: no layer to rename, or dst's not added", what);
+      goto done;
+    }
+  free (layerobj->tio.object->tio.LAYER->name);
+  layerobj->tio.object->tio.LAYER->name = strdup ("T\xFC" "r");
+  free (dst_layer->name);
+  dst_layer->name = strdup ("T\xC3\xBC" "r");
+  dst_layer_handle = dst->object[dst_layer->parent->objid].handle.value;
+
+  // the layer, met by the copy
+  for (n = 1;; n++)
+    {
+      Block_Copy bc;
+      Dwg_Copy_Unresolved u;
+      uint64_t decided, role;
+      memset (&bc, 0, sizeof (bc));
+      bc.src = &src;
+      bc.dst = dst;
+      bc.role = hash_new (16);
+      bc.decided = hash_new (16);
+      bc.scratch_map = dwg_copy_map_new ();
+      if (!bc.role || !bc.decided || !bc.scratch_map)
+        {
+          FAIL ("%s: out of memory", what);
+          if (bc.role)
+            hash_free (bc.role);
+          if (bc.decided)
+            hash_free (bc.decided);
+          dwg_copy_map_free (bc.scratch_map);
+          goto done;
+        }
+      memset (&u, 0, sizeof (u));
+      u.kind = DWG_COPY_SLOT_REF;
+      u.code = 5;
+      u.target = layerobj->handle.value;
+      alloc_calls = 0;
+      alloc_failed = 0;
+      alloc_countdown = n;
+      alloc_counting = 1;
+      classify (&bc, &u);
+      alloc_counting = 0;
+      alloc_countdown = 0;
+      decided = hash_get (bc.decided, u.target);
+      role = hash_get (bc.role, u.target);
+      if (alloc_failed)
+        {
+          failures++;
+          if (!(bc.error & DWG_ERR_OUTOFMEM) || bc.copy.num
+              || role != HASH_NOT_FOUND || decided == DECIDED_COPY)
+            {
+              if (!wrong++)
+                printf ("  # allocation %ld failed: error 0x%x, %u to copy\n",
+                        n, (unsigned)bc.error, (unsigned)bc.copy.num);
+            }
+        }
+      else if (failures && !wrong && !bc.error && decided == DECIDED_MATCHED
+               && dwg_copy_map_get (bc.scratch_map, u.target)
+                      == dst_layer_handle)
+        OK ("%s: a layer: each of the %u allocations failed in turn, "
+            "DWG_ERR_OUTOFMEM and nothing to copy; then matched with dst's",
+            what, failures);
+      else
+        FAIL ("%s: a layer: %u allocations failed, %u without "
+              "DWG_ERR_OUTOFMEM or with a copy; then error 0x%x, decided "
+              "%d",
+              what, failures, wrong, (unsigned)bc.error, (int)decided);
+      free (bc.copy.handles);
+      free (bc.pending.handles);
+      free (bc.matched_src.handles);
+      free (bc.matched_dst.handles);
+      free (bc.deferred.handles);
+      hash_free (bc.role);
+      hash_free (bc.decided);
+      dwg_copy_map_free (bc.scratch_map);
+      if (!alloc_failed)
+        break;
+    }
+
+  // the block, in a document with a block of its name
+  failures = wrong = 0;
+  for (n = 1;; n++)
+    {
+      Dwg_Data *dst2 = dwg_new_Document (R_2004, 0, tracelevel);
+      Dwg_Object_BLOCK_HEADER *existing, *copy;
+      BITCODE_BL num_objects;
+      int error = 0;
+      loglevel = test_loglevel;
+      existing = dst2 ? dwg_add_BLOCK_HEADER (dst2, "Door - Imperial") : NULL;
+      loglevel = test_loglevel;
+      if (!existing)
+        {
+          FAIL ("%s: a block not added to dst", what);
+          if (dst2)
+            {
+              free_dwg (dst2);
+              free (dst2);
+            }
+          break;
+        }
+      num_objects = dst2->num_objects;
+      alloc_calls = 0;
+      alloc_failed = 0;
+      alloc_countdown = n;
+      alloc_counting = 1;
+      loglevel = 0; // the copy logs its failure
+      copy = dwg_dynblock_copy_block (dst2, &src, blk, &error);
+      loglevel = test_loglevel;
+      alloc_counting = 0;
+      alloc_countdown = 0;
+      if (alloc_failed)
+        {
+          failures++;
+          if (copy || !(error & DWG_ERR_OUTOFMEM)
+              || dst2->num_objects != num_objects)
+            {
+              if (!wrong++)
+                printf ("  # allocation %ld failed: error 0x%x, %u objects "
+                        "added\n",
+                        n, (unsigned)error,
+                        (unsigned)(dst2->num_objects - num_objects));
+            }
+        }
+      else if (failures && !wrong && copy == existing && !error
+               && dst2->num_objects == num_objects)
+        OK ("%s: a block: each of the %u allocations failed in turn, "
+            "DWG_ERR_OUTOFMEM and nothing added; then dst's block returned",
+            what, failures);
+      else
+        FAIL ("%s: a block: %u allocations failed, %u without "
+              "DWG_ERR_OUTOFMEM or with objects added; then error 0x%x, "
+              "dst's block %s",
+              what, failures, wrong, (unsigned)error,
+              copy == existing ? "returned" : "not returned");
+      free_dwg (dst2);
+      free (dst2);
+      if (!alloc_failed)
+        break;
+    }
+
+done:
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  free_dwg (&src);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -5857,6 +6240,7 @@ main (int argc, char *argv[])
   error += test_unwalked_binary ();
   error += test_not_utf8 ();
   error += test_xrecord_strings ();
+  error += test_xrecord_nul ();
   error += test_refused ();
   error += test_copy_dynblocks (NULL);
   error += test_copy_dynblocks ("example_2004.dwg");
@@ -5868,5 +6252,6 @@ main (int argc, char *argv[])
   error += test_copy_block_matching ();
   error += test_copy_dynblock_params ();
   error += test_copy_block_matching_utf8 ();
+  error += test_copy_block_out_of_memory ();
   return error ? 1 : 0;
 }

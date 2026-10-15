@@ -167,10 +167,12 @@ field_name (const Dwg_Data *dwg, const char *str)
 }
 
 /* Whether names a and b, of documents of the same codepage, are the same:
-   one in UTF-8 and one in the codepage are compared as UTF-8. */
+   one in UTF-8 and one in the codepage are compared as UTF-8. Out of
+   memory, *errorp gets DWG_ERR_OUTOFMEM, rather than the names taken to
+   differ. */
 static int
 same_match_name (const Match_Name *a, const Match_Name *b,
-                 const BITCODE_RS codepage)
+                 const BITCODE_RS codepage, int *restrict errorp)
 {
   const Match_Name *cp, *utf8;
   char *str, *conv;
@@ -184,10 +186,15 @@ same_match_name (const Match_Name *a, const Match_Name *b,
   // a true name in EED needn't end in NUL
   str = (char *)malloc (cp->len + 1);
   if (!str)
-    return 0;
+    {
+      *errorp |= DWG_ERR_OUTOFMEM;
+      return 0;
+    }
   memcpy (str, cp->str, cp->len);
   str[cp->len] = '\0';
   conv = bit_TV_to_utf8 (str, codepage);
+  if (!conv)
+    *errorp |= DWG_ERR_OUTOFMEM;
   same = conv && same_name (conv, strlen (conv), utf8->str, utf8->len);
   if (conv != str)
     free (conv);
@@ -311,9 +318,11 @@ is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj)
   return !blk->blkisxref && !blk->xrefoverlaid && !blk->is_xref_dep;
 }
 
-/* The block of dst named as srcobj is in src, or 0. */
+/* The block of dst named as srcobj is in src, or 0, also when out of
+   memory, with DWG_ERR_OUTOFMEM in *errorp. */
 static BITCODE_RLL
-find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj)
+find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj,
+            int *restrict errorp)
 {
   const Dwg_Object_APPID_CONTROL *ctrl
       = control_of (dwg_get_first_object (dst, DWG_TYPE_BLOCK_CONTROL));
@@ -332,17 +341,20 @@ find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj)
           || !obj->tio.object->tio.BLOCK_HEADER)
         continue;
       dst_name = block_name (dst, obj);
-      if (same_match_name (&name, &dst_name, src->header.codepage))
+      if (same_match_name (&name, &dst_name, src->header.codepage, errorp))
         return obj->handle.value;
+      if (*errorp)
+        return 0;
     }
   return 0;
 }
 
 /* Whether table records a and b, of one type and of their documents, are
    the same record by name. The text styles of shape files have no name, and
-   are the same when their files are. */
+   are the same when their files are. Out of memory, *errorp gets
+   DWG_ERR_OUTOFMEM. */
 static int
-same_record (const Dwg_Object *a, const Dwg_Object *b)
+same_record (const Dwg_Object *a, const Dwg_Object *b, int *restrict errorp)
 {
   const char *name = a->tio.object->tio.APPID->name;
   Match_Name na, nb;
@@ -360,13 +372,15 @@ same_record (const Dwg_Object *a, const Dwg_Object *b)
       na = field_name (a->parent, name);
       nb = field_name (b->parent, b->tio.object->tio.APPID->name);
     }
-  return same_match_name (&na, &nb, a->parent->header.codepage);
+  return same_match_name (&na, &nb, a->parent->header.codepage, errorp);
 }
 
-/* The record of dst's table named as table record srcobj is in src, or 0.
-   Every table record starts with the fields of an APPID. */
+/* The record of dst's table named as table record srcobj is in src, or 0,
+   also when out of memory, with DWG_ERR_OUTOFMEM in *errorp. Every table
+   record starts with the fields of an APPID. */
 static BITCODE_RLL
-find_record (const Dwg_Data *dst, const Dwg_Object *srcobj)
+find_record (const Dwg_Data *dst, const Dwg_Object *srcobj,
+             int *restrict errorp)
 {
   const Dwg_Object *ctrlobj
       = dwg_get_first_object (dst, control_type (srcobj->fixedtype));
@@ -392,8 +406,10 @@ find_record (const Dwg_Data *dst, const Dwg_Object *srcobj)
       const Dwg_Object *obj
           = ref ? dwg_resolve_handle (dst, ref->absolute_ref) : NULL;
       if (obj && obj->fixedtype == srcobj->fixedtype && obj->tio.object
-          && obj->tio.object->tio.APPID && same_record (srcobj, obj))
+          && obj->tio.object->tio.APPID && same_record (srcobj, obj, errorp))
         return obj->handle.value;
+      if (*errorp)
+        return 0;
     }
   return 0;
 }
@@ -422,10 +438,11 @@ dictionary_key (const Dwg_Object_DICTIONARY *dict, const BITCODE_RLL handle)
   return NULL;
 }
 
-/* The entry of dict, a dictionary of dwg, with the key, or 0. */
+/* The entry of dict, a dictionary of dwg, with the key, or 0, also when
+   out of memory, with DWG_ERR_OUTOFMEM in *errorp. */
 static BITCODE_RLL
 dictionary_entry (const Dwg_Data *dwg, const Dwg_Object_DICTIONARY *dict,
-                  const Match_Name *key)
+                  const Match_Name *key, int *restrict errorp)
 {
   BITCODE_BL i;
   if (!dict || !dict->texts || !dict->itemhandles || !key->str)
@@ -433,8 +450,10 @@ dictionary_entry (const Dwg_Data *dwg, const Dwg_Object_DICTIONARY *dict,
   for (i = 0; i < dict->numitems; i++)
     {
       const Match_Name text = field_name (dwg, dict->texts[i]);
-      if (same_match_name (&text, key, dwg->header.codepage))
+      if (same_match_name (&text, key, dwg->header.codepage, errorp))
         return ref_target (dict->itemhandles[i]);
+      if (*errorp)
+        return 0;
     }
   return 0;
 }
@@ -474,11 +493,12 @@ is_named_style (const Dwg_Object_Type type)
 
 /* For a style in one of src's named object dictionary's dictionaries, such
    as a plot style of ACAD_PLOTSTYLENAME, the entry of the same key in dst's
-   dictionary of the same name, or 0. A plot style dst lacks is dst's
-   default plot style. */
+   dictionary of the same name, or 0, also when out of memory, with
+   DWG_ERR_OUTOFMEM in *errorp. A plot style dst lacks is dst's default plot
+   style. */
 static BITCODE_RLL
 find_dictionary_entry (const Dwg_Data *dst, const Dwg_Data *src,
-                       const Dwg_Object *srcobj)
+                       const Dwg_Object *srcobj, int *restrict errorp)
 {
   const Dwg_Object *dictobj = dwg_resolve_handle (src, owner_of (srcobj));
   const Dwg_Object *nod = named_object_dictionary (src);
@@ -496,8 +516,13 @@ find_dictionary_entry (const Dwg_Data *dst, const Dwg_Data *src,
   if (!key.str || !dict_name.str)
     return 0;
   dst_dictobj = dwg_resolve_handle (
-      dst, dictionary_entry (dst, dictionary_of (dst_nod), &dict_name));
-  found = dictionary_entry (dst, dictionary_of (dst_dictobj), &key);
+      dst,
+      dictionary_entry (dst, dictionary_of (dst_nod), &dict_name, errorp));
+  if (*errorp)
+    return 0;
+  found = dictionary_entry (dst, dictionary_of (dst_dictobj), &key, errorp);
+  if (*errorp)
+    return 0;
   if (!found && srcobj->fixedtype == DWG_TYPE_PLACEHOLDER && dst_dictobj
       && dst_dictobj->fixedtype == DWG_TYPE_DICTIONARYWDFLT)
     found
@@ -599,6 +624,7 @@ classify (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u)
   const BITCODE_RLL target = u->target;
   const Dwg_Object *obj;
   BITCODE_RLL found, owner;
+  int error = 0;
 
   // a handle value, such as a sort key, which the copy keeps
   if (u->kind == DWG_COPY_SLOT_REF && !u->code)
@@ -619,8 +645,10 @@ classify (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u)
     }
   if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
     {
-      found = find_block (bc->dst, bc->src, obj);
-      if (found)
+      found = find_block (bc->dst, bc->src, obj, &error);
+      if (error)
+        bc->error |= error;
+      else if (found)
         add_match (bc, target, found);
       else if (is_copyable_block (bc->src, obj))
         add_part (bc, obj);
@@ -629,8 +657,10 @@ classify (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u)
     }
   else if (dwg_obj_is_table (obj))
     {
-      found = find_record (bc->dst, obj);
-      if (found)
+      found = find_record (bc->dst, obj, &error);
+      if (error)
+        bc->error |= error;
+      else if (found)
         add_match (bc, target, found);
       else
         add_copy (bc, target, ROLE_RECORD);
@@ -645,8 +675,10 @@ classify (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u)
     }
   else
     {
-      found = find_dictionary_entry (bc->dst, bc->src, obj);
-      if (found)
+      found = find_dictionary_entry (bc->dst, bc->src, obj, &error);
+      if (error)
+        bc->error |= error;
+      else if (found)
         add_match (bc, target, found);
       else
         defer (bc, target);
@@ -1031,7 +1063,14 @@ copy_block (Dwg_Data *dst, const Dwg_Data *src,
     }
 
   // a block of the same name in dst is the definition to use
-  found = find_block (dst, src, srcobj);
+  error = 0;
+  found = find_block (dst, src, srcobj, &error);
+  if (error)
+    {
+      if (errorp)
+        *errorp = error;
+      return NULL;
+    }
   if (found)
     {
       LOG_TRACE ("dwg_dynblock_copy_block: dst has BLOCK_HEADER " FORMAT_HV

@@ -104,10 +104,11 @@ typedef struct _dwg_copy_unresolved
      the add API, and in its codepage in the others. They are converted
      between the two, with \U+XXXX for a character the codepage lacks, as
      the encoder converts them. An XRECORD's strings are converted with
-     their own codepage, and its xdata_size computed again. EED strings,
-     which the encoder writes as they are in every kind, are copied as
-     they are. A string that is not UTF-8 in a document whose strings are
-     is copied as it is, with DWG_ERR_VALUEOUTOFBOUNDS.
+     their own codepage, NULs inside them kept, and its xdata_size computed
+     again. EED strings, which the encoder writes as they are in every
+     kind, are copied as they are. A string that is not UTF-8 in a document
+     whose strings are, or that has a character beyond U+FFFF, which
+     \U+XXXX can't hold, is copied as it is, with DWG_ERR_VALUEOUTOFBOUNDS.
    - From r2000 a LAYER holds its flags three ways: flag0, the fields
      frozen, off, frozen_in_new, locked, plotflag and linewt, and the DXF
      flag with the sign of the colour index. The encoder writes flag0 as it

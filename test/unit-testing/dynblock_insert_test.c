@@ -82,9 +82,11 @@ static const BITCODE_RLL autocad_placements[]
     = { 0xBFD0, 0xBFD8, 0xC145, 0xC14C, 0xC17F,
         0xC8D7, 0xC8DA, 0xC8E0, 0xC8E1, 0xC8E2 };
 
-/* The visibility states each definition is placed at besides. Door's other
-   states have a character outside ASCII, which a document built with the
-   add API loses when written (runbook task P3-06, tested in copy_test). */
+/* The visibility states each definition is placed at besides. Door's
+   "Open 45\xC2\xBA" and "Open 90\xC2\xBA" have a character outside ASCII,
+   in UTF-8 in the document built with the add API, as in the API, and in
+   codepage 1252 in the fixture and the read back. Its own state, placed
+   at its values, is "Open 30\xC2\xBA". */
 typedef struct
 {
   BITCODE_RLL def;
@@ -102,7 +104,9 @@ static const Test_States test_states[] = {
   { TOILET,
     "Type (view)",
     { "Round (Plan)", "Pullchain (Plan)", NULL, NULL } },
-  { DOOR, "Opening Angle", { "Closed", NULL, NULL, NULL } },
+  { DOOR,
+    "Opening Angle",
+    { "Closed", "Open 45\xC2\xBA", "Open 90\xC2\xBA", NULL } },
 };
 
 static char fixture[512];
@@ -1847,6 +1851,103 @@ test_attributes (Dwg_Data *src)
   return failures;
 }
 
+/* An attribute definition whose default value has characters outside
+   ASCII, added to Trees in a fixture of its own, which holds it in
+   codepage 1252, and copied with Trees into a document built with the add
+   API, which holds it in UTF-8: the ATTRIB placed holds what the add API
+   stores for that default given in UTF-8. Not written, as the encoder of a
+   document built with the add API doesn't write all characters right. */
+static int
+test_attribute_text (void)
+{
+  static const char dflt[] = "30\xC2\xB0 caf\xC3\xA9";
+  static const char dflt_1252[] = "30\xB0 caf\xE9";
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 };
+  const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
+  Dwg_Data src;
+  Dwg_Data *dst = NULL;
+  BITCODE_RLL def_h = 0;
+  const Dwg_Object *defobj = NULL, *attobj = NULL;
+  Dwg_Entity_ATTDEF *attdef;
+  Dwg_Entity_INSERT *ins;
+  char *expected = NULL;
+  int error, failures = 0;
+
+  error = read_dwg (fixture, &src);
+  if (error & ~KNOWN_ERRORS)
+    {
+      FAIL ("attribute text: dwg_read_file 0x%x", error);
+      free_dwg (&src);
+      return 1;
+    }
+  attdef = dwg_add_ATTDEF (block_header (&src, TREES), 2.5, 0, "Size", &p1,
+                           "SIZE", dflt);
+  loglevel = test_loglevel;
+  if (!attdef || !attdef->default_value
+      || strcmp (attdef->default_value, dflt_1252))
+    {
+      FAIL ("attribute text: the definition not added in codepage 1252");
+      free_dwg (&src);
+      return 1;
+    }
+  dst = document_with (&src, TREES, &def_h);
+  if (!dst)
+    {
+      FAIL ("attribute text: copying Trees failed");
+      free_dwg (&src);
+      return 1;
+    }
+  // the copy of the definition, the block's last entity
+  {
+    const Dwg_Object_BLOCK_HEADER *def = block_header (dst, def_h);
+    if (def->num_owned && def->entities)
+      defobj = object (dst, ref (def->entities[def->num_owned - 1]));
+  }
+  if (defobj && defobj->fixedtype == DWG_TYPE_ATTDEF
+      && !strcmp (defobj->tio.entity->tio.ATTDEF->default_value, dflt))
+    OK ("attribute text: the definition copied in UTF-8");
+  else
+    {
+      FAIL ("attribute text: the definition not copied in UTF-8");
+      failures++;
+    }
+
+  error = 0;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), block_header (dst, def_h),
+                             &at, 1.0, 0.0, NULL, 0, NULL, 0, &error);
+  expected = dwg_add_u8_input (dst, dflt);
+  loglevel = test_loglevel;
+  if (ins && ins->num_owned == 1 && ins->attribs)
+    attobj = object (dst, ref (ins->attribs[0]));
+  if (!ins || error || !expected)
+    {
+      FAIL ("attribute text: placing failed: 0x%x", error);
+      failures++;
+    }
+  else if (attobj && attobj->fixedtype == DWG_TYPE_ATTRIB
+           && attobj->tio.entity->tio.ATTRIB->text_value
+           && !strcmp (attobj->tio.entity->tio.ATTRIB->text_value, expected))
+    OK ("attribute text: the ATTRIB holds the default as the add API "
+        "stores it");
+  else
+    {
+      FAIL ("attribute text: the ATTRIB holds '%s', not the default as the "
+            "add API stores it, '%s'",
+            attobj && attobj->fixedtype == DWG_TYPE_ATTRIB
+                    && attobj->tio.entity->tio.ATTRIB->text_value
+                ? attobj->tio.entity->tio.ATTRIB->text_value
+                : "",
+            expected);
+      failures++;
+    }
+  free (expected);
+  free_dwg (dst);
+  free (dst);
+  free_dwg (&src);
+  return failures;
+}
+
 /* An IMAGE in a definition: its copy in the representation block gets an
    image definition reactor of its own, which the image definition lists,
    while the definition's IMAGE keeps its own. */
@@ -2844,6 +2945,7 @@ main (int argc, char *argv[])
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);
+  failures += test_attribute_text ();
   failures += test_image_reactors (&src);
   failures += test_sortents_entries (&src);
   failures += test_sortents_order (&src);

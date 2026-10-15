@@ -728,13 +728,46 @@ slots_clear (Copy_Slots *restrict s)
   s->count = 0;
 }
 
+/* Whether the len bytes at str are UTF-8 of characters up to U+FFFF, which
+   bit_utf8_to_TV () converts in full: sequences of 1 to 3 bytes, none of
+   them overlong or a surrogate. \U+XXXX can't hold a character beyond. */
+static int
+is_utf8_bmp (const unsigned char *restrict str, const size_t len)
+{
+  size_t i = 0;
+  while (i < len)
+    {
+      const unsigned char c = str[i];
+      if (c < 0x80)
+        i++;
+      else if (c >= 0xC2 && c <= 0xDF)
+        {
+          if (i + 1 >= len || (str[i + 1] & 0xC0) != 0x80)
+            return 0;
+          i += 2;
+        }
+      else if ((c & 0xF0) == 0xE0)
+        {
+          if (i + 2 >= len || (str[i + 1] & 0xC0) != 0x80
+              || (str[i + 2] & 0xC0) != 0x80
+              || (c == 0xE0 && str[i + 1] < 0xA0)  // overlong
+              || (c == 0xED && str[i + 1] >= 0xA0)) // surrogate
+            return 0;
+          i += 3;
+        }
+      else
+        return 0;
+    }
+  return 1;
+}
+
 /* A copy of the 8-bit string str, of len bytes, converted as cdat->tv says
    with the given codepage, or NULL when out of memory. Converted to UTF-8,
    \U+XXXX becomes the character; converted to the codepage, a character
    the codepage lacks becomes \U+XXXX, as the encoder converts it. A string
-   that is not UTF-8 in a document whose strings are is copied as it is,
-   with DWG_ERR_VALUEOUTOFBOUNDS: bit_utf8_to_TV () fails on it whatever
-   room it has. */
+   that is not UTF-8 in a document whose strings are, or that has a
+   character beyond U+FFFF, is copied as it is, with
+   DWG_ERR_VALUEOUTOFBOUNDS. */
 static char *
 copy_tv (Copy_Chain *restrict cdat, const char *restrict str,
          const size_t len, const BITCODE_RS codepage)
@@ -749,17 +782,22 @@ copy_tv (Copy_Chain *restrict cdat, const char *restrict str,
     }
   else if (cdat->tv == COPY_TV_FROM_UTF8)
     {
-      /* A character takes at most 7 bytes as \U+XXXX, for 2 or 3 bytes of
-         UTF-8, and \uXXXX takes 7 for its 6. */
-      const size_t size = len * 4 + 8;
-      copy = (char *)malloc (size);
-      if (!copy)
-        return NULL;
-      if (bit_utf8_to_TV (copy, (const unsigned char *)str, size, len, 0,
-                          codepage))
-        return copy;
-      free (copy);
-      LOG_WARN ("copy: string \"%s\" is not UTF-8, copied as it is", str);
+      if (is_utf8_bmp ((const unsigned char *)str, len))
+        {
+          /* A character takes at most 7 bytes as \U+XXXX, for 2 or 3 bytes
+             of UTF-8, and \uXXXX takes 7 for its 6. */
+          const size_t size = len * 4 + 8;
+          copy = (char *)malloc (size);
+          if (!copy)
+            return NULL;
+          if (bit_utf8_to_TV (copy, (const unsigned char *)str, size, len, 0,
+                              codepage))
+            return copy;
+          free (copy);
+        }
+      LOG_WARN ("copy: string \"%s\" is not UTF-8 of characters up to "
+                "U+FFFF, copied as it is",
+                str);
       cdat->error |= DWG_ERR_VALUEOUTOFBOUNDS;
     }
   copy = (char *)malloc (len + 1);
@@ -769,6 +807,58 @@ copy_tv (Copy_Chain *restrict cdat, const char *restrict str,
       copy[len] = '\0';
     }
   return copy;
+}
+
+/* copy_tv () for a string of size bytes that may hold NULs, as an XRECORD
+   string read from a file may: each part between them is converted, and
+   the NULs kept. The copy, with a NUL after it, is *sizep bytes long; NULL
+   when out of memory. */
+static char *
+copy_tv_parts (Copy_Chain *restrict cdat, const char *restrict str,
+               const size_t size, const BITCODE_RS codepage,
+               size_t *restrict sizep)
+{
+  // ends in a NUL, as copy_tv () reads a part up to one
+  char *parts = (char *)malloc (size + 1);
+  char *copy = NULL;
+  size_t pos = 0, copy_size = 0;
+  if (!parts)
+    return NULL;
+  memcpy (parts, str, size);
+  parts[size] = '\0';
+  for (;;)
+    {
+      const size_t len = strlen (parts + pos);
+      char *part = copy_tv (cdat, parts + pos, len, codepage);
+      size_t part_size;
+      char *grown;
+      if (!part)
+        break;
+      part_size = strlen (part);
+      grown = (char *)realloc (copy, copy_size + part_size + 1);
+      if (!grown)
+        {
+          free (part);
+          break;
+        }
+      copy = grown;
+      // with the NUL after it, kept when another part follows
+      memcpy (copy + copy_size, part, part_size + 1);
+      copy_size += part_size;
+      free (part);
+      pos += len;
+      if (pos >= size)
+        {
+          free (parts);
+          *sizep = copy_size;
+          return copy;
+        }
+      copy_size++;
+      pos++;
+    }
+  free (parts);
+  free (copy);
+  return NULL;
 }
 
 static void
@@ -1280,19 +1370,17 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
           if (rbuf->value.str.u.data && !rbuf->value.str.is_tu
               && cdat->tv != COPY_TV_AS_IS)
             {
-              const char *str = rbuf->value.str.u.data;
-              size_t len = 0;
-              char *conv;
-              while (len < rbuf->value.str.size && str[len])
-                len++;
-              conv = copy_tv (cdat, str, len, rbuf->value.str.codepage);
+              size_t size = 0;
+              char *conv = copy_tv_parts (
+                  cdat, rbuf->value.str.u.data, rbuf->value.str.size,
+                  rbuf->value.str.codepage, &size);
               copy->value.str.u.data = conv;
               if (!conv)
                 {
                   copy->value.str.size = 0;
                   cdat->error |= DWG_ERR_OUTOFMEM;
                 }
-              else if (strlen (conv) > 0xFFFF)
+              else if (size > 0xFFFF)
                 {
                   LOG_ERROR ("copy: %s " FORMAT_HV " XRECORD string of %u "
                              "bytes too long once converted",
@@ -1304,7 +1392,7 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
                   cdat->error |= DWG_ERR_VALUEOUTOFBOUNDS;
                 }
               else
-                copy->value.str.size = (BITCODE_RS)strlen (conv);
+                copy->value.str.size = (BITCODE_RS)size;
               if (copy->value.str.size != rbuf->value.str.size)
                 cdat->xdata_resized = 1;
               break;
