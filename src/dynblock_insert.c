@@ -500,6 +500,17 @@ class_name (const Dwg_Data *dwg, const Dwg_Object *obj)
   return obj->dxfname ? obj->dxfname : dwg_type_name (obj->fixedtype);
 }
 
+/* angle, in radians, in [0, 2 pi), as dynblock_eval.c reduces it */
+static double
+normal_angle (const double angle)
+{
+  double a = fmod (angle, 2.0 * M_PI);
+  if (a < 0.0)
+    a += 2.0 * M_PI;
+  // a tiny negative angle plus 2 pi rounds to 2 pi
+  return a < 2.0 * M_PI ? a : 0.0;
+}
+
 /* Matches values to the definition's properties into p->state, and decides
    whether the placement is at the definition's values. */
 static int
@@ -590,7 +601,10 @@ check_values (Dynblock_Placement *p, const Dwg_DynValue *values,
           break;
         case DWG_DYNPARAM_ROTATION:
           {
-            double d = fmod (fabs (v->value - dp->default_value), 2.0 * M_PI);
+            // each reduced first: the difference of a huge value and the
+            // default would lose the default
+            double d = fabs (normal_angle (v->value)
+                             - normal_angle (dp->default_value));
             if (d > M_PI)
               d = 2.0 * M_PI - d;
             if (d > VALUE_EPSILON)

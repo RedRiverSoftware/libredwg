@@ -2634,6 +2634,57 @@ test_definition_refusals (Dwg_Data *src)
   }
   free_document (dst);
 
+  // A rotation given as a huge angle, against a default of 1: the Toilet's
+  // Angle, its end point turned 1 from the base angle point. 2 pi 2^60 is
+  // a turn of 0, so a change; 1 + 4 pi is the default.
+  dst = document_with (src, TOILET, &def_h);
+  {
+    Dwg_Object *obj
+        = dst ? graph_node (dst, def_h, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL)
+              : NULL;
+    Dwg_Object_BLOCKROTATIONPARAMETER *rotation
+        = obj ? obj->tio.object->tio.BLOCKROTATIONPARAMETER : NULL;
+    Dwg_DynValue rv[2];
+    if (rotation)
+      {
+        const double dx
+            = rotation->def_base_angle_pt.x - rotation->def_basept.x;
+        const double dy
+            = rotation->def_base_angle_pt.y - rotation->def_basept.y;
+        rotation->def_endpt.x
+            = rotation->def_basept.x + dx * cos (1.0) - dy * sin (1.0);
+        rotation->def_endpt.y
+            = rotation->def_basept.y + dx * sin (1.0) + dy * cos (1.0);
+        memset (rv, 0, sizeof (rv));
+        rv[0].name = (char *)"Angle";
+        rv[0].value = ldexp (2.0 * M_PI, 60);
+        failures += test_refusal (dst, model_space (dst),
+                                  block_header (dst, def_h), &pt, 1.0, 0.0,
+                                  rv, 1, NULL, 0,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a rotation of 2 pi 2^60, from a default "
+                                  "of 1");
+        rv[1].name = (char *)"Type (view)";
+        rv[1].state = (char *)"Round (Plan)";
+        failures += test_refusal (dst, model_space (dst),
+                                  block_header (dst, def_h), &pt, 1.0, 0.0,
+                                  rv, 2, NULL, 0,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a rotation of 2 pi 2^60, from a default "
+                                  "of 1, at another state");
+        rv[0].value = 1.0 + 4.0 * M_PI;
+        failures += test_accepted (dst, def_h, 1.0, rv, 1,
+                                   "a rotation of 1 + 4 pi, the default of "
+                                   "1");
+      }
+    else
+      {
+        FAIL ("the Toilet has no rotation parameter");
+        failures++;
+      }
+  }
+  free_document (dst);
+
   // a drawing other than r2004
   dst = document_with (src, TREES, &def_h);
   if (dst)
