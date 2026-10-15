@@ -390,6 +390,9 @@ main (int argc, char *argv[])
   (void)argv;
 
 #ifndef HAVE_TEST_THREADS
+  // tests_common.h's helpers, unused here
+  (void)ok;
+  (void)fail;
   printf ("SKIP: no threads on this platform\n");
   return 77;
 #else
