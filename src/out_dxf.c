@@ -2222,7 +2222,7 @@ convert_SAB_to_SAT1 (const Dwg_Entity_3DSOLID *restrict _obj,
   if (!sab_size && _obj->block_size)
     sab_size = _obj->block_size[0];
 
-  if (!_obj->acis_data
+  if (!_obj->acis_data || sab_size < sizeof ("ACIS BinaryFile") - 1
       || strlen ((char *)_obj->acis_data) < sizeof ("ACIS BinaryFile") - 1
       || !memBEGINc ((char *)_obj->acis_data, "ACIS BinaryFile"))
     {
@@ -2730,6 +2730,12 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
   char **blocks;
   if (convert_SAB_to_SAT1 (_obj, &num_blocks, &block_size, &blocks))
     return 1;
+  if (!blocks || !block_size)
+    {
+      // nothing converted: the entity stays version 2
+      free_sat_blocks (0, block_size, blocks);
+      return 0;
+    }
   free_sat_blocks (_obj->encr_sat_data ? _obj->num_blocks : 0,
                    _obj->block_size, _obj->encr_sat_data);
   _obj->num_blocks = num_blocks;

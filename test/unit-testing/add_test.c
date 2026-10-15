@@ -3244,6 +3244,115 @@ cleanup:
     }
   return numfailed ();
 }
+
+/* SAB that the DXF writer can't convert, on a SAB entity of
+   example_2004.dwg: with no size, it isn't read at all, and the entity is
+   left as it is. And dwg_convert_SAB_to_SAT1 (), which converts in place,
+   leaves an entity as it is when the conversion gives no SAT at all, here
+   for an ident of length 0. */
+static int
+test_sab_not_converted (void)
+{
+  const char *name = "example_2004.dwg";
+  const char *dxffile = "add_sab_size_0.dxf";
+  // header, 3 empty strings, 3 doubles 1.0, then an ident of length 0
+  unsigned char sab[] = {
+    'A', 'C', 'I', 'S', ' ', 'B', 'i', 'n', 'a', 'r', 'y', 'F', 'i', 'l',
+    'e', 0x28, 0x55, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+    7, 0, 7, 0, 7, 0,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    13, 0
+  };
+  char path[256];
+  Dwg_Data dwg;
+  Dwg_Entity_3DSOLID *_obj = NULL;
+  Bit_Chain dat = { 0 };
+  BITCODE_RC *acis_data;
+  BITCODE_BL sab_size, block_size0;
+  BITCODE_BL *block_size;
+  int error;
+
+  failed = 0;
+  memset (&dwg, 0, sizeof (dwg));
+  if (!test_data_file (name, path, sizeof (path)))
+    {
+      fail ("sab_not_converted: %s not found", name);
+      return numfailed ();
+    }
+  dwg.opts = tracelevel;
+  error = dwg_read_file (path, &dwg);
+  for (BITCODE_BL i = 0;
+       error < DWG_ERR_CRITICAL && !_obj && i < dwg.num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg.object[i];
+      if ((obj->fixedtype == DWG_TYPE__3DSOLID
+           || obj->fixedtype == DWG_TYPE_REGION
+           || obj->fixedtype == DWG_TYPE_BODY)
+          && obj->tio.entity->tio._3DSOLID->version == 2
+          && obj->tio.entity->tio._3DSOLID->block_size)
+        _obj = obj->tio.entity->tio._3DSOLID;
+    }
+  if (!_obj)
+    {
+      fail ("sab_not_converted: no SAB entity in %s, error 0x%x", name,
+            error);
+      dwg_free (&dwg);
+      return numfailed ();
+    }
+  acis_data = _obj->acis_data;
+  sab_size = _obj->sab_size;
+  block_size = _obj->block_size;
+  block_size0 = block_size[0];
+
+  // no size: not SAB the DXF writer can read
+  _obj->sab_size = 0;
+  _obj->block_size[0] = 0;
+  dat.version = dat.from_version = dwg.header.version;
+  dat.codepage = dwg.header.codepage;
+  dat.opts = dwg.opts;
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    fail ("sab_not_converted: cannot write %s", dxffile);
+  else
+    {
+      error = dwg_write_dxf (&dat, &dwg);
+      fclose (dat.fh);
+      if (error < DWG_ERR_CRITICAL && _obj->version == 2
+          && _obj->acis_data == acis_data && !_obj->sab_size
+          && _obj->block_size == block_size && !_obj->encr_sat_data)
+        ok ("sab_not_converted: SAB without a size not read, the entity "
+            "left as it is");
+      else
+        fail ("sab_not_converted: SAB without a size: error 0x%x, version "
+              "%u",
+              error, (unsigned)_obj->version);
+    }
+  _obj->sab_size = sab_size;
+  _obj->block_size[0] = block_size0;
+
+  // in place: no SAT from an ident of length 0
+  _obj->acis_data = sab;
+  _obj->sab_size = sizeof (sab);
+  error = dwg_convert_SAB_to_SAT1 (_obj);
+  if (!error && _obj->version == 2 && _obj->acis_data == sab
+      && _obj->sab_size == sizeof (sab) && _obj->block_size == block_size
+      && !_obj->encr_sat_data)
+    ok ("sab_not_converted: nothing converted in place, the entity left as "
+        "it is");
+  else
+    fail ("sab_not_converted: nothing converted in place: error %d, version "
+          "%u",
+          error, (unsigned)_obj->version);
+  _obj->acis_data = acis_data;
+  _obj->sab_size = sab_size;
+
+  dwg_free (&dwg);
+  if (!numfailed ())
+    unlink (dxffile);
+  return numfailed ();
+}
 #endif
 
 int
@@ -3311,6 +3420,7 @@ main (int argc, char *argv[])
   error += test_add_handle_high ();
 #ifndef DISABLE_DXF
   error += test_dxf_keeps_sab ();
+  error += test_sab_not_converted ();
 #endif
 
 #ifndef DISABLE_DXF
