@@ -32,8 +32,8 @@
 #include "logging.h"
 
 /* the current version per spec block */
-static unsigned int cur_ver = 0;
-static BITCODE_BL rcount1, rcount2;
+static DWG_THREAD_LOCAL unsigned int cur_ver = 0;
+static DWG_THREAD_LOCAL BITCODE_BL rcount1, rcount2;
 
 /*--------------------------------------------------------------------------------
  * MACROS
