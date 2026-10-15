@@ -420,6 +420,7 @@ check_minimal += dynblock_eval_test$(EXEEXT)
 check_minimal += fields_test$(EXEEXT)
 check_minimal += summaryinfo_test$(EXEEXT)
 check_minimal += copy_test$(EXEEXT)
+check_minimal += eed_test$(EXEEXT)
 endif
 if !HAVE_MINGW
 check_minimal += decode_test$(EXEEXT)
