@@ -98,7 +98,7 @@ bit_umc_size (BITCODE_UMC value)
    SECTION_R13_SIZE is the size and the sentinel.
  */
 #define SECTION_R13_SIZE 7U
-static Dwg_Section_Type_r13 section_order[SECTION_R13_SIZE]
+static DWG_THREAD_LOCAL Dwg_Section_Type_r13 section_order[SECTION_R13_SIZE]
 #ifndef __cplusplus
     = { 0 }
 #endif

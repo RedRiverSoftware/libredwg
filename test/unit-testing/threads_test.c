@@ -59,25 +59,27 @@ typedef struct
 {
   const char *file; // under test/test-data
   int write;        // read, then write back in the same version
+  int little_endian_only; // not read on big-endian machines yet (P1-09-FU3)
 } Job;
 
 /* Reads: one of each decoder, r11, r13-r2000, r2004 and r2010+ sections,
    r2007. Then writes: r2000 and r2004. */
 static const Job jobs[] = {
-  { "r11/ACEB10.dwg", 0 },     { "example_r14.dwg", 0 },
-  { "example_2000.dwg", 0 },   { "example_2004.dwg", 0 },
-  { "2004/Dynblocks.dwg", 0 }, { "example_2007.dwg", 0 },
-  { "example_2010.dwg", 0 },   { "example_2013.dwg", 0 },
-  { "example_2018.dwg", 0 },
+  { "r11/ACEB10.dwg", 0, 0 },     { "example_r14.dwg", 0, 0 },
+  { "example_2000.dwg", 0, 0 },   { "example_2004.dwg", 0, 0 },
+  { "2004/Dynblocks.dwg", 0, 0 }, { "example_2007.dwg", 0, 1 },
+  { "example_2010.dwg", 0, 0 },   { "example_2013.dwg", 0, 0 },
+  { "example_2018.dwg", 0, 0 },
 #  ifdef USE_WRITE
-  { "example_2000.dwg", 1 },   { "example_2004.dwg", 1 },
-  { "2004/Dynblocks.dwg", 1 },
+  { "example_2000.dwg", 1, 0 },   { "example_2004.dwg", 1, 0 },
+  { "2004/Dynblocks.dwg", 1, 0 },
 #  endif
 };
 #  define NUM_JOBS (sizeof (jobs) / sizeof (jobs[0]))
 
 static char paths[NUM_JOBS][512];
 static unsigned num_reads; // the jobs before the first write
+static int left_out[NUM_JOBS];
 
 typedef struct
 {
@@ -267,6 +269,8 @@ static void
 check_job (Worker *w, unsigned j, const char *out)
 {
   Job_Result result;
+  if (left_out[j])
+    return;
   run_job (j, out, &result);
   w->runs++;
   if (!same_result (&result, &expected[j]))
@@ -280,8 +284,18 @@ check_job (Worker *w, unsigned j, const char *out)
 static unsigned
 runs_per_thread (void)
 {
-  const unsigned num_writes = (unsigned)NUM_JOBS - num_reads;
-  return ROUNDS * (num_reads + WRITE_PASSES * num_writes);
+  unsigned runs = 0;
+  for (unsigned j = 0; j < NUM_JOBS; j++)
+    if (!left_out[j])
+      runs += j < num_reads ? 1 : WRITE_PASSES;
+  return ROUNDS * runs;
+}
+
+static int
+is_big_endian (void)
+{
+  const uint16_t one = 1;
+  return *(const unsigned char *)&one == 0;
 }
 
 /* In each round, a thread reads every file, starting at a different file
@@ -390,8 +404,23 @@ main (int argc, char *argv[])
         }
       run_job (j, "threads_test.dwg", &expected[j]);
       loglevel = test_loglevel;
-      if (expected[j].error >= DWG_ERR_CRITICAL || !expected[j].num_objects
-          || (jobs[j].write && !expected[j].size))
+      if (jobs[j].little_endian_only && is_big_endian ())
+        {
+          if (expected[j].error >= DWG_ERR_CRITICAL)
+            {
+              todo ("%s: not read on big-endian machines (P1-09-FU3), "
+                    "left out",
+                    jobs[j].file);
+              left_out[j] = 1;
+            }
+          else
+            fail ("%s: read on a big-endian machine, so it need not be "
+                  "left out there any more (P1-09-FU3)",
+                  jobs[j].file);
+        }
+      else if (expected[j].error >= DWG_ERR_CRITICAL
+               || !expected[j].num_objects
+               || (jobs[j].write && !expected[j].size))
         fail ("%s: %s on one thread: error 0x%x, %u objects", jobs[j].file,
               what, (unsigned)expected[j].error,
               (unsigned)expected[j].num_objects);
