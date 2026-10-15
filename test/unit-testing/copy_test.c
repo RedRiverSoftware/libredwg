@@ -3399,7 +3399,9 @@ check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
                 wrong++;
             }
         }
-      else if (placed_block (obj) && i >= first)
+      else if ((obj->fixedtype == DWG_TYPE_INSERT
+                || obj->fixedtype == DWG_TYPE_MINSERT)
+               && i >= first)
         {
           const Dwg_Object *blkobj
               = dwg_resolve_handle (dwg, placed_block (obj));
