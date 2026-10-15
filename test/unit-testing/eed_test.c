@@ -26,8 +26,10 @@
    - items written by the encoder, a 1003 layer and 1000 strings, also one
      read from an r2007 or later file, in those byte orders;
    - a first group of 256 bytes, whose size takes 2 bits.
-   In an r11 file, a string that ends an entity's EED group is read. And in
-   public drawings every EED group is read whole: its items take all of its
+   A group whose size runs past the end of its object stops the object's
+   decoding with DWG_ERR_VALUEOUTOFBOUNDS. In an r11 file, a string or a
+   1003 layer index that ends an entity's EED group is read. And in public
+   drawings every EED group is read whole: its items take all of its
    bytes. */
 
 #include <stdio.h>
@@ -130,6 +132,95 @@ free_dwg (Dwg_Data *dwg)
   loglevel = tracelevel;
   dwg_free (dwg);
   loglevel = test_loglevel;
+}
+
+/* The bytes of the file at path, or NULL. */
+static unsigned char *
+read_file_bytes (const char *path, size_t *sizep)
+{
+  unsigned char *data = NULL;
+  long end;
+  FILE *fp = fopen (path, "rb");
+  *sizep = 0;
+  if (!fp)
+    return NULL;
+  end = fseek (fp, 0, SEEK_END) ? -1 : ftell (fp);
+  if (end > 0 && !fseek (fp, 0, SEEK_SET))
+    data = (unsigned char *)malloc ((size_t)end);
+  if (data && fread (data, 1, (size_t)end, fp) != (size_t)end)
+    {
+      free (data);
+      data = NULL;
+    }
+  fclose (fp);
+  if (data)
+    *sizep = (size_t)end;
+  return data;
+}
+
+static int
+write_file_bytes (const char *file, const unsigned char *data,
+                  const size_t size)
+{
+  int written;
+  FILE *fp = fopen (file, "wb");
+  if (!fp)
+    return 0;
+  written = fwrite (data, 1, size, fp) == size;
+  written &= !fclose (fp);
+  return written;
+}
+
+/* The byte that starts at bit of data, which a bit chain reads most
+   significant bit first. */
+static unsigned char
+byte_at_bit (const unsigned char *data, const size_t bit)
+{
+  const size_t byte = bit / 8;
+  const unsigned shift = (unsigned)(bit % 8);
+  if (!shift)
+    return data[byte];
+  return (unsigned char)((data[byte] << shift)
+                         | (data[byte + 1] >> (8 - shift)));
+}
+
+static void
+set_byte_at_bit (unsigned char *data, const size_t bit,
+                 const unsigned char value)
+{
+  const size_t byte = bit / 8;
+  const unsigned shift = (unsigned)(bit % 8);
+  if (!shift)
+    {
+      data[byte] = value;
+      return;
+    }
+  data[byte] = (unsigned char)((data[byte] & (0xFF << (8 - shift)))
+                               | (value >> shift));
+  data[byte + 1] = (unsigned char)((data[byte + 1] & (0xFF >> shift))
+                                   | (value << (8 - shift)));
+}
+
+/* Sets the first byte of the first run of bytes in data that matches
+   pattern, starting at any bit, as an object's EED can. Returns 0 when there
+   is none. */
+static int
+patch_at_bit (unsigned char *data, const size_t size,
+              const unsigned char *pattern, const size_t len,
+              const unsigned char value)
+{
+  for (size_t bit = 0; bit / 8 + len < size; bit++)
+    {
+      size_t k = 0;
+      while (k < len && byte_at_bit (data, bit + k * 8) == pattern[k])
+        k++;
+      if (k == len)
+        {
+          set_byte_at_bit (data, bit, value);
+          return 1;
+        }
+    }
+  return 0;
 }
 
 /* An APPID handle of an EED group: code 5, and as many bytes as its value
@@ -484,6 +575,78 @@ cleanup:
   return numfailed ();
 }
 
+/* A group whose size, read alone, fits in its object, but whose end lies
+   past the object's end: an r2000 file written with a group of 7 bytes, its
+   size then changed to the LINE's own size. The LINE's decoding stops there
+   with DWG_ERR_VALUEOUTOFBOUNDS, and the LINE has no EED, instead of the
+   rest of it being read from the bytes after it. */
+static int
+test_group_past_object (void)
+{
+  const char *what = "EED group running past its object";
+  const char *written = "eed_past_object_source.dwg";
+  const char *changed = "eed_past_object.dwg";
+  const unsigned char group[] = { 0, 3, 0, 30, 'a', 'b', 'c' };
+  unsigned char pattern[3 + sizeof (group)];
+  unsigned char *bytes = NULL;
+  size_t size = 0;
+  Drawing d;
+  Dwg_Data drawn;
+  const Dwg_Object *obj = NULL;
+  BITCODE_RL line_size = 0;
+  int error = 0, made = 0;
+
+  failed = 0;
+  memset (&drawn, 0, sizeof (drawn));
+  if (new_drawing (R_2000, group, sizeof (group), &d))
+    obj = write_and_read (&d, written, &drawn, &error);
+  // the group's size as a BS's byte, its APPID handle (code 5, 1 byte),
+  // then its bytes
+  if (obj && d.appid1 < 0x100)
+    {
+      line_size = obj->size;
+      pattern[0] = sizeof (group);
+      pattern[1] = 0x51;
+      pattern[2] = (unsigned char)d.appid1;
+      memcpy (&pattern[3], group, sizeof (group));
+      bytes = read_file_bytes (written, &size);
+      made = bytes && line_size < 0x100
+             && patch_at_bit (bytes, size, pattern, sizeof (pattern),
+                              (unsigned char)line_size)
+             && write_file_bytes (changed, bytes, size);
+    }
+  free (bytes);
+  free_dwg (&drawn);
+  memset (&drawn, 0, sizeof (drawn));
+  if (!made)
+    {
+      FAIL ("%s: no drawing made with the changed size, error 0x%x", what,
+            (unsigned)error);
+      goto cleanup;
+    }
+  error = read_dwg (changed, &drawn);
+  obj = error < DWG_ERR_CRITICAL ? dwg_resolve_handle (&drawn, d.line)
+                                 : NULL;
+  if (obj && !obj->tio.entity->num_eed
+      && (error & DWG_ERR_VALUEOUTOFBOUNDS) && (error & DWG_ERR_INVALIDEED))
+    OK ("%s: the LINE stopped there, no EED (error 0x%x)", what,
+        (unsigned)error);
+  else
+    FAIL ("%s: %s, %u EED items, error 0x%x", what,
+          obj ? "LINE read" : "no LINE", obj ? obj->tio.entity->num_eed : 0,
+          (unsigned)error);
+
+cleanup:
+  free_dwg (&drawn);
+  free_drawing (&d);
+  if (!numfailed ())
+    {
+      unlink (written);
+      unlink (changed);
+    }
+  return numfailed ();
+}
+
 /* A first group of 256 bytes, whose size takes only 2 bits as a BS, so the
    byte read from often stays the same: read like any other. */
 static int
@@ -785,26 +948,30 @@ cleanup:
 
 /* An r11 entity has one EED group, of items without a codepage: its APPID
    index (1001) and then the data, as in r11/ACEB10.dwg. A string that ends
-   its group, there or as the only item, is read. */
+   its group, there or as the only item, is read, and so is a 1003 layer,
+   an index of 2 bytes, that ends it. */
 static int
 test_r11_groups (void)
 {
-  const char *what = "r11 EED group ending with a string";
+  const char *what = "r11 EED group ending with";
   const char *file = "eed_r11_groups.dwg";
   const unsigned char with_appid[] = { 1, 0, 0, 0, 3, 'a', 'b', 'c' };
   const unsigned char string_only[] = { 0, 3, 'x', 'y', 'z' };
-  const unsigned char *groups[] = { with_appid, string_only };
-  const BITCODE_BS sizes[] = { sizeof (with_appid), sizeof (string_only) };
+  const unsigned char layer[] = { 1, 0, 0, 3, 5, 0 };
+  const unsigned char *groups[]
+      = { with_appid, string_only, layer };
+  const BITCODE_BS sizes[]
+      = { sizeof (with_appid), sizeof (string_only), sizeof (layer) };
   Dwg_Data *dwg = dwg_new_Document (R_11, 0, tracelevel);
   const Dwg_Object *mspace = dwg ? dwg_model_space_object (dwg) : NULL;
-  const Dwg_Object *lines[2] = { NULL, NULL };
+  const Dwg_Object *lines[3] = { NULL, NULL, NULL };
   Dwg_Data drawn;
   int error = 0, made = 1, n = 0;
 
   failed = 0;
   loglevel = test_loglevel;
   memset (&drawn, 0, sizeof (drawn));
-  for (int k = 0; k < 2 && made; k++)
+  for (int k = 0; k < 3 && made; k++)
     {
       Dwg_Entity_LINE *line
           = mspace ? dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER,
@@ -826,11 +993,11 @@ test_r11_groups (void)
     error = read_dwg (file, &drawn);
   // r11 handles are given when read: the LINEs in their order
   for (BITCODE_BL i = 0; made && error < DWG_ERR_CRITICAL
-                         && i < drawn.num_objects && n < 2;
+                         && i < drawn.num_objects && n < 3;
        i++)
     if (drawn.object[i].fixedtype == DWG_TYPE_LINE)
       lines[n++] = &drawn.object[i];
-  if (n != 2)
+  if (n != 3)
     {
       FAIL ("%s: %d LINEs read back, error 0x%x", what, n, (unsigned)error);
       goto cleanup;
@@ -840,14 +1007,21 @@ test_r11_groups (void)
       && lines[0]->tio.entity->eed[0].data->code == 1
       && lines[0]->tio.entity->eed[0].data->u.eed_1.appid_index == 0
       && is_string (lines[0]->tio.entity->eed[1].data, "abc"))
-    OK ("%s, after its APPID index: read", what);
+    OK ("%s a string, after its APPID index: read", what);
   else
-    FAIL ("%s, after its APPID index: misread", what);
+    FAIL ("%s a string, after its APPID index: misread", what);
   if (lines[1]->tio.entity->num_eed == 1
       && is_string (lines[1]->tio.entity->eed[0].data, "xyz"))
-    OK ("%s, as the only item: read", what);
+    OK ("%s a string, as the only item: read", what);
   else
-    FAIL ("%s, as the only item: misread", what);
+    FAIL ("%s a string, as the only item: misread", what);
+  if (lines[2]->tio.entity->num_eed == 2
+      && lines[2]->tio.entity->eed[1].data
+      && lines[2]->tio.entity->eed[1].data->code == 3
+      && lines[2]->tio.entity->eed[1].data->u.eed_3.layer == 5)
+    OK ("%s a 1003 layer index: read", what);
+  else
+    FAIL ("%s a 1003 layer index: misread", what);
 
 cleanup:
   free_dwg (&drawn);
@@ -1010,6 +1184,7 @@ main (int argc, char *argv[])
       error += test_written_items (versions[v]);
       error += test_group_of_256 (versions[v]);
     }
+  error += test_group_past_object ();
   error += test_r11_groups ();
   for (const char *const *f = drawings; *f; f++)
     error += test_groups_read_whole (*f);
