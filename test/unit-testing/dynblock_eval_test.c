@@ -2351,13 +2351,15 @@ test_move (Dwg_Data *dwg)
   Dwg_Object_BLOCK_HEADER *def = block_header (dwg, DOOR);
   Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
   dwg_point_3d pt = { 10.0, -2.0, 0.0 };
-  const dwg_point_3d mc_pt = { -2.3, -1.25, 0.0 };
-  Dwg_Entity_TEXT *text, *centred;
+  const dwg_point_3d mc_pt = { -2.3, -1.25, 0.0 },
+                     ml_pt = { 0.0, -1.25, 0.0 },
+                     aligned_pt = { 1.0, 1.0, 0.0 };
+  Dwg_Entity_TEXT *text, *centred, *middle_left, *aligned;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_POINT *point;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
-  BITCODE_RLL h_text, h_centred, h_insert;
+  BITCODE_RLL h_text, h_centred, h_middle_left, h_aligned, h_insert;
   int failures = 0;
   memset (&v, 0, sizeof (v));
   if (!def || !move)
@@ -2367,12 +2369,14 @@ test_move (Dwg_Data *dwg)
     }
   text = dwg_add_TEXT (def, "caption", &pt, 1.0);
   centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
+  middle_left = dwg_add_TEXT (def, "ML", &ml_pt, 2.5);
+  aligned = dwg_add_TEXT (def, "aligned", &aligned_pt, 1.0);
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
-  if (!text || !centred || !insert || !point)
+  if (!text || !centred || !middle_left || !aligned || !insert || !point)
     {
       fail ("move: could not add the entities");
       return 1;
@@ -2383,11 +2387,23 @@ test_move (Dwg_Data *dwg)
   centred->horiz_alignment = 1;
   centred->vert_alignment = 2;
   centred->dataflags = 0x3f;
+  // aligned only vertically, middle-left on the block's base point
+  middle_left->vert_alignment = 2;
+  middle_left->dataflags = 0x7f;
+  // aligned between its two points, the second stored
+  aligned->horiz_alignment = 3;
+  aligned->alignment_pt.x = 6.0;
+  aligned->alignment_pt.y = 1.0;
+  aligned->dataflags = 0xbd;
   h_text = entity_handle (dwg, text->parent);
   h_centred = entity_handle (dwg, centred->parent);
+  h_middle_left = entity_handle (dwg, middle_left->parent);
+  h_aligned = entity_handle (dwg, aligned->parent);
   h_insert = entity_handle (dwg, insert->parent);
   if (!add_move_entity (dwg, move, h_text)
       || !add_move_entity (dwg, move, h_centred)
+      || !add_move_entity (dwg, move, h_middle_left)
+      || !add_move_entity (dwg, move, h_aligned)
       || !add_move_entity (dwg, move, h_insert))
     {
       fail ("move: out of memory");
@@ -2416,6 +2432,26 @@ test_move (Dwg_Data *dwg)
     {
       fail ("move: the TEXT centred on (0,0) doesn't move its alignment "
             "point by -0.5, stored");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_middle_left),
+                   copy_of (dwg, def, rep, h_middle_left), 0.0, -0.5))
+    OK ("move: the TEXT middle-left on (0,0) moves its alignment point by "
+        "-0.5, then stored");
+  else
+    {
+      fail ("move: the TEXT middle-left on (0,0) doesn't move its alignment "
+            "point by -0.5, stored");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_aligned),
+                   copy_of (dwg, def, rep, h_aligned), 0.0, -0.5))
+    OK ("move: the aligned TEXT moves both its points by -0.5");
+  else
+    {
+      fail ("move: the aligned TEXT doesn't move both its points by -0.5");
       failures++;
     }
   if (add_move_entity (dwg, move, entity_handle (dwg, point->parent)))
@@ -3273,8 +3309,9 @@ test_turn_whole (Dwg_Data *dwg)
 /* 'Rotate Plan' turning texts about a base point that isn't the origin:
    the Toilet's Angle parameter moved by (2, 3). A TEXT middle-centred on
    (0,0), whose alignment point AutoCAD leaves out (dataflags 0x02), turns
-   its alignment point too, which is then stored; a left-aligned TEXT keeps
-   its alignment point (0,0). */
+   its alignment point too, which is then stored, and so does one
+   middle-left on (0,0); a left-aligned TEXT keeps its alignment point
+   (0,0). */
 static int
 test_turn_text_anchor (Dwg_Data *dwg)
 {
@@ -3286,11 +3323,12 @@ test_turn_text_anchor (Dwg_Data *dwg)
       = param_obj && param_obj->fixedtype == DWG_TYPE_BLOCKROTATIONPARAMETER
             ? param_obj->tio.object->tio.BLOCKROTATIONPARAMETER
             : NULL;
-  const dwg_point_3d mc_pt = { -2.25, -1.25, 0.0 }, left_pt = { 6.0, 1.0, 0.0 };
+  const dwg_point_3d mc_pt = { -2.25, -1.25, 0.0 }, left_pt = { 6.0, 1.0, 0.0 },
+                     ml_pt = { 0.0, -1.25, 0.0 };
   const double dx = 2.0, dy = 3.0, angle = 1.2;
-  Dwg_Entity_TEXT *centred, *left;
+  Dwg_Entity_TEXT *centred, *left, *middle_left;
   BITCODE_3BD basept, endpt, base_angle_pt;
-  BITCODE_RLL h_centred, h_left;
+  BITCODE_RLL h_centred, h_left, h_middle_left;
   BITCODE_BL num_deps;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
@@ -3303,8 +3341,9 @@ test_turn_text_anchor (Dwg_Data *dwg)
     }
   centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
   left = dwg_add_TEXT (def, "left", &left_pt, 1.0);
+  middle_left = dwg_add_TEXT (def, "ML", &ml_pt, 2.5);
   loglevel = test_loglevel;
-  if (!centred || !left)
+  if (!centred || !left || !middle_left)
     {
       fail ("turn text anchor: could not add the TEXTs");
       return 1;
@@ -3313,11 +3352,15 @@ test_turn_text_anchor (Dwg_Data *dwg)
   centred->vert_alignment = 2;
   centred->dataflags = 0x3f;
   left->dataflags = 0xff;
+  middle_left->vert_alignment = 2;
+  middle_left->dataflags = 0x7f;
   h_centred = entity_handle (dwg, centred->parent);
   h_left = entity_handle (dwg, left->parent);
+  h_middle_left = entity_handle (dwg, middle_left->parent);
   num_deps = act->num_deps;
   if (!add_dep (dwg, &act->deps, &act->num_deps, h_centred)
-      || !add_dep (dwg, &act->deps, &act->num_deps, h_left))
+      || !add_dep (dwg, &act->deps, &act->num_deps, h_left)
+      || !add_dep (dwg, &act->deps, &act->num_deps, h_middle_left))
     {
       fail ("turn text anchor: out of memory");
       return 1;
@@ -3345,6 +3388,9 @@ test_turn_text_anchor (Dwg_Data *dwg)
           = a && a->fixedtype == DWG_TYPE_TEXT ? a->tio.entity->tio.TEXT : NULL;
       const Dwg_Entity_TEXT *cb
           = b && b->fixedtype == DWG_TYPE_TEXT ? b->tio.entity->tio.TEXT : NULL;
+      const Dwg_Object *m = copy_of (dwg, def, rep, h_middle_left);
+      const Dwg_Entity_TEXT *cm
+          = m && m->fixedtype == DWG_TYPE_TEXT ? m->tio.entity->tio.TEXT : NULL;
       // (0,0) turned about (cx, cy)
       const double ax = cx - cx * c + cy * s, ay = cy - cx * s - cy * c;
       if (ca && is_point (ca->alignment_pt.x, ca->alignment_pt.y, ax, ay)
@@ -3377,6 +3423,23 @@ test_turn_text_anchor (Dwg_Data *dwg)
                 "(%g, %g), dataflags 0x%x",
                 cb ? cb->alignment_pt.x : -1.0, cb ? cb->alignment_pt.y : -1.0,
                 cb ? (unsigned)cb->dataflags : 0u);
+          failures++;
+        }
+      if (cm && is_point (cm->alignment_pt.x, cm->alignment_pt.y, ax, ay)
+          && is_point (cm->ins_pt.x, cm->ins_pt.y,
+                       cx + (ml_pt.x - cx) * c - (ml_pt.y - cy) * s,
+                       cy + (ml_pt.x - cx) * s + (ml_pt.y - cy) * c)
+          && !(cm->dataflags & 0x02))
+        OK ("turn text anchor: the TEXT middle-left on (0,0) turns its "
+            "alignment point to (%g, %g), then stored",
+            cm->alignment_pt.x, cm->alignment_pt.y);
+      else
+        {
+          fail ("turn text anchor: the TEXT middle-left on (0,0) has its "
+                "alignment point at (%g, %g), dataflags 0x%x, expected "
+                "(%g, %g) stored",
+                cm ? cm->alignment_pt.x : -1.0, cm ? cm->alignment_pt.y : -1.0,
+                cm ? (unsigned)cm->dataflags : 0u, ax, ay);
           failures++;
         }
     }

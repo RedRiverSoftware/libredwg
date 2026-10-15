@@ -3197,9 +3197,12 @@ move_hatch (Dwg_Entity_HATCH *_obj, const BITCODE_3BD *delta)
     }
 }
 
-/* Sets the dataflags bit 0x02 of a TEXT, ATTDEF or ATTRIB, which leaves out
-   an alignment point of (0,0), as its alignment point is. The encoder
-   writes the flags as they are unless it converts the drawing. */
+/* Sets the dataflags bit 0x02 of a TEXT, ATTDEF or ATTRIB when its
+   alignment point is (0,0), which the bit leaves out, and clears it
+   otherwise. The encoder works the flags out afresh (dwg_set_dataflags)
+   only for documents built with the add API, DXF imports and drawings
+   read from r2000 or older: it writes the flags of a drawing read from a
+   later release as they are. */
 #define SET_ALIGNMENT_FLAG(_obj)                                              \
   do                                                                          \
     {                                                                         \

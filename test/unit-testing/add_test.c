@@ -1418,7 +1418,8 @@ test_text_alignment (const Dwg_Version_Type version)
 {
   const char *vername = version >= R_2004 ? "r2004" : "r2000";
   const Aligned_Text texts[] = {
-    // as AutoCAD stores an empty centred text
+    // both points where AutoCAD puts them for an empty centred text; the
+    // value only names the text, to find it again
     { "centred", DWG_TYPE_TEXT, { 7.0, 3.0 }, { 7.0, 3.0 }, 1, 0 },
     { "right", DWG_TYPE_TEXT, { 1.25, -6.0 }, { 2.0, -6.0 }, 2, 0 },
     // middle-centred on the base point

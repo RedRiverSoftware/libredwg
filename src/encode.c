@@ -7838,9 +7838,12 @@ in_postprocess_handles (Dwg_Object *restrict obj)
     }
 }
 
-/* When updating TEXT/ATTDEF/ATTRIB to R_2000. Each flag leaves out a value
-   that is its default. As AutoCAD writes and reads it, the alignment
-   point's default is (0,0), not the insertion point. */
+/* Works out the dataflags of a TEXT, ATTDEF or ATTRIB from its values. The
+   encoder does so for documents built with the add API, DXF imports and
+   drawings read from r2000 or older, and writes the flags of a drawing read
+   from a later release as they are, also when it writes it as r2000. Each
+   flag leaves out a value that is its default. As AutoCAD writes and reads
+   it, the alignment point's default is (0,0), not the insertion point. */
 void
 dwg_set_dataflags (Dwg_Object *obj)
 {

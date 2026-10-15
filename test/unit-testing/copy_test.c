@@ -4603,11 +4603,11 @@ test_copy_block_matching (void)
 /* An attribute definition copied into a document built with the add API
    and written as r2004 keeps its alignment point, which the encoder of
    such a document stores or leaves out (dataflags 0x02) as AutoCAD does:
-   left out only when it is (0,0). example_2004.dwg's block bloko has one
-   left-aligned attribute definition, made centred, at its insertion point
-   as AutoCAD stores one with nothing in it, or with on_base_point, middle
-   centred on the block's base point, whose alignment point (0,0) AutoCAD
-   leaves out. */
+   left out only when it is (0,0). The test centres the left-aligned
+   attribute definition of example_2004.dwg's block bloko before copying
+   it: on its insertion point, which is then also its alignment point, or,
+   with on_base_point, middle-centred on the block's base point, with the
+   alignment point (0,0). */
 static int
 test_copy_block_text_alignment (const int on_base_point)
 {
