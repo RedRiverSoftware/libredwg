@@ -201,13 +201,12 @@ set_byte_at_bit (unsigned char *data, const size_t bit,
                                    | (value << (8 - shift)));
 }
 
-/* Sets the first byte of the first run of bytes in data that matches
-   pattern, starting at any bit, as an object's EED can. Returns 0 when there
-   is none. */
-static int
-patch_at_bit (unsigned char *data, const size_t size,
-              const unsigned char *pattern, const size_t len,
-              const unsigned char value)
+/* The bit of data at which the first run of bytes that matches pattern
+   starts, at any bit, as an object's EED can, or (size_t)-1 when there is
+   none. */
+static size_t
+find_at_bit (const unsigned char *data, const size_t size,
+             const unsigned char *pattern, const size_t len)
 {
   for (size_t bit = 0; bit / 8 + len < size; bit++)
     {
@@ -215,12 +214,9 @@ patch_at_bit (unsigned char *data, const size_t size,
       while (k < len && byte_at_bit (data, bit + k * 8) == pattern[k])
         k++;
       if (k == len)
-        {
-          set_byte_at_bit (data, bit, value);
-          return 1;
-        }
+        return bit;
     }
-  return 0;
+  return (size_t)-1;
 }
 
 /* An APPID handle of an EED group: code 5, and as many bytes as its value
@@ -577,19 +573,22 @@ cleanup:
 
 /* A group whose size, read alone, fits in its object, but whose end lies
    past the object's end: an r2000 file written with a group of 7 bytes, its
-   size then changed to the LINE's own size. The LINE's decoding stops there
+   size then changed to the LINE's own size, or, with just_past, to the
+   least size that takes the group past the LINE's end: by part of a byte
+   when the group doesn't start on one. The LINE's decoding stops there
    with DWG_ERR_VALUEOUTOFBOUNDS, and the LINE has no EED, instead of the
    rest of it being read from the bytes after it. */
 static int
-test_group_past_object (void)
+test_group_past_object (const int just_past)
 {
-  const char *what = "EED group running past its object";
+  const char *what = just_past ? "EED group ending just past its object"
+                               : "EED group running past its object";
   const char *written = "eed_past_object_source.dwg";
   const char *changed = "eed_past_object.dwg";
   const unsigned char group[] = { 0, 3, 0, 30, 'a', 'b', 'c' };
   unsigned char pattern[3 + sizeof (group)];
   unsigned char *bytes = NULL;
-  size_t size = 0;
+  size_t size = 0, bit = (size_t)-1, group_bit = 0, new_size = 0;
   Drawing d;
   Dwg_Data drawn;
   const Dwg_Object *obj = NULL;
@@ -610,10 +609,25 @@ test_group_past_object (void)
       pattern[2] = (unsigned char)d.appid1;
       memcpy (&pattern[3], group, sizeof (group));
       bytes = read_file_bytes (written, &size);
-      made = bytes && line_size < 0x100
-             && patch_at_bit (bytes, size, pattern, sizeof (pattern),
-                              (unsigned char)line_size)
-             && write_file_bytes (changed, bytes, size);
+      if (bytes)
+        bit = find_at_bit (bytes, size, pattern, sizeof (pattern));
+    }
+  // An r2000 file's objects are not compressed: the LINE starts at its
+  // address in the file, after its size (an MS of 2 bytes).
+  if (bit != (size_t)-1 && obj->address >= 2 && line_size < 0x8000
+      && bytes[obj->address - 2] == (line_size & 0xFF)
+      && bytes[obj->address - 1] == (line_size >> 8)
+      && bit + 24 >= obj->address * 8)
+    {
+      // the group's first bit, from the LINE's start
+      group_bit = bit + 24 - obj->address * 8;
+      new_size
+          = just_past ? (line_size * 8 - group_bit) / 8 + 1 : line_size;
+    }
+  if (new_size && new_size < 0x100 && new_size <= line_size)
+    {
+      set_byte_at_bit (bytes, bit, (unsigned char)new_size);
+      made = write_file_bytes (changed, bytes, size);
     }
   free (bytes);
   free_dwg (&drawn);
@@ -629,7 +643,9 @@ test_group_past_object (void)
                                  : NULL;
   if (obj && !obj->tio.entity->num_eed
       && (error & DWG_ERR_VALUEOUTOFBOUNDS) && (error & DWG_ERR_INVALIDEED))
-    OK ("%s: the LINE stopped there, no EED (error 0x%x)", what,
+    OK ("%s: a group of %u bytes from bit %u of the LINE (%u bytes) stopped "
+        "it there, no EED (error 0x%x)",
+        what, (unsigned)new_size, (unsigned)group_bit, (unsigned)line_size,
         (unsigned)error);
   else
     FAIL ("%s: %s, %u EED items, error 0x%x", what,
@@ -1184,7 +1200,8 @@ main (int argc, char *argv[])
       error += test_written_items (versions[v]);
       error += test_group_of_256 (versions[v]);
     }
-  error += test_group_past_object ();
+  error += test_group_past_object (0);
+  error += test_group_past_object (1);
   error += test_r11_groups ();
   for (const char *const *f = drawings; *f; f++)
     error += test_groups_read_whole (*f);

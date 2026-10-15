@@ -4029,6 +4029,16 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
   return 0;
 }
 
+/* Whether the EED group from dat's position to the byte end runs past
+   eed_end, its object's end: also when it ends there but doesn't start on a
+   byte, so that its last bits lie past it. */
+static int
+eed_past_end (const Bit_Chain *restrict dat, const size_t end,
+              const size_t eed_end)
+{
+  return end > eed_end || (end == eed_end && dat->bit);
+}
+
 /* for objects and entities.
    Returns DWG_ERR_INVALIDEED for an item or group that could not be decoded.
    Such an item has no data, and the rest of its group is skipped: the
@@ -4045,13 +4055,16 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
   Dwg_Data *dwg = obj->dwg;
   Dwg_Object *_obj;
   size_t sav_byte = dat->byte;
-  // the EED lies within its object: it ends no more than the object's size
-  // after its start
-  const size_t eed_start = dat->byte;
+  size_t eed_end;
 
   if (!dwg)
     return DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS;
   _obj = &dwg->object[obj->objid]; /* Note that obj->objid may be 0 */
+  // The EED lies within its object. From r13 on dat holds just the object;
+  // before, the EED ends no more than the object's size after its start.
+  eed_end = dat->byte + _obj->size;
+  if (eed_end > dat->size)
+    eed_end = dat->size;
   obj->num_eed = 0;
   while (1)
     {
@@ -4101,7 +4114,7 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
           const int handle_error = bit_read_H (dat, &obj->eed[idx].handle);
           error |= handle_error;
           end = dat->byte + size;
-          if (end > eed_start + _obj->size)
+          if (eed_past_end (dat, end, eed_end))
             goto past_object;
           if (handle_error)
             {
@@ -4160,7 +4173,7 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
       else
         {
           end = dat->byte + size;
-          if (end > eed_start + _obj->size)
+          if (eed_past_end (dat, end, eed_end))
             goto past_object;
         }
 
