@@ -202,6 +202,9 @@
 /* Define to 1 if you have the <pcre2.h> header file. */
 #undef HAVE_PCRE2_H
 
+/* Define to 1 if you have the <pthread.h> header file. */
+#undef HAVE_PTHREAD_H
+
 /* If available, contains the Python version number currently in use. */
 #undef HAVE_PYTHON
 

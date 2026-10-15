@@ -48,12 +48,12 @@
 #include "dynapi.h"
 
 /* the current version per spec block */
-static int cur_ver = 0;
-static BITCODE_BL rcount1 = 0, rcount2 = 0;
-static bool is_teigha = false;
+static DWG_THREAD_LOCAL int cur_ver = 0;
+static DWG_THREAD_LOCAL BITCODE_BL rcount1 = 0, rcount2 = 0;
+static DWG_THREAD_LOCAL bool is_teigha = false;
 
 #ifdef DWG_ABORT
-static unsigned int errors = 0;
+static DWG_THREAD_LOCAL unsigned int errors = 0;
 #  ifndef DWG_ABORT_LIMIT
 #    define DWG_ABORT_LIMIT 200
 #  endif
