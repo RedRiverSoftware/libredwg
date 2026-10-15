@@ -3083,6 +3083,169 @@ test_add_handle_high (void)
   return numfailed ();
 }
 
+#ifndef DISABLE_DXF
+/* A DXF export leaves an entity's version 2 (SAB) ACIS data as it is: the
+   DXF gets SAT version 1, converted into blocks of its own. A DWG written
+   after the export has the same SAB. example_2004.dwg has three such
+   entities. */
+static int
+test_dxf_keeps_sab (void)
+{
+  const char *name = "example_2004.dwg";
+  const char *dxffile = "add_sab_export.dxf";
+  const char *dwgfile = "add_sab_export.dwg";
+  // each entity's ACIS data in the DXF, its first line
+  const char *sat1 = "AcDbModelerGeometry\r\n 70\r\n     1\r\n  1\r\n";
+  enum
+  {
+    MAX_SAB = 8
+  };
+  BITCODE_RLL handles[MAX_SAB];
+  BITCODE_BL sizes[MAX_SAB];
+  unsigned char *sabs[MAX_SAB] = { NULL };
+  int num_sab = 0, in_dxf = 0;
+  char path[256];
+  Dwg_Data dwg, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  memset (&dwg, 0, sizeof (dwg));
+  memset (&read, 0, sizeof (read));
+  if (!test_data_file (name, path, sizeof (path)))
+    {
+      fail ("dxf_keeps_sab: %s not found", name);
+      return numfailed ();
+    }
+  dwg.opts = tracelevel;
+  error = dwg_read_file (path, &dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: %s read error 0x%x", name, error);
+      goto cleanup;
+    }
+  for (BITCODE_BL i = 0; i < dwg.num_objects && num_sab < MAX_SAB; i++)
+    {
+      const Dwg_Object *obj = &dwg.object[i];
+      const Dwg_Entity_3DSOLID *_obj;
+      if (obj->fixedtype != DWG_TYPE__3DSOLID
+          && obj->fixedtype != DWG_TYPE_REGION
+          && obj->fixedtype != DWG_TYPE_BODY)
+        continue;
+      _obj = obj->tio.entity->tio._3DSOLID;
+      if (_obj->acis_empty || _obj->version != 2 || !_obj->acis_data
+          || !_obj->sab_size)
+        continue;
+      handles[num_sab] = obj->handle.value;
+      sizes[num_sab] = _obj->sab_size;
+      sabs[num_sab] = (unsigned char *)malloc (_obj->sab_size);
+      if (!sabs[num_sab])
+        break;
+      memcpy (sabs[num_sab], _obj->acis_data, _obj->sab_size);
+      num_sab++;
+    }
+  if (num_sab != 3)
+    {
+      fail ("dxf_keeps_sab: %s has %d SAB entities, expected 3", name,
+            num_sab);
+      goto cleanup;
+    }
+
+  dat.version = dat.from_version = dwg.header.version;
+  dat.codepage = dwg.header.codepage;
+  dat.opts = dwg.opts;
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    {
+      fail ("dxf_keeps_sab: cannot write %s", dxffile);
+      goto cleanup;
+    }
+  error = dwg_write_dxf (&dat, &dwg);
+  fclose (dat.fh);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: DXF write error 0x%x", error);
+      goto cleanup;
+    }
+  {
+    // the DXF has SAT version 1 for each of them
+    FILE *fp = fopen (dxffile, "rb");
+    long size = -1;
+    char *buf = NULL;
+    if (fp && !fseek (fp, 0, SEEK_END))
+      size = ftell (fp);
+    if (size > 0 && !fseek (fp, 0, SEEK_SET))
+      buf = (char *)calloc ((size_t)size + 1, 1);
+    if (buf && fread (buf, 1, (size_t)size, fp) == (size_t)size)
+      for (const char *p = strstr (buf, sat1); p; p = strstr (p + 1, sat1))
+        in_dxf++;
+    free (buf);
+    if (fp)
+      fclose (fp);
+  }
+  if (in_dxf == num_sab)
+    ok ("dxf_keeps_sab: %d entities with SAT version 1 in the DXF", in_dxf);
+  else
+    fail ("dxf_keeps_sab: %d entities with SAT version 1 in the DXF, "
+          "expected %d",
+          in_dxf, num_sab);
+
+  for (int k = 0; k < num_sab; k++)
+    {
+      const Dwg_Object *obj = dwg_resolve_handle (&dwg, handles[k]);
+      const Dwg_Entity_3DSOLID *_obj
+          = obj ? obj->tio.entity->tio._3DSOLID : NULL;
+      if (_obj && _obj->version == 2 && _obj->sab_size == sizes[k]
+          && !memcmp (_obj->acis_data, sabs[k], sizes[k])
+          && !_obj->encr_sat_data && !_obj->_dxf_sab_converted)
+        ok ("dxf_keeps_sab: %s " FORMAT_RLLx " keeps its SAB after the DXF "
+            "export",
+            obj->name, handles[k]);
+      else
+        fail ("dxf_keeps_sab: " FORMAT_RLLx " changed by the DXF export",
+              handles[k]);
+    }
+
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &dwg);
+  if (error < DWG_ERR_CRITICAL)
+    {
+      read.opts = tracelevel;
+      error = dwg_read_file (dwgfile, &read);
+    }
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: DWG write or read back error 0x%x", error);
+      goto cleanup;
+    }
+  for (int k = 0; k < num_sab; k++)
+    {
+      const Dwg_Object *obj = dwg_resolve_handle (&read, handles[k]);
+      const Dwg_Entity_3DSOLID *_obj
+          = obj ? obj->tio.entity->tio._3DSOLID : NULL;
+      if (_obj && _obj->version == 2 && _obj->sab_size == sizes[k]
+          && !memcmp (_obj->acis_data, sabs[k], sizes[k]))
+        ok ("dxf_keeps_sab: " FORMAT_RLLx " written with its SAB",
+            handles[k]);
+      else
+        fail ("dxf_keeps_sab: " FORMAT_RLLx " written with other ACIS data",
+              handles[k]);
+    }
+
+cleanup:
+  for (int k = 0; k < num_sab; k++)
+    free (sabs[k]);
+  dwg_free (&read);
+  dwg_free (&dwg);
+  if (!numfailed ())
+    {
+      unlink (dxffile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -3146,6 +3309,9 @@ main (int argc, char *argv[])
   error += test_attrib_r11 (R_11, 2);
   error += test_vertex_links_read ();
   error += test_add_handle_high ();
+#ifndef DISABLE_DXF
+  error += test_dxf_keeps_sab ();
+#endif
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

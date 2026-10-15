@@ -2027,8 +2027,8 @@ dxf_cvt_blockname (Bit_Chain *restrict dat, char *restrict name, const int dxf)
 #ifndef DISABLE_DXF
 
 static int
-new_encr_sat_data_line (Dwg_Entity_3DSOLID *restrict _obj, Bit_Chain *dest,
-                        unsigned int i)
+new_encr_sat_data_line (const Dwg_Entity_3DSOLID *restrict _obj,
+                        Bit_Chain *dest, unsigned int i)
 {
 #  if 0
   if (i + 1 >= _obj->num_blocks)
@@ -2161,18 +2161,37 @@ SAT_boolean (const char *act_record, bool value)
     return value ? "I" : "F";
 }
 
-/* Converts v2 SAB acis_data in-place to SAT v1 encr_sat_data[].
-   Sets dxf_sab_converted to 1, denoting that encr_sat_data is NOT the
-   encrypted acis_data anymore, rather the converted from SAB for DXF.
-*/
-EXPORT int
-dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
+/* Frees SAT blocks: num_blocks of them and the empty one after them. */
+static void
+free_sat_blocks (const BITCODE_BL num_blocks, BITCODE_BL *block_size,
+                 char **blocks)
+{
+  if (blocks)
+    for (BITCODE_BL i = 0; i <= num_blocks; i++)
+      free (blocks[i]);
+  free (blocks);
+  free (block_size);
+}
+
+/* Converts the version 2 (SAB) acis_data of _obj to SAT version 1 text for
+   the ACIS version of its document's DWG version, in blocks of at most 4096
+   bytes: *num_blocksp blocks in *blocksp and their sizes in *block_sizep,
+   each array with an empty entry after them. The text is not encrypted.
+   _obj is left as it is. Returns 0, or 1 when acis_data is not SAB that can
+   be converted, with no blocks. */
+static int
+convert_SAB_to_SAT1 (const Dwg_Entity_3DSOLID *restrict _obj,
+                     BITCODE_BL *restrict num_blocksp,
+                     BITCODE_BL **restrict block_sizep,
+                     char ***restrict blocksp)
 {
   Bit_Chain dest = { 0 };
   Bit_Chain src = { 0 };
   unsigned int i = 0, num_blocks = 2;
+  BITCODE_BL *block_size;
+  char **encr_sat_data;
+  BITCODE_BL sab_size;
   BITCODE_RC c;
-  char *p = (char *)&_obj->acis_data[15];
   // char *end, *dest, *enddest;
   int64_t size;
   BITCODE_RL version, num_records, num_entities, has_history;
@@ -2196,32 +2215,34 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
     dwg_version = R_2004;
 #  endif
 
-  if (_obj->num_blocks)
-    num_blocks = _obj->num_blocks;
-  if (!_obj->block_size)
-    _obj->block_size = (BITCODE_BL *)calloc (num_blocks, sizeof (BITCODE_BL));
-  if (!_obj->encr_sat_data)
-    _obj->encr_sat_data = (char **)calloc (num_blocks, sizeof (char *));
-
-  _obj->_dxf_sab_converted = 1;
-  if (!_obj->sab_size)
-    _obj->sab_size = _obj->block_size[0];
-  // end = &p[_obj->sab_size];
+  *num_blocksp = 0;
+  *block_sizep = NULL;
+  *blocksp = NULL;
+  sab_size = _obj->sab_size;
+  if (!sab_size && _obj->block_size)
+    sab_size = _obj->block_size[0];
 
   if (!_obj->acis_data
       || strlen ((char *)_obj->acis_data) < sizeof ("ACIS BinaryFile") - 1
       || !memBEGINc ((char *)_obj->acis_data, "ACIS BinaryFile"))
     {
       LOG_ERROR ("acis_data is not a SAB 2 'ACIS BinaryFile'");
-      _obj->num_blocks = 0;
-      _obj->encr_sat_data[0] = NULL;
       return 1;
     }
-  // dest = &_obj->encr_sat_data[0][0];
+  block_size = (BITCODE_BL *)calloc (num_blocks, sizeof (BITCODE_BL));
+  encr_sat_data = (char **)calloc (num_blocks, sizeof (char *));
+  if (!block_size || !encr_sat_data)
+    {
+      LOG_ERROR ("Out of memory");
+      free (block_size);
+      free (encr_sat_data);
+      return 1;
+    }
+  // dest = &encr_sat_data[0][0];
   // enddest = &dest[size];
   bit_chain_alloc (&dest);
   src.chain = &_obj->acis_data[15];
-  src.size = _obj->sab_size - 15;
+  src.size = sab_size - 15;
 
 // header only
 #  define SAB_RD(key)                                                         \
@@ -2371,20 +2392,24 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
           skip_hist = 0;
           break;
         case 13: // ident
-          _obj->encr_sat_data[i] = (char *)dest.chain;
-          // fallthru
         case 7:  // char len
         case 14: // subident
           {
             int len = bit_read_RC (&src);
             if (len == 0)
-              return 0;
+              {
+                // no blocks
+                bit_chain_free (&dest);
+                free (block_size);
+                free (encr_sat_data);
+                return 0;
+              }
             if (src.byte + len > src.size)
               {
                 LOG_ERROR ("Invalid SAB len=%d [RC]", len);
                 bit_chain_free (&dest);
-                _obj->num_blocks = 0;
-                _obj->encr_sat_data[0] = NULL;
+                free (block_size);
+                free (encr_sat_data);
                 return 1;
               }
             if (dest.byte + len + 4 >= dest.size)
@@ -2444,8 +2469,8 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
               {
                 LOG_ERROR ("Invalid SAB");
                 bit_chain_free (&dest);
-                _obj->num_blocks = 0;
-                _obj->encr_sat_data[0] = NULL;
+                free (block_size);
+                free (encr_sat_data);
                 return 1;
               }
             if (dest.byte + len + 1 >= dest.size)
@@ -2464,8 +2489,8 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
               {
                 LOG_ERROR ("Invalid SAB");
                 bit_chain_free (&dest);
-                _obj->num_blocks = 0;
-                _obj->encr_sat_data[0] = NULL;
+                free (block_size);
+                free (encr_sat_data);
                 return 1;
               }
             if (dest.byte + len + 2 >= dest.size)
@@ -2609,7 +2634,7 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
                           dest.size - dest.byte, "$%" PRId64 " ", i64);
             if (dest.size - dest.byte == (long unsigned)s)
               {
-                LOG_WARN ("Buffer overflow in dwg_convert_SAB_to_SAT1");
+                LOG_WARN ("Buffer overflow in convert_SAB_to_SAT1");
                 bit_chain_alloc (&dest);
                 goto again_23;
               }
@@ -2627,7 +2652,7 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
   // if (c != 17) // last line didn't end with #, but End-of-ACIS-data or
   // End-of-ASM-data
   //   i = new_encr_sat_data_line (_obj, &dest, i);
-  num_blocks = _obj->num_blocks = 1;
+  num_blocks = 1;
   // Nope, keep it. Teigha always adds it, ASM not.
   // if (strEQc((char*)&dest.chain[dest.byte-17], "End-of-ACIS-data "))
   //  dest.byte -= 17;
@@ -2639,15 +2664,15 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
       { // chunks of 4096
         if (i >= num_blocks)
           {
-            _obj->block_size = (BITCODE_BL *)realloc (
-                _obj->block_size, (i + 2) * sizeof (BITCODE_BL));
-            _obj->encr_sat_data = (char **)realloc (
-                _obj->encr_sat_data, (i + 1) * sizeof (char **));
+            block_size = (BITCODE_BL *)realloc (
+                block_size, (i + 2) * sizeof (BITCODE_BL));
+            encr_sat_data
+                = (char **)realloc (encr_sat_data, (i + 1) * sizeof (char **));
             num_blocks = i + 1;
           }
-        _obj->encr_sat_data[i] = (char *)calloc (4096, 1);
-        memcpy (_obj->encr_sat_data[i], &dest.chain[off], 4096);
-        _obj->block_size[i] = 4096;
+        encr_sat_data[i] = (char *)calloc (4096, 1);
+        memcpy (encr_sat_data[i], &dest.chain[off], 4096);
+        block_size[i] = 4096;
         LOG_TRACE ("block_size[%d] = 4096\n", i);
         i++;
         size -= 4096;
@@ -2656,39 +2681,63 @@ dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
     // and the smaller rest
     if (i >= num_blocks)
       {
-        _obj->block_size = (BITCODE_BL *)realloc (
-            _obj->block_size, (i + 2) * sizeof (BITCODE_BL));
-        _obj->encr_sat_data = (char **)realloc (_obj->encr_sat_data,
-                                                (i + 1) * sizeof (char **));
+        block_size = (BITCODE_BL *)realloc (block_size,
+                                            (i + 2) * sizeof (BITCODE_BL));
+        encr_sat_data
+            = (char **)realloc (encr_sat_data, (i + 1) * sizeof (char **));
         num_blocks = i + 1;
       }
-    _obj->encr_sat_data[i] = (char *)calloc (size + 1, 1); // shrink it
-    memcpy (_obj->encr_sat_data[i], &dest.chain[off], size);
-    _obj->block_size[i] = (BITCODE_BL)(size & 0xFFFFFFFF);
+    encr_sat_data[i] = (char *)calloc (size + 1, 1); // shrink it
+    memcpy (encr_sat_data[i], &dest.chain[off], size);
+    block_size[i] = (BITCODE_BL)(size & 0xFFFFFFFF);
     LOG_TRACE ("block_size[%d] = %" PRId64 "\n", i, size);
   }
   bit_chain_free (&dest);
   LOG_TRACE ("\n");
-  _obj->acis_empty = 0;
-  _obj->version = 1; // conversion complete
 
   if (i + 2 >= num_blocks)
-    _obj->block_size = (BITCODE_BL *)realloc (_obj->block_size,
-                                              (i + 2) * sizeof (BITCODE_BL));
+    block_size
+        = (BITCODE_BL *)realloc (block_size, (i + 2) * sizeof (BITCODE_BL));
   // the final "smaller rest" block was written at index i without
   // incrementing i, so the count is i + 1 (block_size[num_blocks] == 0
   // terminator). Without the +1 the last block is dropped; for a small
   // single-block SAT that drops all data (num_blocks == 0) and produces an
   // empty, invalid ACIS body (ODA "General modeling failure").
-  _obj->num_blocks = i + 1;
-  _obj->block_size[i + 1] = 0;
+  *num_blocksp = i + 1;
+  block_size[i + 1] = 0;
   // free_3dsolid iterates i <= num_blocks (inclusive) and dereferences
   // encr_sat_data[num_blocks], so give it a matching NULL-terminated slot
   // (block_size[] above already has its 0 terminator at the same index).
-  _obj->encr_sat_data
-      = (char **)realloc (_obj->encr_sat_data, (i + 2) * sizeof (char *));
-  if (_obj->encr_sat_data)
-    _obj->encr_sat_data[i + 1] = NULL;
+  encr_sat_data = (char **)realloc (encr_sat_data, (i + 2) * sizeof (char *));
+  if (encr_sat_data)
+    encr_sat_data[i + 1] = NULL;
+  *block_sizep = block_size;
+  *blocksp = encr_sat_data;
+  return 0;
+}
+
+/* Converts v2 SAB acis_data in-place to SAT v1 encr_sat_data[].
+   Sets dxf_sab_converted to 1, denoting that encr_sat_data is NOT the
+   encrypted acis_data anymore, rather the converted from SAB for DXF.
+   acis_data stays as it was. The DXF writer converts into blocks of its
+   own, and leaves the entity as it is.
+*/
+EXPORT int
+dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)
+{
+  BITCODE_BL num_blocks;
+  BITCODE_BL *block_size;
+  char **blocks;
+  if (convert_SAB_to_SAT1 (_obj, &num_blocks, &block_size, &blocks))
+    return 1;
+  free_sat_blocks (_obj->encr_sat_data ? _obj->num_blocks : 0,
+                   _obj->block_size, _obj->encr_sat_data);
+  _obj->num_blocks = num_blocks;
+  _obj->block_size = block_size;
+  _obj->encr_sat_data = blocks;
+  _obj->_dxf_sab_converted = 1;
+  _obj->acis_empty = 0;
+  _obj->version = 1; // conversion complete
   return 0;
 }
 
@@ -2721,6 +2770,60 @@ dxf_check_history_id (Bit_Chain *restrict dat, const Dwg_Object *restrict obj,
     }
 }
 
+/* Writes SAT version 1 blocks, encrypted, as DXF group 1 lines. */
+static void
+dxf_sat_blocks (Bit_Chain *restrict dat, const BITCODE_BL num_blocks,
+                const BITCODE_BL *block_size, char *const *blocks)
+{
+  for (BITCODE_BL i = 0; i < num_blocks; i++)
+    {
+      char *s = blocks[i];
+      // FIXME
+      // only DXF 1, always keep len <255
+      // int len = _dxf_sab_converted ? block_size[i] : strlen (s);
+      int len = block_size[i];
+      while (len > 0)
+        {
+          char *n = strchr (s, '\n');
+          int l = len > 255 ? 255 : len;
+          char *caret = strchr (s, '^');
+          if (n && (n - s < len))
+            {
+              l = n - s;
+            }
+          if (l)
+            {
+              GROUP (1);
+              // replace "^" by "^ "
+              while (caret && caret < n)
+                {
+                  int lc = caret - s;
+                  fprintf (dat->fh, "%.*s^ ", lc, s);
+                  lc++;
+                  l -= lc;
+                  len -= lc;
+                  s += lc;
+                  caret = l > 1 ? strchr (s, '^') : NULL;
+                }
+              if (l > 255)
+                LOG_ERROR ("Overlong SAT line \"%s\" len=%d", s, l);
+              if (s[l - 1] == '\r')
+                fprintf (dat->fh, "%.*s\n", l, s);
+              else
+                fprintf (dat->fh, "%.*s\r\n", l, s);
+              l++;
+              len -= l;
+              s += l;
+            }
+          else
+            {
+              len--;
+              s++;
+            }
+        }
+    }
+}
+
 static int
 dxf_3dsolid (Bit_Chain *restrict dat, const Dwg_Object *restrict obj,
              Dwg_Entity_3DSOLID *restrict _obj)
@@ -2735,78 +2838,34 @@ dxf_3dsolid (Bit_Chain *restrict dat, const Dwg_Object *restrict obj,
       FIELD_B (unknown, 0);
       if (FIELD_VALUE (version) == 2)
         {
-          BITCODE_RC *acis_data;
+          // DXF has SAT version 1 only. Converted into blocks of its own,
+          // so that the entity keeps its SAB.
+          BITCODE_BL num_blocks;
+          BITCODE_BL *block_size;
+          char **blocks;
           LOG_TRACE ("Convert SAB ACIS BinaryFile v2 to encrypted SAT v1\n");
-          error |= dwg_convert_SAB_to_SAT1 (_obj);
-
-          for (i = 0; i < FIELD_VALUE (num_blocks); i++)
+          error |= convert_SAB_to_SAT1 (_obj, &num_blocks, &block_size,
+                                        &blocks);
+          for (i = 0; blocks && block_size && i < num_blocks; i++)
             {
               // here idx is just local, always starting at 0. ignored
               int idx = 0;
-              BITCODE_BL len = FIELD_VALUE (block_size[i]);
-              char *ptr;
-              if ((BITCODE_BLd)len < 0)
-                {
-                  LOG_ERROR ("Invalid %s.block_size[%u] " FORMAT_BL, obj->name,
-                             (unsigned)i, len);
-                  return DWG_ERR_VALUEOUTOFBOUNDS;
-                }
-              ptr = dwg_encrypt_SAT1 (
-                  len, (BITCODE_RC *)_obj->encr_sat_data[i], &idx);
-
-              free (_obj->encr_sat_data[i]);
-              _obj->encr_sat_data[i] = ptr;
+              char *ptr = dwg_encrypt_SAT1 (block_size[i],
+                                            (BITCODE_RC *)blocks[i], &idx);
+              free (blocks[i]);
+              blocks[i] = ptr;
             }
-          _obj->version = 1; // conversion complete
+          VALUE_BS (1, 70);
+          if (blocks && block_size)
+            dxf_sat_blocks (dat, num_blocks, block_size, blocks);
+          free_sat_blocks (blocks ? num_blocks : 0, block_size, blocks);
         }
-      FIELD_BS (version, 70); // always 1
-      for (i = 0; i < FIELD_VALUE (num_blocks); i++)
+      else
         {
-          char *s = FIELD_VALUE (encr_sat_data[i]);
-          // FIXME
-          // only DXF 1, always keep len <255
-          // int len = _obj->_dxf_sab_converted ? FIELD_VALUE (block_size[i]) :
-          // strlen (s);
-          int len = FIELD_VALUE (block_size[i]);
-          while (len > 0)
-            {
-              char *n = strchr (s, '\n');
-              int l = len > 255 ? 255 : len;
-              char *caret = strchr (s, '^');
-              if (n && (n - s < len))
-                {
-                  l = n - s;
-                }
-              if (l)
-                {
-                  GROUP (1);
-                  // replace "^" by "^ "
-                  while (caret && caret < n)
-                    {
-                      int lc = caret - s;
-                      fprintf (dat->fh, "%.*s^ ", lc, s);
-                      lc++;
-                      l -= lc;
-                      len -= lc;
-                      s += lc;
-                      caret = l > 1 ? strchr (s, '^') : NULL;
-                    }
-                  if (l > 255)
-                    LOG_ERROR ("Overlong SAT line \"%s\" len=%d", s, l);
-                  if (s[l - 1] == '\r')
-                    fprintf (dat->fh, "%.*s\n", l, s);
-                  else
-                    fprintf (dat->fh, "%.*s\r\n", l, s);
-                  l++;
-                  len -= l;
-                  s += l;
-                }
-              else
-                {
-                  len--;
-                  s++;
-                }
-            }
+          FIELD_BS (version, 70); // always 1
+          dxf_sat_blocks (dat, FIELD_VALUE (num_blocks),
+                          FIELD_VALUE (block_size),
+                          FIELD_VALUE (encr_sat_data));
         }
     }
   dxf_check_history_id (dat, obj, _obj);
