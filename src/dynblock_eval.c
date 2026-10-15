@@ -328,19 +328,26 @@ distance_3d (const BITCODE_3BD *a, const BITCODE_3BD *b)
   return hypot (hypot (b->x - a->x, b->y - a->y), b->z - a->z);
 }
 
+/* angle, in radians, in [0, 2 pi) */
+static double
+normal_angle (const double angle)
+{
+  double a = fmod (angle, 2.0 * M_PI);
+  if (a < 0.0)
+    a += 2.0 * M_PI;
+  // a tiny negative angle plus 2 pi rounds to 2 pi
+  return a < 2.0 * M_PI ? a : 0.0;
+}
+
 /* The angle of end about base, from the direction of base_angle, in
    [0, 2 pi): the value of a rotation parameter. */
 static double
 rotation_angle (const BITCODE_3BD *base, const BITCODE_3BD *end,
                 const BITCODE_3BD *base_angle)
 {
-  double angle = atan2 (end->y - base->y, end->x - base->x)
-                 - atan2 (base_angle->y - base->y, base_angle->x - base->x);
-  angle = fmod (angle, 2.0 * M_PI);
-  if (angle < 0.0)
-    angle += 2.0 * M_PI;
-  // a tiny negative angle plus 2 pi rounds to 2 pi
-  return angle < 2.0 * M_PI ? angle : 0.0;
+  return normal_angle (
+      atan2 (end->y - base->y, end->x - base->x)
+      - atan2 (base_angle->y - base->y, base_angle->x - base->x));
 }
 
 /* The distance between two angles, around the circle. */
@@ -1184,7 +1191,7 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
 }
 
 /*--------------------------------------------------------------------------------
- * Linear parameters, and their stretch and move actions
+ * Linear and rotation parameters, and their actions
  *
  * A LINEAR value moves its parameter's end point along the parameter, to
  * the value's distance from its base point. The stretch and move actions
@@ -1199,15 +1206,28 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * the change by its distance multiplier and turns it by its angle offset.
  *
  * Actions also move the points of other parameters in their selection
- * (codes, for a stretch, and the node ids a move lists), which changes
- * those parameters' values unless they are set too. So each parameter is
- * evaluated after the actions that move it, of the properties given a
- * value: the actions of the others don't run. The evaluation graph doesn't
- * list its nodes in that order. As every action translates, the order
- * doesn't change the geometry otherwise.
+ * (codes, for a stretch, and the node ids a move or rotate action lists),
+ * which changes those parameters' values unless they are set too. So each
+ * linear parameter is evaluated after the actions that move it, of the
+ * properties that run: those given a value that changes their parameter,
+ * or that such an action moves. The actions of the others don't run. The
+ * evaluation graph doesn't list its nodes in that order. As the stretch
+ * and move actions translate, their order doesn't change the geometry
+ * otherwise.
  *
- * Everything is planned on the definition first, as moves of its
- * entities, so that a refusal comes before anything is copied.
+ * A ROTATION value turns its parameter's end point about its base point,
+ * and the rotate actions connected to the parameter then turn the
+ * entities they select, whole, about the base point by the change in
+ * angle. A turn and a translation of the same entity give different
+ * geometry in each order, and the order AutoCAD runs unrelated actions in
+ * is not known, so the evaluator refuses an entity that a rotate action
+ * turns and another action that runs moves or turns too; and an action
+ * that runs moving a rotation parameter given a value, or a rotate action
+ * that runs turning a linear parameter that runs. Rotation parameters are
+ * then independent of the others, and are evaluated after them.
+ *
+ * Everything is planned on the definition first, as moves and turns of
+ * its entities, so that a refusal comes before anything is copied.
  */
 
 /* A linear parameter during the evaluation: its points as the actions
@@ -1221,8 +1241,22 @@ typedef struct _dynblock_linear
   BITCODE_3BD end;
   int given;
   double value;
+  int running; /* its actions run */
   int done;
 } Dynblock_Linear;
+
+/* A rotation parameter during the evaluation, and the value it is set
+   to, reduced to [0, 2 pi), so that a huge one runs and turns the points
+   and the angles alike, and the angles keep their sweeps. */
+typedef struct _dynblock_rotation
+{
+  const Dwg_Object *obj;
+  const char *name; /* the property's, UTF-8 */
+  BITCODE_BL nodeid;
+  int given;
+  double value;
+  int running; /* its actions run */
+} Dynblock_Rotation;
 
 /* An action of the evaluation graph, and the linear parameter whose value
    it takes. */
@@ -1240,7 +1274,19 @@ typedef struct _dynblock_move
   BITCODE_RLL entity;
   int point; /* the stretch point, or -1 for the whole entity */
   BITCODE_3BD delta;
+  const char *action; /* the action's name, UTF-8 */
 } Dynblock_Move;
+
+/* A turn of a whole definition entity, which its copy gets: about the
+   point center of the block's XY plane, counter-clockwise by angle
+   radians. */
+typedef struct _dynblock_turn
+{
+  BITCODE_RLL entity;
+  BITCODE_2RD center;
+  double angle;
+  const char *action; /* the action's name, UTF-8 */
+} Dynblock_Turn;
 
 typedef struct _dynblock_plan
 {
@@ -1251,11 +1297,16 @@ typedef struct _dynblock_plan
   dwg_inthash *node_handles;
   Dynblock_Linear *linear;
   BITCODE_BL num_linear;
+  Dynblock_Rotation *rotations;
+  BITCODE_BL num_rotations;
   Dynblock_Action *actions;
   BITCODE_BL num_actions;
   Dynblock_Move *moves;
   BITCODE_BL num_moves;
   BITCODE_BL size_moves;
+  Dynblock_Turn *turns;
+  BITCODE_BL num_turns;
+  BITCODE_BL size_turns;
   char *reason;
   size_t reason_size;
 } Dynblock_Plan;
@@ -1313,6 +1364,34 @@ find_linear (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
     if (plan->linear[i].nodeid == nodeid)
       return (int)i;
   return -1;
+}
+
+static int
+find_rotation (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
+{
+  for (BITCODE_BL i = 0; i < plan->num_rotations; i++)
+    if (plan->rotations[i].nodeid == nodeid)
+      return (int)i;
+  return -1;
+}
+
+static BITCODE_BL
+node_id (const Dwg_Object *obj)
+{
+  // every graph element starts with Dynblock_Element
+  return ((const Dynblock_Element *)obj->tio.object->tio.BLOCKMOVEACTION)
+      ->evalexpr.nodeid;
+}
+
+/* The node id of the parameter whose value action a takes: the first its
+   connections name. */
+static BITCODE_BL
+action_parameter (const Dynblock_Action *a)
+{
+  BITCODE_BL n;
+  const Dwg_BLOCKACTION_connectionpts *conn
+      = action_connections (a->obj, &n);
+  return conn && n ? conn[0].code : 0;
 }
 
 /* The node of the evaluation graph with node id nodeid, or NULL. */
@@ -1389,15 +1468,33 @@ is_graph_element (const Dwg_Object *obj)
     }
 }
 
+/* Refuses an action that runs moving the points of rotation parameter r
+   given a value: its rotate actions would turn about a point that
+   moved. */
+static int
+check_moved_rotation (Dynblock_Plan *plan, const Dynblock_Action *a,
+                      const int r)
+{
+  if (r < 0 || !plan->rotations[r].given)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "action '%s' moves rotation property '%s', which is given a "
+              "value; that is not supported",
+              a->name, plan->rotations[r].name);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
 /* Checks the node with node id nodeid, other than a linear parameter,
    whose points action a moves: refuses an id the evaluation graph doesn't
-   have, and a parameter that chains its actions, as AutoCAD would run them
+   have, a rotation parameter given a value, as check_moved_rotation ()
+   says, and a parameter that chains its actions, as AutoCAD would run them
    too. */
 static int
 check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
                      const BITCODE_BL nodeid)
 {
   const Dwg_Object *obj = find_node (plan, nodeid);
+  int error;
   if (!obj)
     {
       set_reason (plan->reason, plan->reason_size,
@@ -1406,6 +1503,9 @@ check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
                   a->name, (unsigned)nodeid);
       return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
     }
+  error = check_moved_rotation (plan, a, find_rotation (plan, nodeid));
+  if (error)
+    return error;
   // every parameter starts with BLOCKPARAMETER_fields
   if (!is_parameter (obj)
       || !obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
@@ -1417,9 +1517,95 @@ check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
   return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
 }
 
+/* Refuses rotate action a turning linear parameter k when it runs: its
+   stretch and move actions would then run along a turned direction. */
 static int
-add_move (Dynblock_Plan *plan, const BITCODE_RLL entity, const int point,
-          const BITCODE_3BD *delta)
+check_turned_linear (Dynblock_Plan *plan, const Dynblock_Action *a,
+                     const int k)
+{
+  if (k < 0 || !plan->linear[k].running)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "rotate action '%s' turns linear property '%s', whose value "
+              "changes; that is not supported",
+              a->name, plan->linear[k].name);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+/* Whether action a lists the parameter with node id nodeid among those
+   whose points it moves: a stretch action in codes, a move or rotate
+   action by its node id. */
+static int
+lists_node (const Dwg_Object *a, const BITCODE_BL nodeid)
+{
+  if (a->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION)
+    {
+      const Dwg_Object_BLOCKSTRETCHACTION *_a
+          = a->tio.object->tio.BLOCKSTRETCHACTION;
+      for (BITCODE_BL i = 0; _a->codes && i < _a->num_codes; i++)
+        if (_a->codes[i].bl95 == nodeid)
+          return 1;
+      return 0;
+    }
+  else
+    {
+      // every action starts with BLOCKACTION_fields
+      const Dwg_Object_BLOCKMOVEACTION *_a
+          = a->tio.object->tio.BLOCKMOVEACTION;
+      for (BITCODE_BL i = 0; _a->actions && i < _a->num_actions; i++)
+        if (_a->actions[i] == nodeid)
+          return 1;
+      return 0;
+    }
+}
+
+/* Checks node obj of the evaluation graph, which action a selects (deps).
+   A parameter the action lists among those whose points it moves is
+   checked with them, and the action's own parameter is the one its value
+   changes. Another parameter would move with the selection, and how
+   AutoCAD stores one that does is not known: refuses one that chains its
+   actions, which AutoCAD would then run, a rotation parameter given a
+   value, or a linear parameter that runs, which a rotate action would
+   turn, as check_turned_linear () says. Grips are left alone. */
+static int
+check_selected_dep (Dynblock_Plan *plan, const Dynblock_Action *a,
+                    const Dwg_Object *obj)
+{
+  const BITCODE_BL nodeid = node_id (obj);
+  const int r = find_rotation (plan, nodeid);
+  int error;
+  if (!is_parameter (obj) || nodeid == action_parameter (a)
+      || lists_node (a->obj, nodeid))
+    return 0;
+  if (a->obj->fixedtype == DWG_TYPE_BLOCKROTATEACTION)
+    {
+      error = check_turned_linear (plan, a, find_linear (plan, nodeid));
+      if (error)
+        return error;
+    }
+  if (r >= 0 && plan->rotations[r].given)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "action '%s' selects rotation property '%s', which is "
+                  "given a value, without listing it among the parameters "
+                  "it moves; that is not supported",
+                  a->name, plan->rotations[r].name);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  // every parameter starts with BLOCKPARAMETER_fields
+  if (!obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "action '%s' selects %s (node %u), which chains its actions, "
+              "without listing it among the parameters it moves; that is not "
+              "supported",
+              a->name, dwg_type_name (obj->fixedtype), (unsigned)nodeid);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+static int
+add_move (Dynblock_Plan *plan, const Dynblock_Action *a,
+          const BITCODE_RLL entity, const int point, const BITCODE_3BD *delta)
 {
   Dynblock_Move *m;
   if (plan->num_moves == plan->size_moves)
@@ -1436,6 +1622,7 @@ add_move (Dynblock_Plan *plan, const BITCODE_RLL entity, const int point,
   m->entity = entity;
   m->point = point;
   m->delta = *delta;
+  m->action = a->name;
   return 0;
 }
 
@@ -1596,7 +1783,7 @@ box_add (double *lo, double *hi, const double x, const double y)
 /* A box that holds the boundary of HATCH _obj, in its OCS: arcs and
    bulges count as their whole circle, an ellipse as the circle of its
    major axis, and a spline as its control and fit points. Returns 0 when
-   the boundary has no point. */
+   the boundary has no point, or a segment of a type it doesn't know. */
 static int
 hatch_box (const Dwg_Entity_HATCH *_obj, double *lo, double *hi)
 {
@@ -1672,9 +1859,10 @@ hatch_box (const Dwg_Entity_HATCH *_obj, double *lo, double *hi)
 
 /* Refuses a whole move of HATCH obj by stretch action a unless its
    boundary lies wholly inside the action's frame, which must be a
-   rectangle. A HATCH has a single stretch point, so one that is listed
-   may still cross the frame, and a stretch would then reshape its
-   boundary rather than move it. */
+   rectangle, and its extrusion is along +Z, so that its OCS is the
+   frame's. A HATCH has a single stretch point, so one that is listed may
+   still cross the frame, and a stretch would then reshape its boundary
+   rather than move it. */
 static int
 check_hatch (Dynblock_Plan *plan, const Dynblock_Action *a,
              const Dwg_Object *obj)
@@ -1763,13 +1951,15 @@ plan_whole (Dynblock_Plan *plan, const Dynblock_Action *a,
             error = check_planar (plan, attrib, delta);
         }
     }
-  return error ? error : add_move (plan, obj->handle.value, -1, delta);
+  return error ? error : add_move (plan, a, obj->handle.value, -1, delta);
 }
 
 /* Refuses an entity that stretch action a selects (deps) with none of its
    stretch points listed (hdls): one wholly outside the action's frame,
    which AutoCAD moves whole. The parameters and grips the action selects
-   are nodes of the graph, whose points it lists by node id (codes). */
+   are nodes of the graph: it lists the points of the parameters it moves
+   by node id (codes), and its own parameter, whose end point the value
+   moves, with no entry; check_selected_dep () checks the others. */
 static int
 check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
 {
@@ -1790,7 +1980,11 @@ check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
       const BITCODE_RLL handle = ref_handle (_a->deps[i]);
       const Dwg_Object *obj;
       if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
-        continue;
+        {
+          error = check_selected_dep (plan, a,
+                                      handle_object (plan->dwg, handle));
+          continue;
+        }
       obj = selected_entity (plan, a, handle, &error);
       if (obj && hash_get (listed, handle) == HASH_NOT_FOUND)
         {
@@ -1876,7 +2070,7 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
         {
           error = check_planar (plan, obj, delta);
           for (BITCODE_BS j = 0; !error && j < h->num_indexes; j++)
-            error = add_move (plan, obj->handle.value, (int)h->indexes[j],
+            error = add_move (plan, a, obj->handle.value, (int)h->indexes[j],
                               delta);
         }
       else
@@ -1957,10 +2151,14 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
     {
       const BITCODE_RLL handle = ref_handle (_a->deps[i]);
       const Dwg_Object *obj;
-      // the parameters and grips it moves are nodes of the graph, which it
-      // lists by id too
+      // the parameters and grips it moves are nodes of the graph; it lists
+      // the parameters by id too
       if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
-        continue;
+        {
+          error = check_selected_dep (plan, a,
+                                      handle_object (plan->dwg, handle));
+          continue;
+        }
       obj = selected_entity (plan, a, handle, &error);
       if (obj)
         error = plan_whole (plan, a, obj, delta);
@@ -2008,10 +2206,58 @@ moves_linear (const Dwg_Object *a, const BITCODE_BL nodeid)
   return 0;
 }
 
-/* The next linear parameter to evaluate: one that no action of a given
-   parameter not yet evaluated moves; the actions of a parameter that isn't
-   given don't run. -1 when all are evaluated, -2 when the rest wait on
-   given parameters whose actions move each other's. */
+/* Marks the parameters that run, whose actions run: a linear one given a
+   value that differs from its length, or that a stretch or move action of
+   one that runs moves, worked out until no more are found; a rotation one
+   given a value that differs from its angle. A rotate action doesn't
+   change the length of a linear parameter it turns. */
+static void
+mark_running (Dynblock_Plan *plan)
+{
+  int more;
+  for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+    {
+      Dynblock_Linear *l = &plan->linear[i];
+      l->running = l->given
+                   && fabs (l->value - distance_3d (&l->base, &l->end))
+                          > DYNBLOCK_VALUE_EPSILON;
+    }
+  for (BITCODE_BL i = 0; i < plan->num_rotations; i++)
+    {
+      Dynblock_Rotation *r = &plan->rotations[i];
+      const Dwg_Object_BLOCKROTATIONPARAMETER *_r
+          = r->obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+      r->running = r->given
+                   && angle_difference (
+                          r->value,
+                          rotation_angle (&_r->def_basept, &_r->def_endpt,
+                                          &_r->def_base_angle_pt))
+                          > DYNBLOCK_VALUE_EPSILON;
+    }
+  do
+    {
+      more = 0;
+      for (BITCODE_BL j = 0; j < plan->num_actions; j++)
+        {
+          const int k = plan->actions[j].linear;
+          if (k < 0 || !plan->linear[k].running)
+            continue;
+          for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+            {
+              Dynblock_Linear *l = &plan->linear[i];
+              if (l->given && !l->running
+                  && moves_linear (plan->actions[j].obj, l->nodeid))
+                more = l->running = 1;
+            }
+        }
+    }
+  while (more);
+}
+
+/* The next linear parameter to evaluate: one that no action of a
+   parameter that runs, not yet evaluated, moves; the actions of the
+   others don't run. -1 when all are evaluated, -2 when the rest wait on
+   parameters that run whose actions move each other's. */
 static int
 next_linear (const Dynblock_Plan *plan)
 {
@@ -2025,7 +2271,7 @@ next_linear (const Dynblock_Plan *plan)
       for (BITCODE_BL j = 0; !moved && j < plan->num_actions; j++)
         {
           const int k = plan->actions[j].linear;
-          moved = k >= 0 && k != (int)i && plan->linear[k].given
+          moved = k >= 0 && k != (int)i && plan->linear[k].running
                   && !plan->linear[k].done
                   && moves_linear (plan->actions[j].obj,
                                    plan->linear[i].nodeid);
@@ -2150,6 +2396,270 @@ plan_actions_of (Dynblock_Plan *plan, const Dynblock_Linear *p,
   return 0;
 }
 
+/* Whether the evaluator turns an entity of obj's type. Not an ATTDEF: in
+   a check, AutoCAD left the ATTDEFs a rotate action selected as they were,
+   neither moved nor turned, in the representation block and on the
+   placement, so how it turns one is not known. */
+static int
+is_turnable (const Dwg_Object *obj)
+{
+  return (is_movable (obj) && obj->fixedtype != DWG_TYPE_ATTDEF)
+         || obj->fixedtype == DWG_TYPE_POINT;
+}
+
+/* The extrusion of entity obj, of a type the evaluator turns, or NULL for
+   a SPLINE, which has none. */
+static const BITCODE_BE *
+entity_normal (const Dwg_Object *obj)
+{
+  int planar;
+  const BITCODE_BE *ext = entity_ocs (obj, &planar);
+  if (ext)
+    return ext;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      return &obj->tio.entity->tio.LINE->extrusion;
+    case DWG_TYPE_ELLIPSE:
+      return &obj->tio.entity->tio.ELLIPSE->extrusion;
+    case DWG_TYPE_MTEXT:
+      return &obj->tio.entity->tio.MTEXT->extrusion;
+    case DWG_TYPE_POINT:
+      return &obj->tio.entity->tio.POINT->extrusion;
+    default:
+      return NULL;
+    }
+}
+
+/* Refuses a turn of entity obj by rotate action a unless its extrusion is
+   along Z, either way, which a turn about Z leaves as it is. An extrusion
+   of 0, as the decoder leaves an LWPOLYLINE that stores none, is +Z. */
+static int
+check_turn_plane (Dynblock_Plan *plan, const Dynblock_Action *a,
+                  const Dwg_Object *obj)
+{
+  const BITCODE_BE *ext = entity_normal (obj);
+  if (!ext || (ext->x == 0.0 && ext->y == 0.0))
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "rotate action '%s': turning %s " FORMAT_HV
+              ", which is not in the XY plane, is not supported",
+              a->name, dwg_type_name (obj->fixedtype), obj->handle.value);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+/* Refuses a turn of HATCH obj by rotate action a unless it is a solid fill
+   with no gradient, whose boundary is made of polylines and lines: how
+   AutoCAD stores the turn of an arc, elliptical arc or spline segment of a
+   boundary, or of a pattern, is not known. */
+static int
+check_turn_hatch (Dynblock_Plan *plan, const Dynblock_Action *a,
+                  const Dwg_Object *obj)
+{
+  const Dwg_Entity_HATCH *_obj = obj->tio.entity->tio.HATCH;
+  if (!_obj->is_solid_fill || _obj->is_gradient_fill)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "rotate action '%s': turning HATCH " FORMAT_HV
+                  ", which is not a solid fill, is not supported",
+                  a->name, obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+    {
+      const Dwg_HATCH_Path *path = &_obj->paths[i];
+      if (path->flag & 2)
+        continue;
+      for (BITCODE_BL j = 0; path->segs && j < path->num_segs_or_paths; j++)
+        if (path->segs[j].curve_type != 1)
+          {
+            set_reason (plan->reason, plan->reason_size,
+                        "rotate action '%s': turning HATCH " FORMAT_HV
+                        " with a boundary segment of type %u is not "
+                        "supported",
+                        a->name, obj->handle.value,
+                        (unsigned)path->segs[j].curve_type);
+            return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+          }
+    }
+  return 0;
+}
+
+static int
+add_turn (Dynblock_Plan *plan, const Dynblock_Action *a,
+          const BITCODE_RLL entity, const BITCODE_2RD *center,
+          const double angle)
+{
+  Dynblock_Turn *t;
+  if (plan->num_turns == plan->size_turns)
+    {
+      const BITCODE_BL size = plan->size_turns ? plan->size_turns * 2 : 32;
+      Dynblock_Turn *turns = (Dynblock_Turn *)realloc (
+          plan->turns, size * sizeof (Dynblock_Turn));
+      if (!turns)
+        return DWG_ERR_OUTOFMEM;
+      plan->turns = turns;
+      plan->size_turns = size;
+    }
+  t = &plan->turns[plan->num_turns++];
+  t->entity = entity;
+  t->center = *center;
+  t->angle = angle;
+  t->action = a->name;
+  return 0;
+}
+
+/* Plans a turn of entity obj, whole, by rotate action a, about center by
+   angle, with the ATTRIBs an INSERT owns. */
+static int
+plan_turn (Dynblock_Plan *plan, const Dynblock_Action *a,
+           const Dwg_Object *obj, const BITCODE_2RD *center,
+           const double angle)
+{
+  int error;
+  if (!is_turnable (obj))
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "rotate action '%s': turning %s " FORMAT_HV
+                  " is not supported",
+                  a->name, dwg_type_name (obj->fixedtype), obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  error = check_turn_plane (plan, a, obj);
+  if (!error && obj->fixedtype == DWG_TYPE_HATCH)
+    error = check_turn_hatch (plan, a, obj);
+  if (!error && obj->fixedtype == DWG_TYPE_INSERT)
+    {
+      const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+      for (BITCODE_BL i = 0; !error && _obj->attribs && i < _obj->num_owned;
+           i++)
+        {
+          const Dwg_Object *attrib = ref_object (plan->dwg, _obj->attribs[i]);
+          if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+            error = check_turn_plane (plan, a, attrib);
+        }
+    }
+  return error ? error : add_turn (plan, a, obj->handle.value, center, angle);
+}
+
+/* Plans rotate action a turning the entities it selects about center by
+   angle. The parameters it turns are checked, as check_turned_linear ()
+   and check_selected_node () say. */
+static int
+plan_rotate (Dynblock_Plan *plan, const Dynblock_Action *a,
+             const BITCODE_2RD *center, const double angle)
+{
+  const Dwg_Object_BLOCKROTATEACTION *_a
+      = a->obj->tio.object->tio.BLOCKROTATEACTION;
+  const BITCODE_BL own = action_parameter (a);
+  int error = 0;
+  for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->deps[i]);
+      const Dwg_Object *obj;
+      // the parameters and grips it turns are nodes of the graph; it lists
+      // the parameters by id too
+      if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
+        {
+          error = check_selected_dep (plan, a,
+                                      handle_object (plan->dwg, handle));
+          continue;
+        }
+      obj = selected_entity (plan, a, handle, &error);
+      if (obj)
+        error = plan_turn (plan, a, obj, center, angle);
+    }
+  for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
+    {
+      const BITCODE_BL nodeid = _a->actions[i];
+      // its own parameter's end point turns with the value
+      if (nodeid == own)
+        continue;
+      error = check_turned_linear (plan, a, find_linear (plan, nodeid));
+      if (!error)
+        error = check_selected_node (plan, a, nodeid);
+    }
+  return error;
+}
+
+/* Whether connection conn names the point name of the parameter with node
+   id nodeid. */
+static int
+is_connection (const Dwg_BLOCKACTION_connectionpts *conn,
+               const BITCODE_BL nodeid, const char *name)
+{
+  return conn->code == nodeid && conn->name && strEQ (conn->name, name);
+}
+
+/* Plans the actions connected to rotation parameter r, whose value turns
+   its end point about its base point by angle. */
+static int
+plan_rotation_actions (Dynblock_Plan *plan, const Dynblock_Rotation *r,
+                       const double angle)
+{
+  const Dwg_Object_BLOCKROTATIONPARAMETER *_r
+      = r->obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+  for (BITCODE_BL i = 0; i < plan->num_actions; i++)
+    {
+      const Dynblock_Action *a = &plan->actions[i];
+      const Dwg_Object_BLOCKROTATEACTION *_a;
+      BITCODE_2RD center;
+      int error;
+      if (!is_connected (a->obj, r->nodeid))
+        continue;
+      if (a->obj->fixedtype != DWG_TYPE_BLOCKROTATEACTION)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "rotation property '%s' drives %s '%s', which is not "
+                      "supported",
+                      r->name, dwg_type_name (a->obj->fixedtype), a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      _a = a->obj->tio.object->tio.BLOCKROTATEACTION;
+      if (!is_connection (&_a->conn_pts[0], r->nodeid, "UpdatedBaseX")
+          || !is_connection (&_a->conn_pts[1], r->nodeid, "UpdatedBaseY")
+          || !is_connection (&_a->conn_pts[2], r->nodeid, "AngleDelta"))
+        {
+          char *names[3];
+          for (int j = 0; j < 3; j++)
+            names[j] = utf8_copy (plan->dwg, _a->conn_pts[j].name);
+          set_reason (plan->reason, plan->reason_size,
+                      "rotate action '%s' takes '%s', '%s' and '%s' of "
+                      "rotation property '%s', which is not supported",
+                      a->name, names[0] ? names[0] : "",
+                      names[1] ? names[1] : "", names[2] ? names[2] : "",
+                      r->name);
+          for (int j = 0; j < 3; j++)
+            free (names[j]);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (!_a->dependent)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "rotate action '%s' has a base point independent of "
+                      "its parameter's, which is not supported",
+                      a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (_a->offset.x != 0.0 || _a->offset.y != 0.0)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "rotate action '%s' has its base point offset from its "
+                      "parameter's, which is not supported",
+                      a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      // UpdatedBaseX and UpdatedBaseY: the parameter's base point, which
+      // no action that runs moves
+      center.x = _r->def_basept.x;
+      center.y = _r->def_basept.y;
+      error = plan_rotate (plan, a, &center, angle);
+      if (error)
+        return error;
+    }
+  return 0;
+}
+
 static void
 free_plan (Dynblock_Plan *plan)
 {
@@ -2157,10 +2667,12 @@ free_plan (Dynblock_Plan *plan)
   free_hash (plan->node_handles);
   free ((void *)plan->nodes);
   free (plan->linear);
+  free (plan->rotations);
   for (BITCODE_BL i = 0; plan->actions && i < plan->num_actions; i++)
     free (plan->actions[i].name);
   free (plan->actions);
   free (plan->moves);
+  free (plan->turns);
 }
 
 static int
@@ -2353,13 +2865,105 @@ check_reach (Dynblock_Plan *plan)
   return error;
 }
 
-/* Plans the LINEAR values of list, given in linear (a NaN where not given),
-   for definition _def, whose evaluation graph is graph, into
-   plan->moves. */
+/* The largest magnitude of a coordinate or vector component the evaluator
+   turns of entity obj, with the ATTRIBs an INSERT owns. */
+static double
+turn_reach (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  double m = entity_reach (dwg, obj);
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_ELLIPSE:
+      REACH_2D (m, obj->tio.entity->tio.ELLIPSE->sm_axis);
+      break;
+    case DWG_TYPE_SPLINE:
+      REACH_2D (m, obj->tio.entity->tio.SPLINE->beg_tan_vec);
+      REACH_2D (m, obj->tio.entity->tio.SPLINE->end_tan_vec);
+      break;
+    case DWG_TYPE_MTEXT:
+      REACH_2D (m, obj->tio.entity->tio.MTEXT->x_axis_dir);
+      break;
+    case DWG_TYPE_POINT:
+      REACH (m, obj->tio.entity->tio.POINT->x);
+      REACH (m, obj->tio.entity->tio.POINT->y);
+      break;
+    default:
+      break;
+    }
+  return m;
+}
+
+/* Refuses an entity that a rotate action turns and another action that
+   runs moves or turns too, as the order AutoCAD runs them in is not known;
+   and a turn that could take a coordinate beyond what a double holds:
+   turned about c, a point p, or a vector, stays within 3 |c| + 2 |p| in
+   each coordinate. */
 static int
-plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
+check_turns (Dynblock_Plan *plan)
+{
+  dwg_inthash *turned;
+  int error = 0;
+  if (!plan->num_turns)
+    return 0;
+  turned = hash_new ((uint64_t)plan->num_turns * 2 + 8);
+  if (!turned)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; i < plan->num_turns && !error; i++)
+    {
+      const Dynblock_Turn *t = &plan->turns[i];
+      const Dwg_Object *obj = handle_object (plan->dwg, t->entity);
+      const uint64_t first = hash_get (turned, t->entity);
+      const double center = fmax (fabs (t->center.x), fabs (t->center.y));
+      if (first != HASH_NOT_FOUND)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "%s " FORMAT_HV " is turned by rotate actions '%s' and "
+                      "'%s'; the order AutoCAD runs them in is not known, "
+                      "which is not supported",
+                      obj ? dwg_type_name (obj->fixedtype) : "entity",
+                      t->entity, plan->turns[first].action, t->action);
+          error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      else if (!isfinite (3.0 * center
+                          + 2.0 * (obj ? turn_reach (plan->dwg, obj) : 0.0)))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "rotate action '%s' would turn %s " FORMAT_HV
+                      " beyond what a double holds",
+                      t->action,
+                      obj ? dwg_type_name (obj->fixedtype) : "entity",
+                      t->entity);
+          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+      hash_set (turned, t->entity, i);
+    }
+  for (BITCODE_BL i = 0; i < plan->num_moves && !error; i++)
+    {
+      const Dynblock_Move *m = &plan->moves[i];
+      const uint64_t t = hash_get (turned, m->entity);
+      const Dwg_Object *obj;
+      if (t == HASH_NOT_FOUND)
+        continue;
+      obj = handle_object (plan->dwg, m->entity);
+      set_reason (plan->reason, plan->reason_size,
+                  "%s " FORMAT_HV " is turned by rotate action '%s' and "
+                  "moved by action '%s'; the order AutoCAD runs them in is "
+                  "not known, which is not supported",
+                  obj ? dwg_type_name (obj->fixedtype) : "entity", m->entity,
+                  plan->turns[t].action, m->action);
+      error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  free_hash (turned);
+  return error;
+}
+
+/* Plans the LINEAR and ROTATION values of list, given in value (a NaN
+   where not given), for definition _def, whose evaluation graph is graph,
+   into plan->moves and plan->turns. */
+static int
+plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
              const Dwg_Object *graph, const Param_List *list,
-             const double *linear)
+             const double *value)
 {
   const Dwg_Object_EVALUATION_GRAPH *_graph
       = graph->tio.object->tio.EVALUATION_GRAPH;
@@ -2371,10 +2975,12 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
                                              sizeof (Dwg_Object *));
   plan->linear
       = (Dynblock_Linear *)calloc (list->count + 1, sizeof (Dynblock_Linear));
+  plan->rotations = (Dynblock_Rotation *)calloc (list->count + 1,
+                                                 sizeof (Dynblock_Rotation));
   plan->actions = (Dynblock_Action *)calloc (_graph->num_nodes + 1,
                                              sizeof (Dynblock_Action));
   if (!plan->entities || !plan->node_handles || !plan->nodes || !plan->linear
-      || !plan->actions)
+      || !plan->rotations || !plan->actions)
     return DWG_ERR_OUTOFMEM;
   for (BITCODE_BL i = 0; _def->entities && i < _def->num_owned; i++)
     if (ref_handle (_def->entities[i]))
@@ -2392,21 +2998,29 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
   for (BITCODE_BL i = 0; i < list->count; i++)
     {
       const Dwg_DynParam *p = &list->params[i];
-      const Dwg_Object *obj;
-      const Dwg_Object_BLOCKLINEARPARAMETER *_obj;
-      Dynblock_Linear *l;
-      if (p->kind != DWG_DYNPARAM_LINEAR)
-        continue;
-      obj = handle_object (plan->dwg, p->handle);
-      _obj = obj->tio.object->tio.BLOCKLINEARPARAMETER;
-      l = &plan->linear[plan->num_linear++];
-      l->obj = obj;
-      l->name = p->name;
-      l->nodeid = p->nodeid;
-      l->base = _obj->def_basept;
-      l->end = _obj->def_endpt;
-      l->given = !isnan (linear[i]);
-      l->value = linear[i];
+      const Dwg_Object *obj = handle_object (plan->dwg, p->handle);
+      if (p->kind == DWG_DYNPARAM_LINEAR)
+        {
+          const Dwg_Object_BLOCKLINEARPARAMETER *_obj
+              = obj->tio.object->tio.BLOCKLINEARPARAMETER;
+          Dynblock_Linear *l = &plan->linear[plan->num_linear++];
+          l->obj = obj;
+          l->name = p->name;
+          l->nodeid = p->nodeid;
+          l->base = _obj->def_basept;
+          l->end = _obj->def_endpt;
+          l->given = !isnan (value[i]);
+          l->value = value[i];
+        }
+      else if (p->kind == DWG_DYNPARAM_ROTATION)
+        {
+          Dynblock_Rotation *r = &plan->rotations[plan->num_rotations++];
+          r->obj = obj;
+          r->name = p->name;
+          r->nodeid = p->nodeid;
+          r->given = !isnan (value[i]);
+          r->value = r->given ? normal_angle (value[i]) : value[i];
+        }
     }
   for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
     {
@@ -2428,6 +3042,7 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       for (BITCODE_BL j = 0; j < n && a->linear < 0; j++)
         a->linear = find_linear (plan, conn[j].code);
     }
+  mark_running (plan);
 
   while (!error && (next = next_linear (plan)) >= 0)
     {
@@ -2487,15 +3102,31 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       // which of them AutoCAD evaluates first is not known
       const Dynblock_Linear *p = NULL;
       for (BITCODE_BL i = 0; !p && i < plan->num_linear; i++)
-        if (plan->linear[i].given && !plan->linear[i].done)
+        if (plan->linear[i].running && !plan->linear[i].done)
           p = &plan->linear[i];
       set_reason (plan->reason, plan->reason_size,
-                  "linear properties given a value, such as '%s', wait on "
-                  "each other: their actions move each other's parameters "
-                  "in a cycle, which is not supported",
+                  "linear properties whose actions run, such as '%s', wait "
+                  "on each other: their actions move each other's "
+                  "parameters in a cycle, which is not supported",
                   p ? p->name : "");
       return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
+  // No action that ran moved a rotation parameter given a value, so each
+  // turns from the definition's angle.
+  for (BITCODE_BL i = 0; !error && i < plan->num_rotations; i++)
+    {
+      const Dynblock_Rotation *r = &plan->rotations[i];
+      const Dwg_Object_BLOCKROTATIONPARAMETER *_r
+          = r->obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+      if (r->running)
+        error = plan_rotation_actions (
+            plan, r,
+            r->value
+                - rotation_angle (&_r->def_basept, &_r->def_endpt,
+                                  &_r->def_base_angle_pt));
+    }
+  if (!error)
+    error = check_turns (plan);
   return error ? error : check_reach (plan);
 }
 
@@ -2683,6 +3314,188 @@ apply_moves (Dwg_Data *dwg, const Dynblock_Plan *plan, const Dwg_Copy_Map *map)
     }
 }
 
+/* A turn in an entity's own coordinates: about cx, cy, counter-clockwise
+   by angle, whose cosine and sine are c and s. */
+typedef struct _dynblock_frame
+{
+  double cx, cy, angle, c, s;
+} Dynblock_Frame;
+
+/* Turns the point x, y by frame f. */
+static void
+turn_xy (double *x, double *y, const Dynblock_Frame *f)
+{
+  const double dx = *x - f->cx, dy = *y - f->cy;
+  *x = f->cx + dx * f->c - dy * f->s;
+  *y = f->cy + dx * f->s + dy * f->c;
+}
+
+/* Turns the vector x, y by frame f's angle. */
+static void
+turn_vector (double *x, double *y, const Dynblock_Frame *f)
+{
+  const double vx = *x, vy = *y;
+  *x = vx * f->c - vy * f->s;
+  *y = vx * f->s + vy * f->c;
+}
+
+#define TURN_2D(pt, f) turn_xy (&(pt).x, &(pt).y, f)
+#define TURN_VECTOR(v, f) turn_vector (&(v).x, &(v).y, f)
+
+/* Turns a TEXT or ATTRIB by frame f, in its OCS: its insertion point, its
+   alignment point when it has one, and its rotation, which the encoder of
+   an r2004 drawing stores only when dataflags says so. */
+#define TURN_TEXT(_obj, f)                                                    \
+  do                                                                          \
+    {                                                                         \
+      TURN_2D ((_obj)->ins_pt, f);                                            \
+      if (!((_obj)->dataflags & 0x02))                                        \
+        TURN_2D ((_obj)->alignment_pt, f);                                    \
+      (_obj)->rotation = normal_angle ((_obj)->rotation + (f)->angle);        \
+      if ((_obj)->rotation != 0.0)                                            \
+        (_obj)->dataflags &= ~0x08;                                           \
+      else                                                                    \
+        (_obj)->dataflags |= 0x08;                                            \
+    }                                                                         \
+  while (0)
+
+/* Turns HATCH _obj by frame f, in its OCS: its boundary, of polylines and
+   lines as check_turn_hatch () checks, and its seed points. A solid fill
+   has no pattern to turn. */
+static void
+turn_hatch (Dwg_Entity_HATCH *_obj, const Dynblock_Frame *f)
+{
+  for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+    {
+      Dwg_HATCH_Path *path = &_obj->paths[i];
+      if (path->flag & 2)
+        {
+          for (BITCODE_BL j = 0;
+               path->polyline_paths && j < path->num_segs_or_paths; j++)
+            TURN_2D (path->polyline_paths[j].point, f);
+          continue;
+        }
+      for (BITCODE_BL j = 0; path->segs && j < path->num_segs_or_paths; j++)
+        {
+          TURN_2D (path->segs[j].first_endpoint, f);
+          TURN_2D (path->segs[j].second_endpoint, f);
+        }
+    }
+  for (BITCODE_BL i = 0; _obj->seeds && i < _obj->num_seeds; i++)
+    TURN_2D (_obj->seeds[i], f);
+}
+
+/* Turns copy obj whole about the block's point center, counter-clockwise
+   by angle, and the ATTRIBs an INSERT owns. An entity with OCS points
+   whose extrusion is -Z turns the other way in its OCS, whose X axis is
+   the block's -X. */
+static void
+turn_whole (Dwg_Data *dwg, Dwg_Object *obj, const BITCODE_2RD *center,
+            const double angle)
+{
+  int planar;
+  const BITCODE_BE *ocs = entity_ocs (obj, &planar);
+  const BITCODE_BE *normal = entity_normal (obj);
+  const double sign = ocs && ocs->z < 0.0 ? -1.0 : 1.0;
+  Dynblock_Frame f;
+  f.cx = sign * center->x;
+  f.cy = center->y;
+  f.angle = sign * angle;
+  f.c = cos (f.angle);
+  f.s = sin (f.angle);
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      TURN_2D (obj->tio.entity->tio.LINE->start, &f);
+      TURN_2D (obj->tio.entity->tio.LINE->end, &f);
+      break;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        for (BITCODE_BL i = 0; _obj->points && i < _obj->num_points; i++)
+          TURN_2D (_obj->points[i], &f);
+      }
+      break;
+    case DWG_TYPE_ARC:
+      {
+        Dwg_Entity_ARC *_obj = obj->tio.entity->tio.ARC;
+        TURN_2D (_obj->center, &f);
+        _obj->start_angle = normal_angle (_obj->start_angle + f.angle);
+        _obj->end_angle = normal_angle (_obj->end_angle + f.angle);
+      }
+      break;
+    case DWG_TYPE_CIRCLE:
+      TURN_2D (obj->tio.entity->tio.CIRCLE->center, &f);
+      break;
+    case DWG_TYPE_ELLIPSE:
+      TURN_2D (obj->tio.entity->tio.ELLIPSE->center, &f);
+      TURN_VECTOR (obj->tio.entity->tio.ELLIPSE->sm_axis, &f);
+      break;
+    case DWG_TYPE_SPLINE:
+      {
+        Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        for (BITCODE_BL i = 0; _obj->ctrl_pts && i < _obj->num_ctrl_pts; i++)
+          turn_xy (&_obj->ctrl_pts[i].x, &_obj->ctrl_pts[i].y, &f);
+        for (BITCODE_BS i = 0; _obj->fit_pts && i < _obj->num_fit_pts; i++)
+          TURN_2D (_obj->fit_pts[i], &f);
+        TURN_VECTOR (_obj->beg_tan_vec, &f);
+        TURN_VECTOR (_obj->end_tan_vec, &f);
+      }
+      break;
+    case DWG_TYPE_TEXT:
+      TURN_TEXT (obj->tio.entity->tio.TEXT, &f);
+      break;
+    case DWG_TYPE_ATTRIB:
+      TURN_TEXT (obj->tio.entity->tio.ATTRIB, &f);
+      break;
+    case DWG_TYPE_MTEXT:
+      TURN_2D (obj->tio.entity->tio.MTEXT->ins_pt, &f);
+      TURN_VECTOR (obj->tio.entity->tio.MTEXT->x_axis_dir, &f);
+      break;
+    case DWG_TYPE_INSERT:
+      {
+        Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+        TURN_2D (_obj->ins_pt, &f);
+        _obj->rotation = normal_angle (_obj->rotation + f.angle);
+        for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+          {
+            Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+            if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+              turn_whole (dwg, attrib, center, angle);
+          }
+      }
+      break;
+    case DWG_TYPE_HATCH:
+      turn_hatch (obj->tio.entity->tio.HATCH, &f);
+      break;
+    case DWG_TYPE_POINT:
+      {
+        // its position is in the WCS, its X axis angle in its own plane
+        Dwg_Entity_POINT *_obj = obj->tio.entity->tio.POINT;
+        turn_xy (&_obj->x, &_obj->y, &f);
+        _obj->x_ang = normal_angle (
+            _obj->x_ang + (normal && normal->z < 0.0 ? -angle : angle));
+      }
+      break;
+    default:
+      break;
+    }
+}
+
+/* Applies the planned turns to the copies of the definition's entities. */
+static void
+apply_turns (Dwg_Data *dwg, const Dynblock_Plan *plan, const Dwg_Copy_Map *map)
+{
+  for (BITCODE_BL i = 0; i < plan->num_turns; i++)
+    {
+      const Dynblock_Turn *t = &plan->turns[i];
+      Dwg_Object *copy
+          = handle_object (dwg, dwg_copy_map_get (map, t->entity));
+      if (copy)
+        turn_whole (dwg, copy, &t->center, t->angle);
+    }
+}
+
 /* The evaluation itself, as dwg_dynblock_evaluate (), into *rep_handlep. */
 static int
 evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
@@ -2691,7 +3504,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
 {
   Param_List list;
   BITCODE_BL *state = NULL;
-  double *linear = NULL;
+  double *number = NULL;
   BITCODE_RLL *handles = NULL;
   BITCODE_BL num_handles = 0;
   Dwg_Object_BLOCK_HEADER *_def, *_rep;
@@ -2725,16 +3538,16 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       goto done;
     }
   // the visibility state chosen for each property, + 1, or 0; and the
-  // LINEAR value, or a NaN
+  // LINEAR or ROTATION value, or a NaN
   state = (BITCODE_BL *)calloc (list.count + 1, sizeof (BITCODE_BL));
-  linear = (double *)malloc ((list.count + 1) * sizeof (double));
-  if (!state || !linear)
+  number = (double *)malloc ((list.count + 1) * sizeof (double));
+  if (!state || !number)
     {
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
   for (BITCODE_BL j = 0; j < list.count; j++)
-    linear[j] = nan ("");
+    number[j] = nan ("");
   for (BITCODE_BL i = 0; i < num_values; i++)
     {
       const Dwg_DynValue *v = &values[i];
@@ -2814,19 +3627,10 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
               error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
               goto done;
             }
-          linear[j] = v->value;
+          number[j] = v->value;
           break;
         case DWG_DYNPARAM_ROTATION:
-          if (angle_difference (v->value, p->default_value)
-              > DYNBLOCK_VALUE_EPSILON)
-            {
-              set_reason (reason, reason_size,
-                          "rotation property '%s': changing it from %g to "
-                          "%g is not supported",
-                          p->name, p->default_value, v->value);
-              error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-              goto done;
-            }
+          number[j] = v->value;
           break;
         default:
           set_reason (reason, reason_size,
@@ -2845,9 +3649,9 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   plan.dwg = dwg;
   plan.reason = reason;
   plan.reason_size = reason_size;
-  error = plan_linear (&plan, _def,
+  error = plan_values (&plan, _def,
                        definition_graph (dwg, handle_object (dwg, def_handle)),
-                       &list, linear);
+                       &list, number);
   if (error)
     goto done;
   map = dwg_copy_map_new ();
@@ -2916,6 +3720,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     }
 
   apply_moves (dwg, &plan, map);
+  apply_turns (dwg, &plan, map);
   for (BITCODE_BL j = 0; j < list.count; j++)
     if (state[j])
       {
@@ -2941,7 +3746,7 @@ done:
   free_plan (&plan);
   free (handles);
   free (state);
-  free (linear);
+  free (number);
   dwg_dynblock_free_params (list.params, list.count);
   return error;
 }
@@ -3382,6 +4187,24 @@ compare_mleader_content (Dynblock_Compare *c, const char *name,
     differ (c, "%s [%s] has no fields to compare", sub, structname);
 }
 
+/* Whether field of struct structname is an angle that a turn changes, of
+   which 0 and 2 pi, or any two a whole turn apart, give the same
+   geometry: AutoCAD's evaluation can put one just below 2 pi where the
+   evaluator's is just above 0. */
+static int
+is_turned_angle (const char *structname, const char *field)
+{
+  static const char *const rules[][2]
+      = { { "ARC", "start_angle" },   { "ARC", "end_angle" },
+          { "INSERT", "rotation" },   { "TEXT", "rotation" },
+          { "ATTRIB", "rotation" },   { "POINT", "x_ang" },
+          { NULL, NULL } };
+  for (int i = 0; rules[i][0]; i++)
+    if (strEQ (structname, rules[i][0]) && strEQ (field, rules[i][1]))
+      return 1;
+  return 0;
+}
+
 static void
 compare_fields (Dynblock_Compare *c, const char *prefix,
                 const char *structname, const Dwg_DYNAPI_field *fields,
@@ -3411,6 +4234,28 @@ compare_fields (Dynblock_Compare *c, const char *prefix,
           || (len && type[len - 1] == '*' && !is_string_type (type)))
         {
           compare_array (c, name, structname, fields, f, a, b);
+          continue;
+        }
+      if ((strEQc (type, "BD") || strEQc (type, "RD"))
+          && is_turned_angle (structname, f->name))
+        {
+          const double da = *(const double *)pa, db = *(const double *)pb;
+          if (!(angle_difference (da, db) <= c->tolerance))
+            differ (c, "%s is %.17g, AutoCAD's %.17g", name, db, da);
+          // Angles that each match around the circle can still give arcs
+          // a whole turn apart in sweep: a hair short of a full circle and
+          // a hair long of none.
+          else if (strEQc (structname, "ARC") && strEQc (f->name, "end_angle"))
+            {
+              const Dwg_Entity_ARC *arc_a = (const Dwg_Entity_ARC *)a;
+              const Dwg_Entity_ARC *arc_b = (const Dwg_Entity_ARC *)b;
+              const double sa
+                  = normal_angle (arc_a->end_angle - arc_a->start_angle);
+              const double sb
+                  = normal_angle (arc_b->end_angle - arc_b->start_angle);
+              if (!(fabs (sa - sb) <= c->tolerance))
+                differ (c, "sweep is %.17g, AutoCAD's %.17g", sb, sa);
+            }
           continue;
         }
       // an array held in the struct: dynapi gives the size of all of it
