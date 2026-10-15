@@ -16,7 +16,8 @@
  * definition's properties, read a placement's values, and evaluate a
  * definition at chosen values into the geometry of a representation
  * block, with a check of that evaluation against the representation
- * blocks AutoCAD stored in a drawing.
+ * blocks AutoCAD stored in a drawing; and place a definition at chosen
+ * values, as AutoCAD stores a placement.
  *
  * A dynamic block definition is a block whose extension dictionary holds
  * an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK. Its parameters are the
@@ -318,8 +319,9 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    - DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given
      twice, a value that isn't finite, a LINEAR value below 0, for a
      parameter longer than a double holds, or that would move a point
-     beyond what a double holds, a state the parameter doesn't have, or a
-     flip value other than 0 or 1;
+     beyond what a double holds, a state the parameter doesn't have, a flip
+     value other than 0 or 1, or a document whose block table is full (65535
+     blocks);
    - DWG_ERR_INVALIDTYPE when def is not a dynamic block definition;
    - no further bit for an action or parameter whose data isn't what
      AutoCAD writes, such as a stretch point an entity doesn't have.
@@ -331,6 +333,92 @@ EXPORT Dwg_Object_BLOCK_HEADER *
 dwg_dynblock_evaluate (Dwg_Object_BLOCK_HEADER *def,
                        const Dwg_DynValue *values, const BITCODE_BL num_values,
                        int *errorp);
+
+/* The value of an attribute, for dwg_dynblock_insert (). UTF-8. */
+typedef struct _dwg_attvalue
+{
+  char *tag; /* the attribute definition's tag, as it has it */
+  char *value;
+} Dwg_AttValue;
+
+/* Places dynamic block definition def in block owner, such as model space,
+   at the given values, as AutoCAD stores a placement, and returns the new
+   INSERT. It is at ins_pt, with a uniform scale and a rotation about Z in
+   radians.
+
+   values are as dwg_dynblock_evaluate () takes them, in the definition's
+   units: for a scaled placement, AutoCAD's Properties palette shows a
+   LINEAR value multiplied by the scale. Properties left out keep the
+   definition's values.
+
+   At the definition's values (the first visibility state, and every other
+   value the definition's), the INSERT draws def itself. Otherwise it draws
+   a new representation block, which dwg_dynblock_evaluate () makes, and
+   which gets what AutoCAD's have: AcDbBlockRepBTag EED naming def, def's
+   hasattrs flag, an ACAD_SORTENTS table of its own when def has one,
+   which draws the block's entities in the order def draws its own (the
+   entities' handles are handed out as sort keys in that order), its
+   nested INSERTs and MINSERTs listed by the blocks they draw, and for each
+   IMAGE or WIPEOUT that has an image definition reactor, a reactor of its
+   own. The INSERT then gets the extension dictionary AutoCAD stores the
+   values in: AcDbBlockRepresentation, holding AcDbRepData (a
+   BLOCKREPRESENTATION that names def) and AppDataCache, holding
+   ACAD_ENHANCEDBLOCKDATA with an XRECORD named by the node id for each
+   graph node that AutoCAD keeps a record of. Each placement at other
+   values gets a representation block of its own.
+
+   Attributes: the INSERT gets an ATTRIB for each attribute definition of
+   the block it draws that isn't constant, in the block's order, with the
+   definition's tag, flags, text style, height, width factor, oblique
+   angle, alignment, layer, colour, linetype, lineweight and plot style;
+   its position, alignment point, height, thickness and rotation placed by
+   the INSERT (text left-aligned on the baseline has no alignment point,
+   and the ATTRIB stores none, as AutoCAD's don't); and its value from
+   atts, by tag, or else the definition's
+   default value. A preset attribute takes its value from atts too: preset
+   only means AutoCAD doesn't prompt for it. At the definition's values
+   each ATTRIB gets the AcDbBlockRepETag index of its definition, as
+   AutoCAD's do. They are added with dwg_add_ATTRIB (), which links them to
+   the INSERT as AutoCAD does.
+
+   Refused, with nothing added: owner or def not a BLOCK_HEADER of their
+   document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
+   other than r2004 (DWG_ERR_NOTYETSUPPORTED); def not a dynamic block
+   definition (DWG_ERR_INVALIDTYPE); owner def, or a block def inserts at
+   any depth, an insertion point, scale or rotation that isn't finite, or a
+   scale that isn't positive (DWG_ERR_VALUEOUTOFBOUNDS); values that
+   dwg_dynblock_evaluate () refuses, with its reasons; a LINEAR, ROTATION or
+   FLIP value other than the definition's (DWG_ERR_NOTYETSUPPORTED), as the
+   stored values of such a placement are not written yet; for a
+   representation block, a graph node of a class whose stored value is not
+   known, a rotate or scale action whose base point isn't (0, 0, 0), or an
+   entity that draws a block of its own, as a DIMENSION does
+   (DWG_ERR_NOTYETSUPPORTED); an attribute definition whose extrusion
+   isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()
+   refuses, such as one with a period (DWG_ERR_NOTYETSUPPORTED); an
+   attribute definition whose placed position, alignment point, height or
+   thickness is beyond what a double holds, at a huge scale, or an
+   attribute tag that names no attribute definition that isn't constant,
+   is given twice, or has no value (DWG_ERR_VALUEOUTOFBOUNDS). In a
+   LibreDWG built without write support, a placement at other values than
+   the definition's is refused (DWG_ERR_NOTYETSUPPORTED).
+
+   @param errorp If not NULL, receives 0 or DWG_ERR_* bits. From
+                 DWG_ERR_CRITICAL up no INSERT is returned: a refusal is
+                 DWG_ERR_INVALIDDWG with a bit for the reason, logged at
+                 LOG_ERROR; DWG_ERR_INTERNALERROR for NULL arguments; any
+                 other failure, such as DWG_ERR_OUTOFMEM, may leave what was
+                 made in the document. Below it, the representation block
+                 was made with data left out, as dwg_dynblock_evaluate ()
+                 returns.
+   @return the INSERT, or NULL. */
+EXPORT Dwg_Entity_INSERT *
+dwg_dynblock_insert (Dwg_Object_BLOCK_HEADER *owner,
+                     Dwg_Object_BLOCK_HEADER *def, const BITCODE_3BD *ins_pt,
+                     const double scale, const double rotation,
+                     const Dwg_DynValue *values, const BITCODE_BL num_values,
+                     const Dwg_AttValue *atts, const BITCODE_BL num_atts,
+                     int *errorp);
 
 /* The outcome of checking one placement's representation block. */
 typedef enum DWG_DYNBLOCK_CHECK_STATUS

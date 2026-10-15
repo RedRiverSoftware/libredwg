@@ -63,11 +63,17 @@
 
 %include "dwg_api.h"
 %include "dwg_svg_api.h"
+// The error argument of dwg_dynblock_api.h's functions is an out
+// parameter: an out int in C#.
+%include "typemaps.i"
+%apply int *OUTPUT { int *errorp };
 %include "dwg_dynblock_api.h"
+%clear int *errorp;
 
 // The arrays and out parameters of dwg_dynblock_api.h
 %array_functions(Dwg_DynParam, Dwg_DynParam_Array);
 %array_functions(Dwg_DynValue, Dwg_DynValue_Array);
+%array_functions(Dwg_AttValue, Dwg_AttValue_Array);
 %array_functions(Dwg_DynBlock_Check, Dwg_DynBlock_Check_Array);
 %array_functions(double, Double_Array);
 %array_functions(char *, String_Array);
