@@ -408,12 +408,14 @@ typedef struct _dwg_dynblock_check_report
    they point at, paired by index within the blocks, so the same handle
    matches, whether or not it resolves. The angles a turn changes, an
    ARC's, the rotation of an INSERT, TEXT or ATTRIB and a POINT's X axis
-   angle, compare around the circle, so that 0 matches 2 pi. An entry of
+   angle, compare around the circle, so that 0 matches 2 pi, and an ARC's
+   sweep from its start to its end angle must match too. An entry of
    either block's entity list that doesn't resolve is a difference. An
    array the comparison has no length for, unless empty in both, counts as
    a difference. An ELLIPSE also matches the same curve with its major
-   axis reversed, and is counted in num_equivalent. The blocks' base points compare too: a difference there
-   is a mismatch, though not of an entity. EED is not compared.
+   axis reversed, and is counted in num_equivalent. The blocks' base
+   points compare too: a difference there is a mismatch, though not of an
+   entity. EED is not compared.
 
    An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
    copy left out (such as an array, 3DSOLID ACIS data or an EED group it

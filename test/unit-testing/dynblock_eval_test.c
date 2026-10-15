@@ -2585,7 +2585,9 @@ test_selected_deps (Dwg_Data *dwg)
 
   v.name = (char *)"Wall Thickness";
   v.value = 6.0;
-  if (add_move_entity (dwg, move, h_hinge))
+  // found again, as the evaluations added objects
+  hinge = dwg_resolve_handle (dwg, h_hinge);
+  if (hinge && add_move_entity (dwg, move, h_hinge))
     {
       Dwg_Object_BLOCKFLIPPARAMETER *_hinge
           = hinge->tio.object->tio.BLOCKFLIPPARAMETER;
@@ -2872,7 +2874,8 @@ check_toilet (Dwg_Data *dwg, const Dwg_Object_BLOCK_HEADER *rep,
    and LWPOLYLINEs, about the origin by 1.2, and leaves the rest. A value
    a whole turn away gives the same block, as AutoCAD keeps the angles a
    turn changes in [0, 2 pi); one at the definition's value, 0 or 2 pi,
-   turns nothing. */
+   turns nothing; a huge one, 1e20, turns by its remainder, the points and
+   the angles alike. */
 static int
 test_rotation (Dwg_Data *dwg)
 {
@@ -2893,6 +2896,11 @@ test_rotation (Dwg_Data *dwg)
   failures += check_toilet (
       dwg, evaluate (dwg, TOILET, &v, 1, "rotation Angle 2 pi"), 0.0,
       "rotation Angle 2 pi, the definition's");
+  // a huge value turns points and angles alike, by its remainder
+  v.value = 1e20;
+  failures += check_toilet (
+      dwg, evaluate (dwg, TOILET, &v, 1, "rotation Angle 1e20"),
+      fmod (1e20, 2.0 * M_PI), "rotation Angle 1e20");
   return failures;
 }
 
@@ -3203,7 +3211,8 @@ test_turn_whole (Dwg_Data *dwg)
    actions run in an order AutoCAD's evaluation doesn't fix unless they
    are independent, so the evaluator refuses them when they share an
    entity, when an action that runs moves the rotation parameter, or when
-   the rotate action that runs turns a linear parameter that runs. */
+   the rotate action that runs turns a linear parameter that runs, listed
+   or only selected. */
 typedef struct
 {
   Dwg_Object_BLOCKROTATIONPARAMETER *param;
@@ -3382,6 +3391,23 @@ test_rotation_graft (Dwg_Data *dwg)
     failures++;
   v[1].value = 24.0;
   g.action->num_actions = 0;
+  // and selecting Window Width's parameter without listing it
+  g.line[1] = dwg_add_handleref (
+      dwg, 4, dwg->object[width->parent->objid].handle.value, NULL);
+  g.action->num_deps = 2;
+  failures += test_refusal (dwg, WINDOW, v, 2,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a rotate action selecting, not listing, a linear "
+                            "parameter whose value changes");
+  v[1].value = 36.0;
+  if (evaluate (dwg, WINDOW, v, 2, "rotation graft, Width selected"))
+    OK ("rotation graft: a rotate action may select a linear parameter that "
+        "doesn't run");
+  else
+    failures++;
+  v[1].value = 24.0;
+  g.action->num_deps = 1;
+  g.line[1] = g.line[0];
   // connections, base point and offset the evaluator doesn't support
   {
     BITCODE_T name = g.action->conn_pts[2].name;
@@ -3748,7 +3774,9 @@ test_check_finds (Dwg_Data *dwg)
    of AutoCAD's block of T4 (C8DD), at Angle 225 degrees, still matches
    with its start angle a whole turn on, as AutoCAD can keep an angle just
    below 2 pi where the evaluator has it just above 0; a quarter turn on,
-   it differs. */
+   it differs. And an ARC's sweep must match: with the definition's ARC a
+   hair short of a full circle and AutoCAD's a hair long of none, each
+   angle matches around the circle, but the arcs differ. */
 static int
 test_check_turned_angles (Dwg_Data *dwg)
 {
@@ -3777,6 +3805,13 @@ test_check_turned_angles (Dwg_Data *dwg)
       failures++;
     }
   dwg_dynblock_free_check_report (report);
+  // found again, as the check added objects
+  arc = first_of_type (dwg, 0xCE04, DWG_TYPE_ARC);
+  if (!arc)
+    {
+      fail ("check turned angles: AutoCAD's ARC not found again");
+      return failures + 1;
+    }
   arc->tio.entity->tio.ARC->start_angle = start + M_PI / 2.0;
   report = dwg_dynblock_check (dwg, TOLERANCE);
   loglevel = test_loglevel;
@@ -3787,6 +3822,38 @@ test_check_turned_angles (Dwg_Data *dwg)
   else
     {
       fail ("check turned angles: a quarter turn on: status %d, %s",
+            c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  {
+    BITCODE_RL idx = 0;
+    BITCODE_RLL self = 0;
+    Dwg_Object *src;
+    arc = first_of_type (dwg, 0xCE04, DWG_TYPE_ARC);
+    src = arc && etag (dwg, arc, &idx, &self) ? rep_entity (dwg, TOILET, idx)
+                                              : NULL;
+    if (!src || src->fixedtype != DWG_TYPE_ARC
+        || src->tio.entity->tio.ARC->start_angle < 1e-9)
+      {
+        fail ("check turned angles: the definition's ARC not found");
+        return failures + 1;
+      }
+    arc->tio.entity->tio.ARC->start_angle = start;
+    arc->tio.entity->tio.ARC->end_angle = start + 1e-10;
+    src->tio.entity->tio.ARC->end_angle
+        = src->tio.entity->tio.ARC->start_angle - 1e-10;
+  }
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  c = report ? find_check (report, 0xC8DD, 0xCE04) : NULL;
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 1
+      && c->reason && strstr (c->reason, "sweep"))
+    OK ("check turned angles: arcs a whole turn apart in sweep differ: %s",
+        c->reason);
+  else
+    {
+      fail ("check turned angles: sweeps a whole turn apart: status %d, %s",
             c ? (int)c->status : -1, c && c->reason ? c->reason : "");
       failures++;
     }

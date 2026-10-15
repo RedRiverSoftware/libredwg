@@ -1516,6 +1516,21 @@ check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
   return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
 }
 
+/* Refuses rotate action a turning linear parameter k when it runs: its
+   stretch and move actions would then run along a turned direction. */
+static int
+check_turned_linear (Dynblock_Plan *plan, const Dynblock_Action *a,
+                     const int k)
+{
+  if (k < 0 || !plan->linear[k].running)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "rotate action '%s' turns linear property '%s', whose value "
+              "changes; that is not supported",
+              a->name, plan->linear[k].name);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
 /* Whether action a lists the parameter with node id nodeid among those
    whose points it moves: a stretch action in codes, a move or rotate
    action by its node id. */
@@ -1548,17 +1563,25 @@ lists_node (const Dwg_Object *a, const BITCODE_BL nodeid)
    checked with them, and the action's own parameter is the one its value
    changes. Another parameter would move with the selection, and how
    AutoCAD stores one that does is not known: refuses one that chains its
-   actions, which AutoCAD would then run, or a rotation parameter given a
-   value. Grips are left alone. */
+   actions, which AutoCAD would then run, a rotation parameter given a
+   value, or a linear parameter that runs, which a rotate action would
+   turn, as check_turned_linear () says. Grips are left alone. */
 static int
 check_selected_dep (Dynblock_Plan *plan, const Dynblock_Action *a,
                     const Dwg_Object *obj)
 {
   const BITCODE_BL nodeid = node_id (obj);
   const int r = find_rotation (plan, nodeid);
+  int error;
   if (!is_parameter (obj) || nodeid == action_parameter (a)
       || lists_node (a->obj, nodeid))
     return 0;
+  if (a->obj->fixedtype == DWG_TYPE_BLOCKROTATEACTION)
+    {
+      error = check_turned_linear (plan, a, find_linear (plan, nodeid));
+      if (error)
+        return error;
+    }
   if (r >= 0 && plan->rotations[r].given)
     {
       set_reason (plan->reason, plan->reason_size,
@@ -2519,8 +2542,8 @@ plan_turn (Dynblock_Plan *plan, const Dynblock_Action *a,
 }
 
 /* Plans rotate action a turning the entities it selects about center by
-   angle. The parameters it turns are checked: a linear one that runs
-   would stretch along a turned direction, which is not supported. */
+   angle. The parameters it turns are checked, as check_turned_linear ()
+   and check_selected_node () say. */
 static int
 plan_rotate (Dynblock_Plan *plan, const Dynblock_Action *a,
              const BITCODE_2RD *center, const double angle)
@@ -2548,19 +2571,12 @@ plan_rotate (Dynblock_Plan *plan, const Dynblock_Action *a,
   for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
     {
       const BITCODE_BL nodeid = _a->actions[i];
-      const int k = find_linear (plan, nodeid);
       // its own parameter's end point turns with the value
       if (nodeid == own)
         continue;
-      if (k >= 0 && plan->linear[k].running)
-        {
-          set_reason (plan->reason, plan->reason_size,
-                      "rotate action '%s' turns linear property '%s', whose "
-                      "value changes; that is not supported",
-                      a->name, plan->linear[k].name);
-          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-        }
-      error = check_selected_node (plan, a, nodeid);
+      error = check_turned_linear (plan, a, find_linear (plan, nodeid));
+      if (!error)
+        error = check_selected_node (plan, a, nodeid);
     }
   return error;
 }
@@ -3095,7 +3111,9 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   // No action that ran moved a rotation parameter given a value, so each
-  // turns from the definition's angle.
+  // turns from the definition's angle. The value is reduced to [0, 2 pi)
+  // first, so that a huge one turns the points and the angles alike, and
+  // the angles keep their sweeps.
   for (BITCODE_BL i = 0; !error && i < plan->num_rotations; i++)
     {
       const Dynblock_Rotation *r = &plan->rotations[i];
@@ -3104,7 +3122,7 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       if (r->running)
         error = plan_rotation_actions (
             plan, r,
-            r->value
+            normal_angle (r->value)
                 - rotation_angle (&_r->def_basept, &_r->def_endpt,
                                   &_r->def_base_angle_pt));
     }
@@ -4177,8 +4195,7 @@ compare_mleader_content (Dynblock_Compare *c, const char *name,
 /* Whether field of struct structname is an angle that a turn changes, of
    which 0 and 2 pi, or any two a whole turn apart, give the same
    geometry: AutoCAD's evaluation can put one just below 2 pi where the
-   evaluator's is just above 0. An ARC's sweep is the same either way, as
-   it is never a whole turn. */
+   evaluator's is just above 0. */
 static int
 is_turned_angle (const char *structname, const char *field)
 {
@@ -4230,6 +4247,20 @@ compare_fields (Dynblock_Compare *c, const char *prefix,
           const double da = *(const double *)pa, db = *(const double *)pb;
           if (!(angle_difference (da, db) <= c->tolerance))
             differ (c, "%s is %.17g, AutoCAD's %.17g", name, db, da);
+          // Angles that each match around the circle can still give arcs
+          // a whole turn apart in sweep: a hair short of a full circle and
+          // a hair long of none.
+          else if (strEQc (structname, "ARC") && strEQc (f->name, "end_angle"))
+            {
+              const Dwg_Entity_ARC *arc_a = (const Dwg_Entity_ARC *)a;
+              const Dwg_Entity_ARC *arc_b = (const Dwg_Entity_ARC *)b;
+              const double sa
+                  = normal_angle (arc_a->end_angle - arc_a->start_angle);
+              const double sb
+                  = normal_angle (arc_b->end_angle - arc_b->start_angle);
+              if (!(fabs (sa - sb) <= c->tolerance))
+                differ (c, "sweep is %.17g, AutoCAD's %.17g", sb, sa);
+            }
           continue;
         }
       // an array held in the struct: dynapi gives the size of all of it
