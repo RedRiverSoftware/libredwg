@@ -12,8 +12,8 @@
 /*****************************************************************************/
 
 /* DXF import: fields the importer sets where the free spec did not look for
-   them, and what it keeps of a TABLESTYLE's cell styles. Under
-   LeakSanitizer, make check also finds what it would leak. */
+   them, an r2000 LIGHT's colour, and what it keeps of a TABLESTYLE's cell
+   styles. Under LeakSanitizer, make check also finds what it would leak. */
 
 #define INDXF_TEST_C
 #include <stdio.h>
@@ -158,6 +158,54 @@ test_mtext_46 (void)
     unlink (file);
 }
 
+/* An r2000 LIGHT gives its colour as a second 90 group, after the
+   class_version (as example_2000.dxf does). Read as the class_version, it
+   was out of bounds, and dwg_free stopped before the name. */
+static void
+test_light_r2000_color (void)
+{
+  static const char dxf[]
+      = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n"
+        "  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n"
+        "  9\n$HANDSEED\n  5\nFFFF\n  0\nENDSEC\n"
+        "  0\nSECTION\n  2\nENTITIES\n"
+        "  0\nLIGHT\n  5\n20\n100\nAcDbEntity\n  8\n0\n100\nAcDbLight\n"
+        " 90\n        1\n  1\nSpotlight1\n 70\n     3\n290\n     1\n"
+        " 90\n-1023410171\n291\n     0\n 40\n5.4\n"
+        " 10\n0.0\n 20\n0.0\n 30\n0.0\n 11\n1.0\n 21\n0.0\n 31\n0.0\n"
+        "  0\nENDSEC\n  0\nEOF\n";
+  const char *file = "indxf_test_light.dxf";
+  Dwg_Data dwg;
+  Dwg_Object *obj;
+  Dwg_Entity_LIGHT *light;
+  if (import_dxf (file, dxf, &dwg) >= DWG_ERR_CRITICAL)
+    {
+      dwg_free (&dwg);
+      return;
+    }
+  obj = first_object (&dwg, DWG_TYPE_LIGHT);
+  light = obj ? obj->tio.entity->tio.LIGHT : NULL;
+  if (!light)
+    fail ("r2000 LIGHT: not imported");
+  else if (light->class_version != 1)
+    fail ("r2000 LIGHT.class_version %u, expected 1",
+          (unsigned)light->class_version);
+  else if (light->light_color.rgb != 0xc3000005
+           || light->light_color.method != 0xc3)
+    fail ("r2000 LIGHT.light_color.rgb 0x%08x, method 0x%x, expected "
+          "0xc3000005, 0xc3",
+          (unsigned)light->light_color.rgb,
+          (unsigned)light->light_color.method);
+  else if (!light->name || strcmp (light->name, "Spotlight1"))
+    fail ("r2000 LIGHT.name %s, expected Spotlight1",
+          light->name ? light->name : "(null)");
+  else
+    ok ("r2000 LIGHT: class_version 1, light_color 0xc3000005");
+  dwg_free (&dwg);
+  if (!numfailed ())
+    unlink (file);
+}
+
 /* LibreDWG writes an r2010+ TABLESTYLE as the table's cell style, then its
    override. The importer reads them back into sty and ovr. */
 static void
@@ -261,6 +309,7 @@ main (void)
 #ifndef DISABLE_DXF
   test_r12_block_xref_pname ();
   test_mtext_46 ();
+  test_light_r2000_color ();
   test_tablestyle_cellstyles ();
 #else
   return 77;

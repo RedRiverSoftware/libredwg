@@ -10073,6 +10073,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
   BITCODE_BL i = i_p ? *i_p : 0;
   int cur_cell = -1;
   int num_tablestyle_formats = 0;
+  int light_class_version_read = 0;
   size_t written = 0;
   BITCODE_RL curr_inserts = 0;
   BITCODE_RS flag = 0;
@@ -11617,6 +11618,31 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
               o->has_leader = pair->value.i ? 1 : 0;
               LOG_TRACE ("ARC_DIMENSION.has_leader = %d [B 71]\n",
                          o->has_leader);
+              goto next_pair;
+            }
+          // Up to r2002 a LIGHT's colour is a second 90 after its
+          // class_version (dwg2.spec), which the generic loop would read as
+          // the class_version again. The free walk then stops at the
+          // class_version out of bounds and leaks the name.
+          else if (pair->code == 90 && obj->fixedtype == DWG_TYPE_LIGHT
+                   && strEQc (subclass, "AcDbLight"))
+            {
+              Dwg_Entity_LIGHT *o = obj->tio.entity->tio.LIGHT;
+              if (!light_class_version_read)
+                {
+                  o->class_version = pair->value.u;
+                  light_class_version_read = 1;
+                  LOG_TRACE ("LIGHT.class_version = %u [BL 90]\n",
+                             o->class_version);
+                }
+              else
+                {
+                  // as the generic loop reads a CMC from 90-99
+                  o->light_color.rgb = pair->value.u;
+                  o->light_color.method = pair->value.u >> 0x18;
+                  LOG_TRACE ("LIGHT.light_color.rgb = %08X [CMC 90]\n",
+                             o->light_color.rgb);
+                }
               goto next_pair;
             }
           else if (pair->code == 91
