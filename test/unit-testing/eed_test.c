@@ -456,9 +456,10 @@ cleanup:
   return numfailed ();
 }
 
-/* An item with a code the decoder doesn't know: the rest of its group is
-   left to the group's raw bytes, which a rewrite writes back. The next
-   group and the LINE's data after the EED are read as before. */
+/* An item with a code the decoder doesn't know: DWG_ERR_INVALIDEED, the
+   item before it read, and the rest of its group left to the group's raw
+   bytes, which a rewrite writes back. The next group, and the LINE's own
+   data and layer after the EED, are read in full. */
 static int
 test_failed_item (const Dwg_Version_Type version)
 {

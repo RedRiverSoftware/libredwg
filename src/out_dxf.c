@@ -2177,8 +2177,10 @@ free_sat_blocks (const BITCODE_BL num_blocks, BITCODE_BL *block_size,
    the ACIS version of its document's DWG version, in blocks of at most 4096
    bytes: *num_blocksp blocks in *blocksp and their sizes in *block_sizep,
    each array with an empty entry after them. The text is not encrypted.
-   _obj is left as it is. Returns 0, or 1 when acis_data is not SAB that can
-   be converted, with no blocks. */
+   _obj is left as it is. Returns 0. With no blocks (*num_blocksp 0,
+   *block_sizep and *blocksp NULL), it returns 1 when acis_data is not SAB
+   that can be converted, and 0 when an ident, string or subident in the SAB
+   records is empty. */
 static int
 convert_SAB_to_SAT1 (const Dwg_Entity_3DSOLID *restrict _obj,
                      BITCODE_BL *restrict num_blocksp,
@@ -2716,11 +2718,14 @@ convert_SAB_to_SAT1 (const Dwg_Entity_3DSOLID *restrict _obj,
   return 0;
 }
 
-/* Converts v2 SAB acis_data in-place to SAT v1 encr_sat_data[].
-   Sets dxf_sab_converted to 1, denoting that encr_sat_data is NOT the
-   encrypted acis_data anymore, rather the converted from SAB for DXF.
-   acis_data stays as it was. The DXF writer converts into blocks of its
-   own, and leaves the entity as it is.
+/* Converts the version 2 (SAB) acis_data of _obj to SAT version 1, and
+   returns 0. It replaces encr_sat_data, block_size and num_blocks with the
+   unencrypted SAT version 1 blocks, freeing the old arrays, and sets version
+   to 1, _dxf_sab_converted to 1 (encr_sat_data is not encrypted) and
+   acis_empty to 0. acis_data is not changed.
+   It changes nothing when acis_data is not SAB that can be converted
+   (returns 1), or when the conversion gives no SAT (returns 0, and version
+   is not set to 1).
 */
 EXPORT int
 dwg_convert_SAB_to_SAT1 (Dwg_Entity_3DSOLID *restrict _obj)

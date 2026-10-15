@@ -4043,9 +4043,11 @@ eed_past_end (const Bit_Chain *restrict dat, const size_t end,
    Returns DWG_ERR_INVALIDEED for an item or group that could not be decoded.
    Such an item has no data, and the rest of its group is skipped: the
    group's raw bytes still hold it, and the next group is read from the
-   group's end. DWG_ERR_VALUEOUTOFBOUNDS comes with it when the EED ran past
-   its object or the data, or obj has no document, so that what follows it
-   can't be read. */
+   group's end. A group whose APPID handle can't be read is dropped, with no
+   raw bytes kept, and reported as DWG_ERR_INVALIDHANDLE instead; the next
+   group is read from its end too. DWG_ERR_VALUEOUTOFBOUNDS comes with
+   DWG_ERR_INVALIDEED when the EED ran past its object or the data, or obj
+   has no document, so that what follows it can't be read. */
 int
 dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
 {
