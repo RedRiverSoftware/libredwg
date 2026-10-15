@@ -1397,7 +1397,7 @@ check_write_TV_utf8 (const Dwg_Version_Type version, const char *str,
   dat.from_version = dat.version = version;
   // as dwg_add_Document () sets them, with the test's loglevel, which
   // bit_write_TV () takes from them
-  dat.opts = DWG_OPTS_IN | (loglevel & DWG_OPTS_LOGLEVEL);
+  dat.opts = (unsigned char)(DWG_OPTS_IN | (loglevel & DWG_OPTS_LOGLEVEL));
   dat.codepage = CP_ANSI_1252;
   bit_write_TV (&dat, copy);
   bit_write_RC (&dat, 0x5A);
@@ -1484,33 +1484,38 @@ bit_write_TV_utf8_tests (void)
   }
 }
 
-/* r2007+: an add-API document's UTF-8 becomes UTF-16, not its bytes. */
+/* r2007+: the UTF-8 of a document built with the add API (DWG_OPTS_IN) or
+   imported from JSON (DWG_OPTS_INJSON) becomes UTF-16, not its bytes. */
 static void
 bit_write_T_utf8_tests (void)
 {
-  Bit_Chain dat;
-  BITCODE_TU wstr;
   const uint16_t expect[] = { 'c', 'a', 'f', 0xE9, ' ', 0x20AC, 0 };
-  int good = 1;
+  const unsigned char opts[] = { DWG_OPTS_IN, DWG_OPTS_INJSON };
+  const char *const what[] = { "add API", "JSON" };
 
-  bitprepare (&dat, 64);
-  dat.from_version = dat.version = R_2007;
-  // as dwg_add_Document () sets them, with the test's loglevel, which
-  // bit_write_TV () takes from them
-  dat.opts = DWG_OPTS_IN | (loglevel & DWG_OPTS_LOGLEVEL);
-  dat.codepage = CP_ANSI_1252;
-  bit_write_T (&dat, (char *)"caf\xC3\xA9 \xE2\x82\xAC");
-  bit_set_position (&dat, 0);
-  wstr = bit_read_TU (&dat);
-  for (int i = 0; wstr && i < ARRAY_SIZE (expect); i++)
-    if (wstr[i] != expect[i])
-      good = 0;
-  if (wstr && good)
-    ok ("bit_write_T r2007 UTF-8 to UTF-16");
-  else
-    fail ("bit_write_T r2007 UTF-8 to UTF-16");
-  free (wstr);
-  bitfree (&dat);
+  for (int k = 0; k < ARRAY_SIZE (opts); k++)
+    {
+      Bit_Chain dat;
+      BITCODE_TU wstr;
+      int good = 1;
+      bitprepare (&dat, 64);
+      dat.from_version = dat.version = R_2007;
+      // with the test's loglevel, which bit_write_TV () takes from them
+      dat.opts = (unsigned char)(opts[k] | (loglevel & DWG_OPTS_LOGLEVEL));
+      dat.codepage = CP_ANSI_1252;
+      bit_write_T (&dat, (char *)"caf\xC3\xA9 \xE2\x82\xAC");
+      bit_set_position (&dat, 0);
+      wstr = bit_read_TU (&dat);
+      for (int i = 0; wstr && i < ARRAY_SIZE (expect); i++)
+        if (wstr[i] != expect[i])
+          good = 0;
+      if (wstr && good)
+        ok ("bit_write_T r2007 %s UTF-8 to UTF-16", what[k]);
+      else
+        fail ("bit_write_T r2007 %s UTF-8 to UTF-16", what[k]);
+      free (wstr);
+      bitfree (&dat);
+    }
 }
 
 static void

@@ -2727,7 +2727,7 @@ test_non_ascii_text (const Dwg_Version_Type version)
   for (int i = 0; i < ARRAY_SIZE (xrecord_strings); i++)
     {
       const char *str = non_ascii[xrecord_strings[i]].utf8;
-      dwg_add_XRECORD_string (xrecord, 1, strlen (str), str);
+      dwg_add_XRECORD_string (xrecord, 1, (BITCODE_BS)strlen (str), str);
     }
   xrecord_handle = dwg_obj_generic_handlevalue (xrecord);
 

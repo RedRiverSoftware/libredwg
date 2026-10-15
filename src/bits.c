@@ -2321,14 +2321,13 @@ bit_write_T (Bit_Chain *restrict dat, BITCODE_T restrict s)
               const char *endp = s + len;
               BITCODE_TU ws = (BITCODE_TU)malloc ((len + 1) * 2);
               const BITCODE_TU orig = ws;
-              // DXF in-memory strings are UTF-8 (in_dxf keeps them as read);
-              // decode multi-byte sequences to UTF-16 so non-ASCII is not
-              // double-encoded by a bare byte copy. Other producers of TV here
-              // (JSON, add API, old-DWG up-convert) already hold codepage
-              // bytes with non-representable chars as \U+xxxx escapes, so they
-              // keep the byte-wise path. Both honour the inline \U+xxxx
-              // escape.
-              const bool is_utf8 = (dat->opts & DWG_OPTS_INDXF) != 0;
+              // DXF and JSON imports and the add API keep in-memory strings
+              // in UTF-8 (in_dxf keeps them as read); decode multi-byte
+              // sequences to UTF-16 so non-ASCII is not double-encoded by a
+              // bare byte copy. A byte that isn't UTF-8 is copied as it is.
+              // An old DWG up-converted holds codepage bytes, and keeps the
+              // byte-wise path. Both honour the inline \U+xxxx escape.
+              const bool is_utf8 = (dat->opts & DWG_OPTS_IN) != 0;
               while (s < endp)
                 {
                   unsigned char c = (unsigned char)*s;
