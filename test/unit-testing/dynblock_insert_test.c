@@ -1498,10 +1498,11 @@ typedef struct
 /* The ATTRIBs of placement insert, placed at ins_pt, scale and rotation in
    block (base point 0): one per attribute definition that isn't constant,
    in order, each with its definition's properties placed by the INSERT.
-   Text left-aligned on the baseline has no alignment point, and its
-   ATTRIB stores none (dataflags 0x02), as AutoCAD's don't. Other ATTRIBs
-   are aligned at their definition's alignment point, placed; dataflags
-   0x02 stands for an alignment point of (0, 0), as AutoCAD reads it. */
+   Text left-aligned on the baseline doesn't use its alignment point: its
+   ATTRIB keeps it (0, 0) and doesn't store it (dataflags 0x02), as
+   AutoCAD's don't. Other ATTRIBs are aligned at their definition's
+   alignment point, placed; dataflags 0x02 stands for an alignment point of
+   (0, 0), as AutoCAD reads it. */
 static int
 check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
@@ -1590,7 +1591,8 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                 what, a->tag, a->text_value, a->ins_pt.x, a->ins_pt.y, aax,
                 aay, (unsigned)a->dataflags, a->height, a->rotation,
                 ref (attobj->tio.entity->layer), has_etag, expected[k].value,
-                x, y, left ? "with no alignment point, not" : "aligned at",
+                x, y,
+                left ? "with no alignment point stored, not" : "aligned at",
                 ax, ay, d->height * scale,
                 fmod (d->rotation + rotation, 2.0 * M_PI), etags);
           failures++;
