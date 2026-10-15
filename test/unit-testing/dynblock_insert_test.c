@@ -59,6 +59,7 @@ static int test_loglevel;
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
+#define WRITTEN_R11 "dynblock_insert_test_r11.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -1259,6 +1260,91 @@ test_add_insert_block (void)
   free (dwg);
   free_dwg (other);
   free (other);
+  return failures;
+}
+
+/* dwg_add_INSERT_block () before r13, whose INSERTs flag the optional
+   fields they store: the scales and the rotation are written, and read
+   back as given, drawing the block given. */
+static int
+test_add_insert_block_r11 (void)
+{
+  Dwg_Data *dwg = dwg_new_Document (R_11, 0, tracelevel);
+  const dwg_point_3d start = { 0.0, 0.0, 0.0 }, end = { 5.0, 5.0, 0.0 },
+                     pt = { 1.0, 2.0, 0.0 };
+  Dwg_Object_BLOCK_HEADER *blk = NULL;
+  Dwg_Entity_INSERT *ins = NULL;
+  Dwg_Data readback;
+  unsigned found = 0;
+  int failures = 0, error;
+
+  if (dwg)
+    blk = dwg_add_BLOCK_HEADER (dwg, "B");
+  if (blk && dwg_add_BLOCK (blk, "B") && dwg_add_LINE (blk, &start, &end)
+      && dwg_add_ENDBLK (blk))
+    ins = dwg_add_INSERT_block (model_space (dwg), &pt, blk, 2.0, 3.0, 4.0,
+                                0.5);
+  loglevel = test_loglevel;
+  if (!ins)
+    {
+      FAIL ("add_INSERT_block r11: adding the block or INSERT failed");
+      if (dwg)
+        {
+          free_dwg (dwg);
+          free (dwg);
+        }
+      return 1;
+    }
+  error = write_dwg (WRITTEN_R11, dwg);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_R11, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("add_INSERT_block r11: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      for (BITCODE_BL i = 0; i < readback.num_objects; i++)
+        {
+          const Dwg_Object *obj = &readback.object[i];
+          const Dwg_Entity_INSERT *_ins;
+          char *drawn;
+          if (obj->fixedtype != DWG_TYPE_INSERT)
+            continue;
+          found++;
+          _ins = obj->tio.entity->tio.INSERT;
+          // before r13 the INSERT names its block by its place in the table
+          drawn = dwg_handle_name (&readback, "BLOCK", _ins->block_header);
+          loglevel = test_loglevel;
+          if (_ins->ins_pt.x == pt.x && _ins->ins_pt.y == pt.y
+              && _ins->ins_pt.z == pt.z && _ins->scale.x == 2.0
+              && _ins->scale.y == 3.0 && _ins->scale.z == 4.0
+              && _ins->rotation == 0.5 && drawn && !strcmp (drawn, "B"))
+            OK ("add_INSERT_block r11: reads back with its scales and "
+                "rotation, drawing the block given");
+          else
+            {
+              FAIL ("add_INSERT_block r11: reads back at (%g, %g, %g), "
+                    "scales (%g, %g, %g), rotation %g, drawing %s",
+                    _ins->ins_pt.x, _ins->ins_pt.y, _ins->ins_pt.z,
+                    _ins->scale.x, _ins->scale.y, _ins->scale.z,
+                    _ins->rotation, drawn ? drawn : "no block");
+              failures++;
+            }
+          free (drawn);
+        }
+      if (found != 1)
+        {
+          FAIL ("add_INSERT_block r11: %u INSERTs read back", found);
+          failures++;
+        }
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_R11);
+  free_dwg (dwg);
+  free (dwg);
   return failures;
 }
 
@@ -2710,6 +2796,7 @@ main (int argc, char *argv[])
     }
   failures += test_is_xref_ref (&src);
   failures += test_add_insert_block ();
+  failures += test_add_insert_block_r11 ();
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);

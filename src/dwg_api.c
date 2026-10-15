@@ -26298,10 +26298,9 @@ dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
       {
         obj->type = DWG_TYPE_INSERT_r11;
         if (_obj->ins_pt.z == 0.0)
-          {
-            obj->tio.entity->flag_r11 |= FLAG_R11_HAS_ELEVATION;
-            obj->tio.entity->opts_r11 = 1;
-          }
+          obj->tio.entity->flag_r11 |= FLAG_R11_HAS_ELEVATION;
+        // opts_r11 stays 0, so that the encoder flags the scales and the
+        // rotation the INSERT has
       }
     return _obj;
   }
