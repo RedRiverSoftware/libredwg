@@ -2193,75 +2193,50 @@ bit_embed_TU (BITCODE_TU restrict wstr)
 /** Write ASCIIZ text.
     Starting with r2004 as writer (not target version) acad always
     writes a terminating zero, and includes it in the length.
-    On DWG_OPTS_INJSON (imported from JSON), convert from UTF-8 to the
-   codepage.
+    On DWG_OPTS_INJSON (imported from JSON or built with the add API),
+    convert from UTF-8 to the codepage.
+    A string longer than its 16-bit length can say is truncated.
  */
 void
 bit_write_TV (Bit_Chain *restrict dat, BITCODE_TV restrict chain)
 {
   size_t i;
   size_t length = (chain && *chain) ? strlen ((const char *)chain) : 0;
-  bool need_free = false;
-  if (length > UINT16_MAX)
+  char *converted = NULL;
+  // r2004+ writer apps include the trailing NUL in the length;
+  // pre-r2004 (incl. r2000) lengths must equal strlen exactly
+  const bool with_nul = dat->from_version >= R_13b1 && dat->version >= R_2004;
+  const size_t max_length = with_nul ? UINT16_MAX - 1 : UINT16_MAX;
+  // on utf-8 convert back to codepage
+  if (length && dat->opts & DWG_OPTS_INJSON)
+    {
+      loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
+      converted = bit_utf8_to_TV_alloc ((const char *)chain, length, 0,
+                                        dat->codepage);
+      if (converted)
+        {
+          chain = converted;
+          length = strlen (converted);
+        }
+      else
+        length = 0;
+    }
+  if (length > max_length)
     {
       // silently truncate overlong strings for now
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
       LOG_WARN ("Overlong string truncated (len=%" PRIuSIZE ")", length);
-      length = UINT16_MAX;
-      chain[UINT16_MAX - 1] = '\0';
-    }
-  // on utf-8 convert back to codepage
-  if (length && dat->opts & DWG_OPTS_INJSON)
-    {
-      size_t destlen = length * 2;
-      char *dest = (char *)malloc (destlen);
-      if (!dest)
-        {
-          loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
-          LOG_ERROR ("Out of memory");
-          length = 0;
-        }
-      else
-        {
-          while (!bit_utf8_to_TV (dest, (unsigned char *)chain, destlen,
-                                  length, 0, dat->codepage))
-            {
-              char *tmp;
-              destlen *= 2;
-              tmp = (char *)realloc (dest, destlen);
-              if (!tmp)
-                {
-                  loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
-                  LOG_ERROR ("Out of memory");
-                  free (dest);
-                  dest = NULL;
-                  length = 0;
-                  break;
-                }
-              dest = tmp;
-            }
-          if (dest)
-            {
-              need_free = true;
-              chain = dest;
-              length = strlen (dest);
-            }
-        }
+      length = max_length;
     }
   if (dat->from_version < R_13b1)
     bit_write_RS (dat, (BITCODE_RS)length);
   else
-    {
-      // r2004+ writer apps include the trailing NUL in the length;
-      // pre-r2004 (incl. r2000) lengths must equal strlen exactly
-      if (dat->version >= R_2004 && length)
-        length++; // TV-ZERO
-      bit_write_BS (dat, (BITCODE_BS)length);
-    }
+    bit_write_BS (dat, (BITCODE_BS)(with_nul && length ? length + 1 : length));
   for (i = 0; i < length; i++)
     bit_write_RC (dat, (unsigned char)chain[i]);
-  if (need_free)
-    free (chain);
+  if (with_nul && length)
+    bit_write_RC (dat, 0); // TV-ZERO
+  free (converted);
 }
 
 static int
@@ -3298,7 +3273,9 @@ bit_TU_to_utf8_len (const BITCODE_TU restrict wstr, const int len)
     optionally unquotes \" to ", \\ to \, undo json_cquote(),
     \\uxxxx or other unicode => \\U+XXXX.
     codepage conversion, MIF not yet (needs version arg)
-    Returns NULL if not enough room in dest.
+    Bytes that are not UTF-8 are kept as they are.
+    Returns NULL if not enough room in dest, which
+    bit_utf8_to_TV_alloc () always gives.
 */
 char *
 bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
@@ -3354,9 +3331,8 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
         {
           *dest++ = c;
         }
-      else if ((c & 0xe0) == 0xc0 && s + 1 <= ends)
+      else if ((c & 0xe0) == 0xc0 && s < ends && (*s & 0xc0) == 0x80)
         {
-          /* ignore invalid utf8 for now */
           if (dest + 7 < endp)
             {
               unsigned char c1;
@@ -3389,22 +3365,10 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
           else
             return NULL;
         }
-      else if ((c & 0xf0) == 0xe0)
+      else if ((c & 0xf0) == 0xe0 && s + 1 < ends && (*s & 0xc0) == 0x80
+               && (*(s + 1) & 0xc0) == 0x80 && (c != 0xe0 || *s >= 0xa0))
         {
-          /* warn on invalid utf8 */
-          if (dest + 2 < endp && s + 1 <= ends
-              && (*s < 0x80 || *s > 0xBF || *(s + 1) < 0x80
-                  || *(s + 1) > 0xBF))
-            {
-              loglevel |= 1;
-              LOG_WARN ("utf-8: BAD_CONTINUATION_BYTE %s", s);
-            }
-          else if (dest + 1 < endp && c == 0xe0 && *s < 0xa0)
-            {
-              loglevel |= 1;
-              LOG_WARN ("utf-8: NON_SHORTEST %s", s);
-            }
-          else if (dest + 7 < endp && s + 1 <= ends)
+          if (dest + 7 < endp)
             {
               unsigned char c1;
               wchar_t wc1;
@@ -3429,17 +3393,24 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
                   *dest++ = heX (wc >> 4);
                   *dest++ = heX (wc);
                 }
+              s += 2;
             }
           else
             return NULL;
-          if (s + 2 > ends)
-            break;
-          s++;
-          s++;
+        }
+      // U+10000 and up: \U+XXXX can't express it, so it is left out
+      else if ((c & 0xf8) == 0xf0 && s + 2 < ends && (*s & 0xc0) == 0x80
+               && (*(s + 1) & 0xc0) == 0x80 && (*(s + 2) & 0xc0) == 0x80)
+        s += 3;
+      else
+        {
+          // Not UTF-8 (a stray continuation byte, a sequence cut short or
+          // overlong): keep the byte as it is.
+          LOG_WARN ("utf-8: invalid byte 0x%02X kept", (unsigned)c);
+          *dest++ = c;
         }
       if (s >= ends)
         break;
-      /* everything above 0xf0 exceeds ucs-2, 4-6 byte seqs */
     }
 
   if (dest >= endp)
@@ -3447,6 +3418,41 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
   else
     *dest = '\0';
   return d;
+}
+
+/** Converts UTF-8 to TV as bit_utf8_to_TV () does, into a buffer it
+    allocates. No input byte gives more than 3.5 bytes (a 2-byte character
+    becomes a 7-byte \U+XXXX), and bit_utf8_to_TV () wants 8 bytes free
+    before each escape, so srclen * 4 + 8 always fits.
+    Returns NULL on error. Caller frees.
+*/
+char *
+bit_utf8_to_TV_alloc (const char *restrict src, const size_t srclen,
+                      const unsigned cquoted, const BITCODE_RS codepage)
+{
+  size_t destlen;
+  char *dest;
+  if (srclen > (SIZE_MAX - 8) / 4)
+    {
+      LOG_ERROR ("%s: string too long (%" PRIuSIZE ")", __FUNCTION__, srclen);
+      return NULL;
+    }
+  destlen = (srclen * 4) + 8;
+  dest = (char *)malloc (destlen);
+  if (!dest)
+    {
+      LOG_ERROR ("%s: Out of memory", __FUNCTION__);
+      return NULL;
+    }
+  if (!bit_utf8_to_TV (dest, (const unsigned char *)src, destlen, srclen,
+                       cquoted, codepage))
+    {
+      LOG_ERROR ("%s: conversion did not fit in %" PRIuSIZE " bytes",
+                 __FUNCTION__, destlen);
+      free (dest);
+      return NULL;
+    }
+  return dest;
 }
 
 static char *

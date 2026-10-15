@@ -2580,6 +2580,231 @@ test_vertex_links_read (void)
   return numfailed ();
 }
 
+/* Text given to the add API, in UTF-8 but for two. */
+static const struct
+{
+  const char *utf8;
+  const char *cp1252; // as written in codepage 1252
+} non_ascii[] = {
+  { "caf\xC3\xA9", "caf\xE9" },                 // é at the end
+  { "caf\xC3\xA9 au lait", "caf\xE9 au lait" }, // é in the middle
+  { "10 mm\xC2\xB2", "10 mm\xB2" },             // ²
+  { "30\xC2\xB0 Stra\xC3\x9F" "e", "30\xB0 Stra\xDF" "e" }, // °, ß
+  { "\xE2\x82\xAC 5", "\x80 5" },               // € takes 3 bytes in UTF-8
+  { "\xCE\xB4 x", "\\U+03B4 x" },               // δ isn't in codepage 1252
+  { "caf\xE9", "caf\xE9" }, // not UTF-8: a lone 0xE9 at the end is kept
+  { "a\xE1z", "a\xE1z" },   // not UTF-8: a lone 0xE1 in the middle
+  // "Ã©", whose codepage bytes would read as UTF-8 for "é"
+  { "\xC3\x83\xC2\xA9", "\xC3\xA9" },
+};
+
+/* The non_ascii strings of the XRECORD */
+static const int xrecord_strings[] = { 0, 1, 6 };
+
+/* Whether the TEXTs of dwg after the first skip ones hold the non_ascii
+   strings in turn, in UTF-8 or codepage 1252. Returns the number of TEXTs
+   checked. */
+static unsigned
+check_non_ascii_texts (const char *what, const Dwg_Data *dwg,
+                       const unsigned skip, const int utf8)
+{
+  unsigned n = 0, seen = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      const char *expect, *got;
+      if (obj->fixedtype != DWG_TYPE_TEXT || seen++ < skip)
+        continue;
+      if (n >= (unsigned)ARRAY_SIZE (non_ascii))
+        break;
+      expect = utf8 ? non_ascii[n].utf8 : non_ascii[n].cp1252;
+      got = obj->tio.entity->tio.TEXT->text_value;
+      if (!got || strNE (got, expect))
+        fail ("%s: TEXT %u differs", what, n);
+      n++;
+    }
+  return n;
+}
+
+static void
+check_non_ascii_others (const char *what, const Dwg_Data *dwg,
+                        const BITCODE_RLL xrecord, const int utf8)
+{
+  unsigned layers = 0, attribs = 0, strings = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          const char *name = obj->tio.object->tio.LAYER->name;
+          if (name && strEQ (name, utf8 ? non_ascii[1].utf8
+                                        : non_ascii[1].cp1252))
+            layers++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_ATTRIB)
+        {
+          const Dwg_Entity_ATTRIB *_obj = obj->tio.entity->tio.ATTRIB;
+          if (_obj->text_value
+              && strEQ (_obj->text_value,
+                        utf8 ? non_ascii[0].utf8 : non_ascii[0].cp1252))
+            attribs++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_XRECORD
+               && obj->handle.value == xrecord)
+        {
+          for (Dwg_Resbuf *rbuf = obj->tio.object->tio.XRECORD->xdata; rbuf;
+               rbuf = rbuf->nextrb)
+            {
+              const char *expect;
+              if (rbuf->type != 1
+                  || strings >= (unsigned)ARRAY_SIZE (xrecord_strings))
+                {
+                  fail ("%s: XRECORD item %d", what, rbuf->type);
+                  break;
+                }
+              expect = utf8 ? non_ascii[xrecord_strings[strings]].utf8
+                            : non_ascii[xrecord_strings[strings]].cp1252;
+              if (rbuf->value.str.size != strlen (expect)
+                  || memcmp (rbuf->value.str.u.data, expect,
+                             rbuf->value.str.size))
+                fail ("%s: XRECORD string %u differs", what, strings);
+              strings++;
+            }
+        }
+    }
+  if (layers != 1)
+    fail ("%s: %u layers with the non-ASCII name", what, layers);
+  if (attribs != 1)
+    fail ("%s: %u ATTRIBs with the non-ASCII value", what, attribs);
+  if (strings != (unsigned)ARRAY_SIZE (xrecord_strings))
+    fail ("%s: %u XRECORD strings", what, strings);
+}
+
+/* Non-ASCII text, a layer name, an ATTRIB value and XRECORD strings
+   through the add API, written as r2000 or r2004 and read back. A document
+   built with the add API keeps them in UTF-8 and the writer converts them
+   to the codepage once. Text added to a document read from a file is
+   converted when it is added. Bytes that aren't UTF-8 are kept. */
+static int
+test_non_ascii_text (const Dwg_Version_Type version)
+{
+  const char *vername = version >= R_2004 ? "r2004" : "r2000";
+  char file[40], file2[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Entity_INSERT *ins;
+  Dwg_Object_DICTIONARY *dict;
+  Dwg_Object_XRECORD *xrecord;
+  BITCODE_RLL xrecord_handle;
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const unsigned count = (unsigned)ARRAY_SIZE (non_ascii);
+  int error;
+
+  failed = 0;
+  for (int i = 0; i < ARRAY_SIZE (non_ascii); i++)
+    {
+      const dwg_point_3d pt = { 0.0, 5.0 * i, 0.0 };
+      dwg_add_TEXT (ms, non_ascii[i].utf8, &pt, 2.5);
+    }
+  dwg_add_LAYER (dwg, non_ascii[1].utf8);
+  // found by its name in UTF-8
+  blk = dwg_add_BLOCK_HEADER (dwg, non_ascii[2].utf8);
+  dwg_add_BLOCK (blk, non_ascii[2].utf8);
+  dwg_add_ATTDEF (blk, 1.0, 0, "Value", &o, "TAG1", "x");
+  dwg_add_ENDBLK (blk);
+  ins = dwg_add_INSERT (ms, &o, non_ascii[2].utf8, 1.0, 1.0, 1.0, 0.0);
+  if (!ins)
+    fail ("non_ascii %s: no INSERT of the block named in UTF-8", vername);
+  else
+    dwg_add_ATTRIB (ins, 1.0, 0, &o, "TAG1", non_ascii[0].utf8);
+  if (!dwg_find_tablehandle (dwg, non_ascii[1].utf8, "LAYER"))
+    fail ("non_ascii %s: layer not found by its name in UTF-8", vername);
+  dict = dwg_add_DICTIONARY (dwg, "NONASCII", NULL, 0);
+  xrecord = dwg_add_XRECORD (dict, "Strings");
+  for (int i = 0; i < ARRAY_SIZE (xrecord_strings); i++)
+    {
+      const char *str = non_ascii[xrecord_strings[i]].utf8;
+      dwg_add_XRECORD_string (xrecord, 1, strlen (str), str);
+    }
+  xrecord_handle = dwg_obj_generic_handlevalue (xrecord);
+
+  snprintf (what, sizeof (what), "non_ascii %s: add API", vername);
+  if (check_non_ascii_texts (what, dwg, 0, 1) != count)
+    fail ("%s: TEXTs missing", what);
+  check_non_ascii_others (what, dwg, xrecord_handle, 1);
+
+  snprintf (file, sizeof (file), "add_non_ascii_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  snprintf (what, sizeof (what), "non_ascii %s: written", vername);
+  if (read.header.codepage != CP_ANSI_1252)
+    fail ("%s: codepage %u", what, (unsigned)read.header.codepage);
+  if (check_non_ascii_texts (what, &read, 0, 0) != count)
+    fail ("%s: TEXTs missing", what);
+  check_non_ascii_others (what, &read, xrecord_handle, 0);
+
+  // the document read keeps the codepage: text added now is converted
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (&read));
+  for (int i = 0; i < ARRAY_SIZE (non_ascii); i++)
+    {
+      const dwg_point_3d pt = { 50.0, 5.0 * i, 0.0 };
+      dwg_add_TEXT (ms, non_ascii[i].utf8, &pt, 2.5);
+    }
+  snprintf (what, sizeof (what), "non_ascii %s: added to the read",
+            vername);
+  if (check_non_ascii_texts (what, &read, count, 0) != count)
+    fail ("%s: TEXTs missing", what);
+
+  snprintf (file2, sizeof (file2), "add_non_ascii_%s_2.dwg", vername);
+  unlink (file2);
+  error = dwg_write_file (file2, &read);
+  dwg_free (&read);
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  snprintf (what, sizeof (what), "non_ascii %s: written again", vername);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("%s: dwg_write_file 0x%x", what, error);
+  else if ((error = dwg_read_file (file2, &read)) >= DWG_ERR_CRITICAL)
+    fail ("%s: dwg_read_file 0x%x", what, error);
+  else if (check_non_ascii_texts (what, &read, 0, 0)
+               + check_non_ascii_texts (what, &read, count, 0)
+           != 2 * count)
+    fail ("%s: TEXTs missing", what);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("non_ascii %s", vername);
+      unlink (file);
+      unlink (file2);
+    }
+  return numfailed ();
+}
+
+/* r2007+ documents built with the add API keep 8-bit UTF-8 too. */
+static int
+test_non_ascii_text_r2007 (void)
+{
+  Dwg_Data *dwg = dwg_new_Document (R_2007, 0, tracelevel);
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  const dwg_point_3d pt = { 0.0, 0.0, 0.0 };
+  Dwg_Entity_TEXT *text;
+
+  failed = 0;
+  text = dwg_add_TEXT (ms, "\xE2\x82\xAC 5", &pt, 2.5);
+  if (!text || !text->text_value
+      || strNE (text->text_value, "\xE2\x82\xAC 5"))
+    fail ("non_ascii r2007: TEXT not kept in UTF-8");
+  else
+    ok ("non_ascii r2007");
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+
 static int
 test_names (void)
 {
@@ -3063,6 +3288,9 @@ main (int argc, char *argv[])
   error += test_attrib_r11 (R_10, 1);
   error += test_attrib_r11 (R_11, 2);
   error += test_vertex_links_read ();
+  error += test_non_ascii_text (R_2000);
+  error += test_non_ascii_text (R_2004);
+  error += test_non_ascii_text_r2007 ();
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

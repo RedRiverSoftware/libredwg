@@ -1270,6 +1270,249 @@ bit_write_TV_tests (void)
   bitfree (&bitchain);
 }
 
+/* bit_utf8_to_TV () keeps bytes that are not UTF-8, and fails only for
+   lack of room. A lead byte 0xE0-0xEF at the end once made it fail at
+   every size, and a bad continuation byte took the next two bytes with
+   it. */
+static void
+bit_utf8_to_TV_invalid_tests (void)
+{
+  static const struct
+  {
+    const char *src;
+    const char *expect; // in codepage 1252
+  } t[] = {
+    { "caf\xE9", "caf\xE9" },                 // lead byte at the end
+    { "caf\xE9 au lait", "caf\xE9 au lait" }, // bad continuation byte
+    { "30\xB0", "30\xB0" },                   // stray continuation byte
+    { "10 mm\xB2 x", "10 mm\xB2 x" },
+    { "Stra\xDF" "e", "Stra\xDF" "e" },       // 2-byte lead, no continuation
+    { "a\xE1\xA0z", "a\xE1\xA0z" },           // 3-byte sequence cut short
+    { "\xE0\x80\xAF", "\xE0\x80\xAF" },       // overlong '/'
+    { "\xC3\xA9\xE9", "\xE9\xE9" },           // valid, then not
+    { "\xF0\x9F\x98\x80!", "!" },             // U+1F600 is left out
+  };
+  char dest[64];
+  char *p;
+  char src[4];
+  unsigned c;
+
+  for (int i = 0; i < ARRAY_SIZE (t); i++)
+    {
+      p = bit_utf8_to_TV (dest, (const unsigned char *)t[i].src,
+                          sizeof (dest), strlen (t[i].src), 0,
+                          CP_ANSI_1252);
+      if (p && strEQ (p, t[i].expect))
+        ok ("bit_utf8_to_TV invalid UTF-8 [%d] kept", i);
+      else
+        fail ("bit_utf8_to_TV invalid UTF-8 [%d]: %s", i, p ? p : "NULL");
+    }
+  // every 3-byte lead byte, alone at the end
+  for (c = 0xE0; c <= 0xEF; c++)
+    {
+      src[0] = 'a';
+      src[1] = 'b';
+      src[2] = (char)c;
+      src[3] = '\0';
+      p = bit_utf8_to_TV (dest, (const unsigned char *)src, sizeof (dest), 3,
+                          0, CP_ANSI_1252);
+      if (p && strEQ (p, src))
+        ok ("bit_utf8_to_TV lone 0x%X at the end", c);
+      else
+        fail ("bit_utf8_to_TV lone 0x%X at the end: %s", c, p ? p : "NULL");
+    }
+  // a source that isn't NUL-terminated, cut inside a sequence
+  {
+    char *cut = (char *)malloc (4);
+    memcpy (cut, "ab\xE2\x82", 4);
+    p = bit_utf8_to_TV (dest, (const unsigned char *)cut, sizeof (dest), 4,
+                        0, CP_ANSI_1252);
+    if (p && strEQ (p, "ab\xE2\x82"))
+      ok ("bit_utf8_to_TV cut sequence, unterminated source");
+    else
+      fail ("bit_utf8_to_TV cut sequence, unterminated source: %s",
+            p ? p : "NULL");
+    free (cut);
+  }
+  // NULL only when dest is too small
+  p = bit_utf8_to_TV (dest, (const unsigned char *)"caf\xC3\xA9", 4, 5, 0,
+                      CP_ANSI_1252);
+  if (!p)
+    ok ("bit_utf8_to_TV NULL when dest is too small");
+  else
+    fail ("bit_utf8_to_TV not NULL with 4 bytes for 5: %s", p);
+}
+
+static void
+bit_utf8_to_TV_alloc_tests (void)
+{
+  // U+0234 isn't in codepage 1252: 2 bytes become 7, the most per byte
+  const size_t n = 20000;
+  char *src = (char *)malloc ((2 * n) + 1);
+  char *p;
+  for (size_t i = 0; i < n; i++)
+    memcpy (&src[2 * i], "\xC8\xB4", 2);
+  src[2 * n] = '\0';
+  p = bit_utf8_to_TV_alloc (src, 2 * n, 0, CP_ANSI_1252);
+  if (p && strlen (p) == 7 * n && !memcmp (p, "\\U+0234\\U+0234", 14)
+      && !memcmp (&p[(7 * n) - 7], "\\U+0234", 7))
+    ok ("bit_utf8_to_TV_alloc worst case, %u bytes", (unsigned)(7 * n));
+  else
+    fail ("bit_utf8_to_TV_alloc worst case: %u bytes",
+          p ? (unsigned)strlen (p) : 0U);
+  free (p);
+  free (src);
+
+  p = bit_utf8_to_TV_alloc ("30\xC2\xB0 caf\xE9", 9, 0, CP_ANSI_1252);
+  if (p && strEQc (p, "30\xB0 caf\xE9"))
+    ok ("bit_utf8_to_TV_alloc mixed");
+  else
+    fail ("bit_utf8_to_TV_alloc mixed: %s", p ? p : "NULL");
+  free (p);
+
+  p = bit_utf8_to_TV_alloc ("", 0, 0, CP_ANSI_1252);
+  if (p && !*p)
+    ok ("bit_utf8_to_TV_alloc empty");
+  else
+    fail ("bit_utf8_to_TV_alloc empty: %s", p ? p : "NULL");
+  free (p);
+}
+
+/* Write str with bit_write_TV () as a document built with the add API
+   (UTF-8 in memory) for version, followed by a marker byte, and read it
+   back: the length field, the bytes and the marker. */
+static void
+check_write_TV_utf8 (const Dwg_Version_Type version, const char *str,
+                     const char *expect, const size_t expect_len)
+{
+  Bit_Chain dat;
+  const bool with_nul = version >= R_2004 && expect_len;
+  const char *vername = version >= R_2004 ? "r2004" : "r2000";
+  char *copy = strdup (str);
+  BITCODE_BS length;
+  size_t i;
+  int bad = 0;
+
+  bitprepare (&dat, (strlen (str) * 4) + 16);
+  dat.from_version = dat.version = version;
+  // as dwg_add_Document () sets them, with the test's loglevel, which
+  // bit_write_TV () takes from them
+  dat.opts = DWG_OPTS_IN | (loglevel & DWG_OPTS_LOGLEVEL);
+  dat.codepage = CP_ANSI_1252;
+  bit_write_TV (&dat, copy);
+  bit_write_RC (&dat, 0x5A);
+  if (strNE (copy, str))
+    fail ("bit_write_TV %s changed its argument", vername);
+
+  bit_set_position (&dat, 0);
+  length = bit_read_BS (&dat);
+  if (length != (with_nul ? expect_len + 1 : expect_len))
+    {
+      fail ("bit_write_TV %s length %u, expected %u", vername,
+            (unsigned)length,
+            (unsigned)(with_nul ? expect_len + 1 : expect_len));
+      bitfree (&dat);
+      free (copy);
+      return;
+    }
+  for (i = 0; i < length; i++)
+    {
+      unsigned char c = bit_read_RC (&dat);
+      unsigned char e = i < expect_len ? (unsigned char)expect[i] : 0;
+      if (c != e && !bad++)
+        fail ("bit_write_TV %s byte %u: 0x%X, expected 0x%X", vername,
+              (unsigned)i, c, e);
+    }
+  if (bit_read_RC (&dat) != 0x5A)
+    fail ("bit_write_TV %s: marker not after the string", vername);
+  else if (!bad)
+    ok ("bit_write_TV %s UTF-8 to codepage, %u bytes", vername,
+        (unsigned)expect_len);
+  bitfree (&dat);
+  free (copy);
+}
+
+static void
+bit_write_TV_utf8_tests (void)
+{
+  static const struct
+  {
+    const char *utf8;
+    const char *codepage; // 1252
+  } t[] = {
+    { "caf\xC3\xA9", "caf\xE9" },                 // é at the end
+    { "caf\xC3\xA9 au lait", "caf\xE9 au lait" }, // é in the middle
+    { "10 mm\xC2\xB2", "10 mm\xB2" },             // ²
+    { "30\xC2\xB0 Stra\xC3\x9F" "e", "30\xB0 Stra\xDF" "e" }, // °, ß
+    { "caf\xE9", "caf\xE9" },     // not UTF-8, lone 0xE9 at the end
+    { "a\xE1z", "a\xE1z" },       // not UTF-8, lone 0xE1 in the middle
+    { "\xC8\xB4", "\\U+0234" },   // not in the codepage
+  };
+  const Dwg_Version_Type versions[] = { R_2000, R_2004 };
+  char *longstr;
+
+  for (int v = 0; v < ARRAY_SIZE (versions); v++)
+    {
+      for (int i = 0; i < ARRAY_SIZE (t); i++)
+        check_write_TV_utf8 (versions[v], t[i].utf8, t[i].codepage,
+                             strlen (t[i].codepage));
+    }
+
+  // longer than the 16-bit length can say: truncated, never wrapped
+  longstr = (char *)malloc (70001);
+  memset (longstr, 'x', 70000);
+  longstr[70000] = '\0';
+  check_write_TV_utf8 (R_2000, longstr, longstr, UINT16_MAX);
+  check_write_TV_utf8 (R_2004, longstr, longstr, UINT16_MAX - 1);
+  free (longstr);
+  // short enough as UTF-8, too long once converted: 20000 \U+0234
+  {
+    const size_t n = 20000;
+    char *expect = (char *)malloc ((7 * n) + 1);
+    longstr = (char *)malloc ((2 * n) + 1);
+    for (size_t i = 0; i < n; i++)
+      {
+        memcpy (&longstr[2 * i], "\xC8\xB4", 2);
+        memcpy (&expect[7 * i], "\\U+0234", 7);
+      }
+    longstr[2 * n] = '\0';
+    expect[7 * n] = '\0';
+    check_write_TV_utf8 (R_2000, longstr, expect, UINT16_MAX);
+    check_write_TV_utf8 (R_2004, longstr, expect, UINT16_MAX - 1);
+    free (longstr);
+    free (expect);
+  }
+}
+
+/* r2007+: an add-API document's UTF-8 becomes UTF-16, not its bytes. */
+static void
+bit_write_T_utf8_tests (void)
+{
+  Bit_Chain dat;
+  BITCODE_TU wstr;
+  const uint16_t expect[] = { 'c', 'a', 'f', 0xE9, ' ', 0x20AC, 0 };
+  int good = 1;
+
+  bitprepare (&dat, 64);
+  dat.from_version = dat.version = R_2007;
+  // as dwg_add_Document () sets them, with the test's loglevel, which
+  // bit_write_TV () takes from them
+  dat.opts = DWG_OPTS_IN | (loglevel & DWG_OPTS_LOGLEVEL);
+  dat.codepage = CP_ANSI_1252;
+  bit_write_T (&dat, (char *)"caf\xC3\xA9 \xE2\x82\xAC");
+  bit_set_position (&dat, 0);
+  wstr = bit_read_TU (&dat);
+  for (int i = 0; wstr && i < ARRAY_SIZE (expect); i++)
+    if (wstr[i] != expect[i])
+      good = 0;
+  if (wstr && good)
+    ok ("bit_write_T r2007 UTF-8 to UTF-16");
+  else
+    fail ("bit_write_T r2007 UTF-8 to UTF-16");
+  free (wstr);
+  bitfree (&dat);
+}
+
 static void
 bit_read_TF_tests (void)
 {
@@ -1825,6 +2068,10 @@ main (int argc, char const *argv[])
   bit_UMC_bug_tests ();
   bit_read_TV_tests ();
   bit_write_TV_tests ();
+  bit_utf8_to_TV_invalid_tests ();
+  bit_utf8_to_TV_alloc_tests ();
+  bit_write_TV_utf8_tests ();
+  bit_write_T_utf8_tests ();
   bit_read_TF_tests ();
   bit_write_TF_tests ();
   bit_bits_tests ();

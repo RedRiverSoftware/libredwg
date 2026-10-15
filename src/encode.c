@@ -7272,17 +7272,21 @@ dwg_encode_xdata (Bit_Chain *restrict dat, Dwg_Object_XRECORD *restrict _obj,
                 // do we need to convert UTF-8 to codepage?
                 if (rbuf->value.str.size > 0 && dat->opts & DWG_OPTS_INJSON)
                   {
-                    BITCODE_RS destlen = rbuf->value.str.size * 2;
-                    char *dest = (char *)malloc (destlen);
-                    while (!bit_utf8_to_TV (
-                        dest, (BITCODE_TF)rbuf->value.str.u.data, destlen,
-                        rbuf->value.str.size, 0, rbuf->value.str.codepage))
+                    char *dest = rbuf->value.str.u.data
+                                     ? bit_utf8_to_TV_alloc (
+                                           rbuf->value.str.u.data,
+                                           rbuf->value.str.size, 0,
+                                           rbuf->value.str.codepage)
+                                     : NULL;
+                    size_t destlen = dest ? strlen (dest) : 0;
+                    if (destlen > UINT16_MAX)
                       {
-                        destlen *= 2;
-                        dest = (char *)realloc (dest, destlen);
+                        LOG_WARN ("xdata[%u]: overlong string truncated "
+                                  "(len=%" PRIuSIZE ")",
+                                  j, destlen);
+                        destlen = UINT16_MAX;
                       }
-                    destlen = (BITCODE_RS)strlen (dest);
-                    bit_write_RS (dat, destlen);
+                    bit_write_RS (dat, (BITCODE_RS)destlen);
                     bit_write_RC (dat, rbuf->value.str.codepage);
                     if (dest)
                       bit_write_TF (dat, (BITCODE_TF)dest, destlen);
