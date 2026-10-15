@@ -15317,7 +15317,8 @@ dwg_read_dxf (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
   if (dwg->header.version <= R_2000
       && (dwg->header.from_version > R_2000 || (dwg->opts & DWG_OPTS_INDXF)))
     dwg_fixup_BLOCKS_entities (dwg);
-  // counted once all are read: an entity that fails to read is dropped again
+  // counted once all are read, as an entity that fails to read is removed
+  // again
   dwg->num_entities = dwg_count_entities (dwg);
   LOG_TRACE ("import from DXF\n");
   if (error > DWG_ERR_CRITICAL)

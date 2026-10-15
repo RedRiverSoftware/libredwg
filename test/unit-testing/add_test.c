@@ -2125,10 +2125,20 @@ test_attrib_links (const Dwg_Version_Type version)
   h_c = entity_handle (dwg, in_c);
   h_attribute = entity_handle (dwg, by_attribute);
   // dwg_add_ATTRIB () and dwg_add_Attribute () refuse what is no INSERT,
-  // such as a MINSERT, whose fields lie elsewhere, and dwg_add_ATTRIB () an
-  // invalid tag, before they add anything
+  // such as a MINSERT, whose fields lie elsewhere, or a copy of an INSERT's
+  // struct, and dwg_add_ATTRIB () an invalid tag, before they add anything
   minsert = dwg_add_MINSERT (ms, &p, "B", 1.0, 1.0, 1.0, 0.0, 2, 2, 1.0, 1.0);
   num_objects = dwg->num_objects;
+  if (in_ms)
+    {
+      Dwg_Entity_INSERT copy = *in_ms;
+      if (dwg_add_ATTRIB (&copy, 1.0, 0, &t1, "TAG4", "four")
+          || dwg_add_Attribute (&copy, 1.0, 0, "Prompt", &t1, "TAG4",
+                                "four"))
+        fail ("attrib_links %s: an ATTRIB on a copy of an INSERT", vername);
+      if (memcmp (&copy, in_ms, sizeof (copy)))
+        fail ("attrib_links %s: the INSERT or its copy changed", vername);
+    }
   if (dwg_add_ATTRIB ((Dwg_Entity_INSERT *)b, 1.0, 0, &t1, "TAG4", "four"))
     fail ("attrib_links %s: dwg_add_ATTRIB on a BLOCK_HEADER", vername);
   if (!minsert
@@ -2333,6 +2343,236 @@ test_attrib_interleaved (const Dwg_Version_Type version)
       snprintf (what, sizeof (what), "attrib_interleaved %s: read INSERT %d",
                 vername, i);
       check_attrib_links (what, &read, h_ins[i], h_b, ARRAY_SIZE (tags));
+    }
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* Before r13 (r11 is also r12's format): an INSERT's ATTRIBs and their
+   SEQEND, added to model space, take the INSERT's entmode, which puts them
+   in its section of the file, and the INSERT is flagged as followed by
+   attributes. Read back, they follow the INSERT, the SEQEND last, before
+   the entity added after it. The SEQEND comes with the first ATTRIB, so a
+   second one is written after it: with 2 ATTRIBs that order is a known
+   fault (P6-05 item 54), reported as TODO. */
+static int
+test_attrib_r11 (const Dwg_Version_Type version, const int num_attribs)
+{
+  const char *vername = dwg_version_type (version);
+  const char *const tags[] = { "TAG1", "TAG2" };
+  char file[40], what[40], seen[128];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms, *b;
+  Dwg_Entity_INSERT *insert;
+  Dwg_Object *insobj = NULL;
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p = { 10.0, 5.0, 0.0 };
+  // what follows the POINT in the entities section read back
+  Dwg_Object_Type order[5];
+  int num_order = 0, n = 0, k = 0, in_order = 1;
+  int error;
+
+  failed = 0;
+  snprintf (what, sizeof (what), "attrib %s, %d ATTRIB%s", vername,
+            num_attribs, num_attribs == 1 ? "" : "s");
+  if (!dwg)
+    {
+      fail ("%s: dwg_new_Document failed", what);
+      return numfailed ();
+    }
+  assert (num_attribs <= ARRAY_SIZE (tags));
+  order[num_order++] = DWG_TYPE_INSERT;
+  for (int i = 0; i < num_attribs; i++)
+    order[num_order++] = DWG_TYPE_ATTRIB;
+  order[num_order++] = DWG_TYPE_SEQEND;
+  order[num_order++] = DWG_TYPE_CIRCLE;
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  dwg_add_POINT (ms, &o);
+  b = dwg_add_BLOCK_HEADER (dwg, "B");
+  dwg_add_BLOCK (b, "B");
+  dwg_add_ATTDEF (b, 1.0, 0, "Prompt", &p, "TAG1", "default");
+  dwg_add_LINE (b, &o, &p);
+  dwg_add_ENDBLK (b);
+  insert = dwg_add_INSERT (ms, &o, "B", 1.0, 1.0, 1.0, 0.0);
+  for (int i = 0; i < num_attribs; i++)
+    if (!insert || !dwg_add_ATTRIB (insert, 1.0, 0, &p, tags[i], "text"))
+      fail ("%s: adding %s failed", what, tags[i]);
+  dwg_add_CIRCLE (ms, &p, 1.0);
+  if (insert)
+    insobj = dwg_obj_generic_to_object (insert, &error);
+  // in the document: what follows the INSERT is in model space too
+  for (BITCODE_BL i = insobj ? insobj->index + 1 : 0;
+       insobj && i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->supertype == DWG_SUPERTYPE_ENTITY
+          && obj->tio.entity->entmode != insobj->tio.entity->entmode)
+        fail ("%s: %s after the INSERT has entmode %d, not %d", what,
+              obj->name, obj->tio.entity->entmode,
+              insobj->tio.entity->entmode);
+    }
+  check_entity_count ("attrib pre-r13: entity count", dwg);
+
+  snprintf (file, sizeof (file), "add_attribs_%s_%d.dwg", vername,
+            num_attribs);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  seen[0] = '\0';
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    {
+      const Dwg_Object *obj = &read.object[i];
+      const size_t len = strlen (seen);
+      // model space's own BLOCK and ENDBLK, and the block's entities
+      if (obj->supertype != DWG_SUPERTYPE_ENTITY
+          || obj->fixedtype == DWG_TYPE_BLOCK
+          || obj->fixedtype == DWG_TYPE_ENDBLK
+          || obj->tio.entity->entmode != 2)
+        continue;
+      if (obj->fixedtype == DWG_TYPE_POINT && !n)
+        continue;
+      snprintf (seen + len, sizeof (seen) - len, "%s%s", len ? " " : "",
+                obj->name);
+      if (n >= num_order || obj->fixedtype != order[n])
+        in_order = 0;
+      n++;
+      if (obj->fixedtype == DWG_TYPE_INSERT
+          && !obj->tio.entity->tio.INSERT->has_attribs)
+        fail ("%s: read INSERT has_attribs 0", what);
+      if (obj->fixedtype == DWG_TYPE_ATTRIB)
+        {
+          const char *tag = obj->tio.entity->tio.ATTRIB->tag;
+          if (k >= num_attribs || !tag || strcmp (tag, tags[k]))
+            fail ("%s: read ATTRIB %s, not %s", what,
+                  tag ? tag : "without tag",
+                  k < num_attribs ? tags[k] : "none");
+          k++;
+        }
+    }
+  if (n != num_order)
+    fail ("%s: read %d entities after the POINT, not %d: %s", what, n,
+          num_order, seen);
+  else if (in_order && num_attribs > 1)
+    fail ("%s: read in order now, make the check strict (P6-05 item 54)",
+          what);
+  else if (!in_order && num_attribs > 1)
+    todo ("%s: the SEQEND is written after the first ATTRIB: %s "
+          "(P6-05 item 54)",
+          what, seen);
+  else if (!in_order)
+    fail ("%s: read %s", what, seen);
+  else if (!failed)
+    ok ("%s: the ATTRIB and SEQEND follow their INSERT", what);
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* r13-r2000: a POLYLINE_2D added to a document read from a file. Its first
+   VERTEX has no link before it, as AutoCAD's, in the document and in the
+   file written from it, and its VERTEXes are chained from first_vertex to
+   last_vertex. */
+static int
+test_vertex_links_read (void)
+{
+  const char *file = "add_vertex_links_read.dwg";
+  const dwg_point_2d pts[4]
+      = { { 0.0, 0.0 }, { 1.0, 0.0 }, { 1.0, 1.0 }, { 0.0, 2.0 } };
+  char path[256];
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms;
+  Dwg_Entity_POLYLINE_2D *pline = NULL;
+  BITCODE_RLL h_pline = 0;
+  int error;
+
+  failed = 0;
+  if (!test_data_file ("example_2000.dwg", path, sizeof (path)))
+    {
+      fail ("vertex_links_read: example_2000.dwg not found");
+      return 1;
+    }
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  if (dwg_read_file (path, &read) >= DWG_ERR_CRITICAL)
+    {
+      fail ("vertex_links_read: example_2000.dwg: read failed");
+      dwg_free (&read);
+      return 1;
+    }
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (&read));
+  if (ms)
+    pline = dwg_add_POLYLINE_2D (ms, 4, pts);
+  if (!pline)
+    {
+      fail ("vertex_links_read: dwg_add_POLYLINE_2D failed");
+      dwg_free (&read);
+      return numfailed ();
+    }
+  h_pline = entity_handle (&read, pline);
+  for (int pass = 0; pass < 2; pass++)
+    {
+      const char *what = pass ? "in the file" : "in the document";
+      const Dwg_Object *plobj = dwg_resolve_handle (&read, h_pline);
+      const Dwg_Entity_POLYLINE_2D *_pl;
+      const Dwg_Object *v;
+      BITCODE_RLL last;
+      unsigned n = 0;
+      if (pass)
+        {
+          unlink (file);
+          error = dwg_write_file (file, &read);
+          dwg_free (&read);
+          memset (&read, 0, sizeof (read));
+          read.opts = tracelevel;
+          if (error >= DWG_ERR_CRITICAL)
+            {
+              fail ("vertex_links_read: dwg_write_file 0x%x", error);
+              break;
+            }
+          if ((error = dwg_read_file (file, &read)) >= DWG_ERR_CRITICAL)
+            {
+              fail ("vertex_links_read: dwg_read_file 0x%x", error);
+              break;
+            }
+          plobj = dwg_resolve_handle (&read, h_pline);
+        }
+      if (!plobj || plobj->fixedtype != DWG_TYPE_POLYLINE_2D)
+        {
+          fail ("vertex_links_read %s: no POLYLINE_2D " FORMAT_RLLx, what,
+                h_pline);
+          continue;
+        }
+      _pl = plobj->tio.entity->tio.POLYLINE_2D;
+      v = dwg_ref_object (&read, _pl->first_vertex);
+      if (!v || v->fixedtype != DWG_TYPE_VERTEX_2D)
+        {
+          fail ("vertex_links_read %s: no first VERTEX_2D", what);
+          continue;
+        }
+      if (v->tio.entity->nolinks || chain_neighbour (v, 0))
+        fail ("vertex_links_read %s: the first VERTEX " FORMAT_RLLx
+              " links back to " FORMAT_RLLx " (nolinks %d)",
+              what, (BITCODE_RLL)v->handle.value, chain_neighbour (v, 0),
+              v->tio.entity->nolinks);
+      last = _pl->last_vertex ? _pl->last_vertex->absolute_ref : 0;
+      while (v && v->fixedtype == DWG_TYPE_VERTEX_2D && n < 8)
+        {
+          n++;
+          if (v->handle.value == last)
+            break;
+          v = dwg_resolve_handle (&read, chain_neighbour (v, 1));
+        }
+      if (n != 4 || !v || v->handle.value != last)
+        fail ("vertex_links_read %s: first_vertex to last_vertex links %u "
+              "VERTEXes, not 4",
+              what, n);
+      else if (!failed)
+        ok ("vertex_links_read %s: no link before the first VERTEX, and "
+            "the chain reaches the last",
+            what);
     }
   dwg_free (&read);
   if (!numfailed ())
@@ -2819,6 +3059,10 @@ main (int argc, char *argv[])
   error += test_attrib_interleaved (R_2004);
   error += test_attrib_links_read (R_2000);
   error += test_attrib_links_read (R_2004);
+  error += test_attrib_r11 (R_11, 1);
+  error += test_attrib_r11 (R_10, 1);
+  error += test_attrib_r11 (R_11, 2);
+  error += test_vertex_links_read ();
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)
