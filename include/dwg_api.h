@@ -9474,7 +9474,8 @@ extern "C"
   EXPORT int dwg_require_class (Dwg_Data *restrict dwg,
                                 const char *const restrict dxfname,
                                 const size_t len) __nonnull_all;
-  /* insert entity into mspace, pspace or other block */
+  /* insert entity into mspace, pspace or other block, or an ATTRIB or
+     SEQEND into the INSERT owning it */
   EXPORT int dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
                                 Dwg_Object *restrict obj) __nonnull_all;
 
@@ -9511,8 +9512,9 @@ extern "C"
                 const double height) __nonnull_all;
 
   /* Experimental. Does not work yet properly */
-  /* This should add the ATTRIB and ENDBLK to the insert,
-     and the ATTDEF and ENDBLK to the block, if missing.
+  /* This adds the ATTRIB to the insert, with a SEQEND if it is the first,
+     and the ATTDEF to the insert's block. insert must be an INSERT, as for
+     dwg_add_ATTRIB.
      flags, bitmask of:
      0 none
      1 invisible, overridden by ATTDISP
@@ -9584,6 +9586,10 @@ extern "C"
       const int mode, const char *restrict prompt,
       const dwg_point_3d *restrict ins_pt, const char *restrict tag,
       const char *restrict default_value) __nonnull_all;
+  /* Adds an ATTRIB to insert, with a SEQEND if it is the first. insert
+     must be an INSERT (not a MINSERT), the document's own struct rather
+     than a copy of it. Anything else, or an invalid point, height or tag,
+     is refused before anything is added. */
   EXPORT Dwg_Entity_ATTRIB *
   dwg_add_ATTRIB (Dwg_Entity_INSERT *restrict insert, const double height,
                   const int flags, const dwg_point_3d *restrict ins_pt,

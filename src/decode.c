@@ -7454,6 +7454,8 @@ decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
               obj->type
                   = (BITCODE_BS)(DWG_TYPE_UNKNOWN_r11 | (obj->type & 0x80));
               obj->fixedtype = DWG_TYPE_UNKNOWN_ENT;
+              // an entity, which no dwg_setup_<token> counts
+              dwg->num_entities++;
               error |= DWG_ERR_SECTIONNOTFOUND;
               dat->byte++;
               if (dat->byte >= dat->size)
