@@ -160,7 +160,8 @@ test_mtext_46 (void)
 
 /* An r2000 LIGHT gives its colour as a second 90 group, after the
    class_version (as example_2000.dxf does). Read as the class_version, it
-   was out of bounds, and dwg_free stopped before the name. */
+   was out of bounds, and dwg_free stopped before the name. An r2000 DWG
+   keeps only the colour's palette index. */
 static void
 test_light_r2000_color (void)
 {
@@ -168,6 +169,9 @@ test_light_r2000_color (void)
       = "  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n"
         "  9\n$INSBASE\n 10\n0.0\n 20\n0.0\n 30\n0.0\n"
         "  9\n$HANDSEED\n  5\nFFFF\n  0\nENDSEC\n"
+        "  0\nSECTION\n  2\nCLASSES\n"
+        "  0\nCLASS\n  1\nLIGHT\n  2\nAcDbLight\n  3\nSCENEOE\n"
+        " 90\n     1025\n280\n     0\n281\n     1\n  0\nENDSEC\n"
         "  0\nSECTION\n  2\nENTITIES\n"
         "  0\nLIGHT\n  5\n20\n100\nAcDbEntity\n  8\n0\n100\nAcDbLight\n"
         " 90\n        1\n  1\nSpotlight1\n 70\n     3\n290\n     1\n"
@@ -175,9 +179,11 @@ test_light_r2000_color (void)
         " 10\n0.0\n 20\n0.0\n 30\n0.0\n 11\n1.0\n 21\n0.0\n 31\n0.0\n"
         "  0\nENDSEC\n  0\nEOF\n";
   const char *file = "indxf_test_light.dxf";
-  Dwg_Data dwg;
+  const char *dwgfile = "indxf_test_light.dwg";
+  Dwg_Data dwg, written;
   Dwg_Object *obj;
   Dwg_Entity_LIGHT *light;
+  int error;
   if (import_dxf (file, dxf, &dwg) >= DWG_ERR_CRITICAL)
     {
       dwg_free (&dwg);
@@ -191,19 +197,53 @@ test_light_r2000_color (void)
     fail ("r2000 LIGHT.class_version %u, expected 1",
           (unsigned)light->class_version);
   else if (light->light_color.rgb != 0xc3000005
-           || light->light_color.method != 0xc3)
-    fail ("r2000 LIGHT.light_color.rgb 0x%08x, method 0x%x, expected "
-          "0xc3000005, 0xc3",
+           || light->light_color.method != 0xc3
+           || light->light_color.index != 5)
+    fail ("r2000 LIGHT.light_color.rgb 0x%08x, method 0x%x, index %d, "
+          "expected 0xc3000005, 0xc3, 5",
           (unsigned)light->light_color.rgb,
-          (unsigned)light->light_color.method);
+          (unsigned)light->light_color.method,
+          (int)light->light_color.index);
   else if (!light->name || strcmp (light->name, "Spotlight1"))
     fail ("r2000 LIGHT.name %s, expected Spotlight1",
           light->name ? light->name : "(null)");
   else
-    ok ("r2000 LIGHT: class_version 1, light_color 0xc3000005");
+    ok ("r2000 LIGHT: class_version 1, light_color 0xc3000005, index 5");
+
+  // as dxf2dwg writes it
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &dwg);
   dwg_free (&dwg);
+  loglevel = test_loglevel;
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dwg_write_file %s 0x%x", dwgfile, error);
+      return;
+    }
+  memset (&written, 0, sizeof (Dwg_Data));
+  written.opts = tracelevel;
+  error = dwg_read_file (dwgfile, &written);
+  loglevel = test_loglevel;
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("dwg_read_file %s 0x%x", dwgfile, error);
+  else
+    {
+      obj = first_object (&written, DWG_TYPE_LIGHT);
+      light = obj ? obj->tio.entity->tio.LIGHT : NULL;
+      if (!light)
+        fail ("r2000 LIGHT: not in %s", dwgfile);
+      else if (light->light_color.index != 5)
+        fail ("r2000 LIGHT.light_color.index %d in %s, expected 5",
+              (int)light->light_color.index, dwgfile);
+      else
+        ok ("r2000 LIGHT: light_color index 5 in %s", dwgfile);
+    }
+  dwg_free (&written);
   if (!numfailed ())
-    unlink (file);
+    {
+      unlink (file);
+      unlink (dwgfile);
+    }
 }
 
 /* LibreDWG writes an r2010+ TABLESTYLE as the table's cell style, then its

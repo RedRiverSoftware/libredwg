@@ -11637,11 +11637,31 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                 }
               else
                 {
-                  // as the generic loop reads a CMC from 90-99
-                  o->light_color.rgb = pair->value.u;
-                  o->light_color.method = pair->value.u >> 0x18;
-                  LOG_TRACE ("LIGHT.light_color.rgb = %08X [CMC 90]\n",
-                             o->light_color.rgb);
+                  Dwg_Color *color = &o->light_color;
+                  color->rgb = pair->value.u;
+                  color->method = pair->value.u >> 0x18;
+                  // and the palette index, which an r2000 DWG keeps, as
+                  // bit_read_CMC sets it
+                  switch (color->method)
+                    {
+                    case 0xc0: // ByLayer
+                      color->index = 256;
+                      break;
+                    case 0xc1: // ByBlock
+                      color->index = 0;
+                      break;
+                    case 0xc3: // ACI
+                      color->index = bit_CMC_aci_index (color->rgb);
+                      break;
+                    case 0xc8: // None
+                      color->index = 257;
+                      break;
+                    default:
+                      color->index = dwg_find_color_index (color->rgb);
+                      break;
+                    }
+                  LOG_TRACE ("LIGHT.light_color = %08X, index %d [CMC 90]\n",
+                             color->rgb, color->index);
                 }
               goto next_pair;
             }
