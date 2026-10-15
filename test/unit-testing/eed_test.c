@@ -24,7 +24,8 @@
      1003 (layer) and 1005 (entity) big-endian, and so the codepage of a
      1000 string;
    - items written by the encoder, a 1003 layer and 1000 strings, also one
-     read from an r2007 or later file, in those byte orders.
+     read from an r2007 or later file, in those byte orders;
+   - a first group of 256 bytes, whose size takes 2 bits.
    In an r11 file, a string that ends an entity's EED group is read. And in
    public drawings every EED group is read whole: its items take all of its
    bytes. */
@@ -470,6 +471,54 @@ test_byte_left_over (const Dwg_Version_Type version)
       && is_short (eed[1].data, 9) && line_read_whole (&d, obj, 2)
       && !(error & DWG_ERR_INVALIDEED))
     OK ("%s, %s: its items, the next group and the LINE read", what,
+        version_name (version));
+  else
+    FAIL ("%s, %s: misread, error 0x%x", what, version_name (version),
+          (unsigned)error);
+
+cleanup:
+  free_dwg (&drawn);
+  free_drawing (&d);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* A first group of 256 bytes, whose size takes only 2 bits as a BS, so the
+   byte read from often stays the same: read like any other. */
+static int
+test_group_of_256 (const Dwg_Version_Type version)
+{
+  const char *what = "first EED group of 256 bytes";
+  const char *file = "eed_group_of_256.dwg";
+  unsigned char group[256];
+  Drawing d;
+  Dwg_Data drawn;
+  const Dwg_Object *obj = NULL;
+  const Dwg_Eed *eed;
+  int error = 0;
+
+  failed = 0;
+  memset (&drawn, 0, sizeof (drawn));
+  // one binary chunk: code, length, 254 bytes
+  group[0] = 4;
+  group[1] = 254;
+  for (int i = 2; i < 256; i++)
+    group[i] = (unsigned char)i;
+  if (new_drawing (version, group, sizeof (group), &d))
+    obj = write_and_read (&d, file, &drawn, &error);
+  if (!obj)
+    {
+      FAIL ("%s, %s: no LINE read back, error 0x%x", what,
+            version_name (version), (unsigned)error);
+      goto cleanup;
+    }
+  eed = obj->tio.entity->eed;
+  if (obj->tio.entity->num_eed >= 1 && eed[0].size == 256 && eed[0].data
+      && eed[0].data->code == 4 && eed[0].data->u.eed_4.length == 254
+      && !memcmp (eed[0].data->u.eed_4.data, &group[2], 254)
+      && line_read_whole (&d, obj, 1) && !(error & DWG_ERR_INVALIDEED))
+    OK ("%s, %s: read, then the next group and the LINE", what,
         version_name (version));
   else
     FAIL ("%s, %s: misread, error 0x%x", what, version_name (version),
@@ -959,6 +1008,7 @@ main (int argc, char *argv[])
       error += test_byte_left_over (versions[v]);
       error += test_autocad_group (versions[v]);
       error += test_written_items (versions[v]);
+      error += test_group_of_256 (versions[v]);
     }
   error += test_r11_groups ();
   for (const char *const *f = drawings; *f; f++)

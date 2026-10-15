@@ -4051,6 +4051,7 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
     {
       BITCODE_BS j;
       size_t end;
+      const size_t size_pos = bit_position (dat);
 
       if (dat->from_version >= R_13b1)
         {
@@ -4068,7 +4069,9 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
         }
 
       LOG_RPOS
-      if (size > _obj->size || dat->byte == sav_byte)
+      // no progress, compared in bits: a BS of 256 takes 2 bits, which can
+      // leave dat->byte as it was
+      if (size > _obj->size || bit_position (dat) == size_pos)
         {
           LOG_ERROR ("Invalid EED size " FORMAT_BS " > %u", size, _obj->size);
           obj->num_eed = idx;
