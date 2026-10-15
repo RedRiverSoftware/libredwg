@@ -25207,7 +25207,6 @@ dwg_add_Document (Dwg_Data *restrict dwg, const int imperial)
       layer = dwg_add_LAYER (dwg, (const BITCODE_T) "0");
       if (layer)
         {
-          layer->color = (BITCODE_CMC){ 7, CMC_DEFAULTS };
           layer->ltype = dwg_add_handleref (dwg, 5, UINT64_C (0x16),
                                             NULL); // Continuous
           if (version >= R_2000)
@@ -28209,16 +28208,20 @@ dwg_add_LAYER (Dwg_Data *restrict dwg, const char *restrict name)
 {
   if (dwg->header.version >= R_2000)
     {
-      // PLOTSTYLE placeholder
+      // PLOTSTYLE placeholder. Plotted, lineweight Default, in flag0 too:
+      // the DXF and JSON writers take them from flag0. Colour 7, as 0 is
+      // ByBlock, which a layer can't have.
       API_ADD_TABLE (LAYER, LAYER_CONTROL, {
         _obj->plotstyle = dwg_add_handleref (dwg, 5, UINT64_C (0xF), NULL);
         _obj->plotflag = 1;
         _obj->linewt = 0x1f;
+        _obj->flag0 = 16 | (0x1f << 5);
+        _obj->color.index = 7;
       });
     }
   else
     {
-      API_ADD_TABLE (LAYER, LAYER_CONTROL);
+      API_ADD_TABLE (LAYER, LAYER_CONTROL, { _obj->color.index = 7; });
     }
 }
 
