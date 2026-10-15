@@ -3333,8 +3333,11 @@ DWG_TABLE (LAYER)
     // separate DXF flag 70 from the internal DWG flag0 bitmask
     int flag0;
     ENCODER {
-      // with json we only use flag0, with DXF we use flag
-      if (dwg->opts & DWG_OPTS_INDXF) {
+      // A JSON import writes flag0 as it is. A DXF import takes the fields
+      // from flag (70) and the colour sign, plotted. A document read from a
+      // DWG file (no import flag) and one built with the add API (both
+      // import flags) take flag0 from the fields.
+      if ((dwg->opts & DWG_OPTS_IN) == DWG_OPTS_INDXF) {
         FIELD_VALUE (off)           = FIELD_VALUE (color.index) < 0;
         FIELD_VALUE (frozen)        = FIELD_VALUE (flag) & 1;
         FIELD_VALUE (frozen_in_new) = FIELD_VALUE (flag) & 2;
@@ -3342,7 +3345,7 @@ DWG_TABLE (LAYER)
         FIELD_VALUE (is_xref_ref)   = FIELD_VALUE (flag) & 64;
         FIELD_VALUE (plotflag) = 1;
       }
-      if (!(dwg->opts & DWG_OPTS_INJSON))
+      if ((dwg->opts & DWG_OPTS_IN) != DWG_OPTS_INJSON)
         FIELD_VALUE (flag0) = (FIELD_VALUE (frozen) ? 1 : 0) +
           (FIELD_VALUE (off) ? 2 : 0) +
           (FIELD_VALUE (frozen_in_new) ? 4 : 0) +
