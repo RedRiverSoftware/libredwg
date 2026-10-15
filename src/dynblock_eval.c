@@ -1765,6 +1765,34 @@ lists_node (const Dwg_Object *a, const BITCODE_BL nodeid)
     }
 }
 
+/* Whether action a lists the parameter with node id nodeid among those
+   whose points it moves before its entry i: a stretch action in codes, a
+   move or rotate action by node id. */
+static int
+lists_node_before (const Dwg_Object *a, const BITCODE_BL i,
+                   const BITCODE_BL nodeid)
+{
+  if (a->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION)
+    {
+      const Dwg_Object_BLOCKSTRETCHACTION *_a
+          = a->tio.object->tio.BLOCKSTRETCHACTION;
+      for (BITCODE_BL j = 0; _a->codes && j < i && j < _a->num_codes; j++)
+        if (_a->codes[j].bl95 == nodeid)
+          return 1;
+      return 0;
+    }
+  else
+    {
+      // every action starts with BLOCKACTION_fields
+      const Dwg_Object_BLOCKMOVEACTION *_a
+          = a->tio.object->tio.BLOCKMOVEACTION;
+      for (BITCODE_BL j = 0; _a->actions && j < i && j < _a->num_actions; j++)
+        if (_a->actions[j] == nodeid)
+          return 1;
+      return 0;
+    }
+}
+
 /* Checks node obj of the evaluation graph, which action a selects (deps).
    A parameter the action lists among those whose points it moves is
    checked with them, and the action's own parameter is the one its value
@@ -2312,6 +2340,11 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
           if (error)
             return error;
         }
+      if (lists_node_before (a->obj, i, c->bl95))
+        set_unknown (plan,
+                     "stretch action '%s' lists node %u twice, so its "
+                     "stored state is not known",
+                     a->name, (unsigned)c->bl95);
       // a parameter wholly outside the frame, which AutoCAD moves whole
       if (!c->indexes || !c->num_indexes)
         {
@@ -2405,6 +2438,11 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
   for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
     {
       const int k = find_linear (plan, _a->actions[i]);
+      if (lists_node_before (a->obj, i, _a->actions[i]))
+        set_unknown (plan,
+                     "move action '%s' lists node %u twice, so its stored "
+                     "state is not known",
+                     a->name, (unsigned)_a->actions[i]);
       if (k < 0)
         {
           Dynblock_Node_State *state;
@@ -3451,6 +3489,15 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       angle = r->value
               - rotation_angle (&_r->def_basept, &_r->def_endpt,
                                 &_r->def_base_angle_pt);
+      // the end point the record holds, turned, would then still be at
+      // the base point, so the record couldn't hold the angle
+      if (hypot (_r->def_endpt.x - _r->def_basept.x,
+                 _r->def_endpt.y - _r->def_basept.y)
+          <= DYNBLOCK_VALUE_EPSILON)
+        set_unknown (plan,
+                     "rotation property '%s' has its end point at its base "
+                     "point, so its stored state can't hold the angle",
+                     r->name);
       error = plan_rotation_actions (plan, r, angle);
       center.x = _r->def_basept.x;
       center.y = _r->def_basept.y;

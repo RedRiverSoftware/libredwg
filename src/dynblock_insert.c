@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <float.h>
 
 #include "common.h"
 #include "bits.h"
@@ -518,11 +519,13 @@ normal_angle (const double angle)
    definition's (an angle reduced to [0, 2 pi)), is one dp's value set
    allows: in its list, or with no list within its limits and on its
    increment, counted from its minimum or 0. AutoCAD moves a value it
-   doesn't allow to one it does on its next edit of the placement. */
+   doesn't allow to one it does on its next edit of the placement. The
+   tolerance is VALUE_EPSILON, or for a huge value a few units of its last
+   place, so that it stays far below any spacing a double can hold there. */
 static int
 is_allowed_value (const Dwg_DynParam *dp, const double value)
 {
-  const double eps = VALUE_EPSILON * fmax (1.0, fabs (value));
+  const double eps = fmax (VALUE_EPSILON, 8.0 * DBL_EPSILON * fabs (value));
   if ((dp->value_flags & DWG_DYNPARAM_HAS_LIST) && dp->num_values)
     {
       for (BITCODE_BL i = 0; i < dp->num_values; i++)

@@ -408,9 +408,11 @@ typedef struct _dwg_attvalue
    shown: a rotation
    parameter that another action moves or turns, a parameter an action
    selects without listing it among those it moves, an action listing its
-   own parameter, a stretch point a parameter's record doesn't hold or one
-   listed twice, or a parameter that a rotate action turns and another
-   action moves or turns too (DWG_ERR_NOTYETSUPPORTED), or that would move
+   own parameter or one parameter twice, a stretch point a parameter's
+   record doesn't hold or one listed twice, a rotation parameter given a
+   value whose end point is at its base point, or a parameter that a
+   rotate action turns and another action moves or turns too
+   (DWG_ERR_NOTYETSUPPORTED), or that would move
    a parameter's point beyond what a double holds
    (DWG_ERR_VALUEOUTOFBOUNDS); an attribute definition whose extrusion
    isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()

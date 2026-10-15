@@ -1084,8 +1084,39 @@ test_value_sets (Dwg_Data *dst, BITCODE_RLL map[][2], const unsigned num_map)
   failures += test_accepted (dst, window, 1.0, &v, 1,
                              "a linear value on its increment, from its "
                              "minimum");
+  // a huge value a quarter off an increment of 1, or off the one value of
+  // a list: the tolerance stays far below the spacing
   width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
-  width->tio.object->tio.BLOCKLINEARPARAMETER->value_set = kept;
+  vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+  vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_INCREMENT;
+  vs->minimum = 0.0;
+  vs->increment = 1.0;
+  v.value = 1e9 + 0.25;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a huge linear value off its increment");
+  v.value = 1e9;
+  failures += test_accepted (dst, window, 1.0, &v, 1,
+                             "a huge linear value on its increment");
+  {
+    double one[1] = { 1e9 };
+    width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+    vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+    vs->flags = DWG_DYNPARAM_HAS_LIST;
+    vs->valuelist = one;
+    vs->num_valuelist = 1;
+    v.value = 1e9 + 0.25;
+    failures += test_refusal (dst, model_space (dst),
+                              block_header (dst, window), &pt, 1.0, 0.0, &v,
+                              1, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a huge linear value a quarter off its list's");
+    v.value = 1e9;
+    failures += test_accepted (dst, window, 1.0, &v, 1,
+                               "a huge linear value in its list");
+    width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+    width->tio.object->tio.BLOCKLINEARPARAMETER->value_set = kept;
+  }
 
   // found again, as the placements added objects
   angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
@@ -1207,6 +1238,10 @@ test_refusals (Dwg_Data *src)
   v[0].value = 1.0;
   failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
                             REFUSED (DWG_ERR_NOTYETSUPPORTED), "a flip");
+  v[0].value = 0.5;
+  failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a flip value of 0.5");
   // a value the evaluation refuses
   v[0].name = (char *)"Window Width";
   v[0].value = -1.0;
@@ -1214,11 +1249,6 @@ test_refusals (Dwg_Data *src)
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a linear value below 0");
   failures += test_value_sets (dst, map, num_map);
-
-  v[0].value = 0.5;
-  failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
-                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
-                            "a flip value of 0.5");
   v[0].name = (char *)"Window Width";
   v[0].value = (double)NAN;
   failures += test_refusal (dst, ms, window, &pt, 1.0, 0.0, v, 1, NULL, 0,
@@ -3462,7 +3492,28 @@ test_unknown_states (Dwg_Data *src)
       }
     else
       failures++;
+    // the same point, in two entries
+    if (add_stretch_code (stretch_wall, swing_id, &twice[0], 1)
+        && add_stretch_code (stretch_wall, swing_id, &twice[1], 1))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch listing a parameter in two "
+                                  "entries");
+        pop_stretch_code (stretch_wall);
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
   }
+  // MoveSwing lists swing already
+  if (add_action (&move_swing->actions, &move_swing->num_actions, swing_id))
+    {
+      failures += test_unknown (dst, door, v, 1,
+                                "a move listing a parameter twice");
+      move_swing->num_actions--;
+    }
+  else
+    failures++;
   if (add_action (&move_swing->actions, &move_swing->num_actions, wall_id))
     {
       failures += test_unknown (dst, door, v, 1,
@@ -3484,6 +3535,19 @@ test_unknown_states (Dwg_Data *src)
     }
   else
     failures++;
+  // the Toilet's Angle with its end point at its base point, which no turn
+  // moves, so that the record would read back as another angle
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  {
+    Dwg_Object_BLOCKROTATIONPARAMETER *_angle
+        = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+    const BITCODE_3BD endpt = _angle->def_endpt;
+    _angle->def_endpt = _angle->def_basept;
+    failures += test_unknown (dst, toilet, v, 1,
+                              "a rotation parameter with its end point at "
+                              "its base point");
+    _angle->def_endpt = endpt;
+  }
 
   // the Toilet's Angle in the Window's graph, 'Stretch Width' moving its
   // base point, at Window Width 24 and no Angle
