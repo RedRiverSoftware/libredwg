@@ -126,8 +126,8 @@ bit_reset_chain (Bit_Chain *dat)
         || (dat->bit ? ((dat->byte * 8) + dat->bit >= dat->size * 8)          \
                      : (dat->byte >= dat->size)))                             \
       {                                                                       \
-        static size_t _last_pos = 0;                                          \
-        static int _same_pos_count = 0;                                       \
+        static DWG_THREAD_LOCAL size_t _last_pos = 0;                         \
+        static DWG_THREAD_LOCAL int _same_pos_count = 0;                      \
         loglevel = dat->opts & DWG_OPTS_LOGLEVEL;                             \
         LOG_ERROR ("%s buffer overflow at %" PRIuSIZE ".%u >= %" PRIuSIZE,    \
                    func, dat->byte, dat->bit, dat->size);                     \
