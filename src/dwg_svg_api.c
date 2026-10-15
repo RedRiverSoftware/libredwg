@@ -31,21 +31,14 @@
 #include <dwg.h>
 #include <dwg_api.h>
 #include <dwg_svg_api.h>
+#include "common.h"
 
 /* dwg2SVG.c's mutable file-scope globals (the drawing, its extents and
    page size, the options, and the block and layer state used while
    rendering) plus this file's writer-callback pair below are all
-   thread-local, so concurrent calls to the public API don't trample
-   each other's state.  Each thread gets its own copy of every variable.
-
-   MSVC's default C mode has no _Thread_local; __declspec(thread) gives
-   the same storage.  dwg2SVG.c has the same guarded definition for when
-   it is compiled on its own. */
-#if defined(_MSC_VER) && !defined(__clang__)
-#  define DWG_SVG_THREAD_LOCAL __declspec (thread)
-#else
-#  define DWG_SVG_THREAD_LOCAL _Thread_local
-#endif
+   thread-local (DWG_THREAD_LOCAL), so concurrent calls to the public API
+   don't trample each other's state.  Each thread gets its own copy of
+   every variable. */
 
 /* clang doesn't know the gnu_printf archetype; printf checks the same
    format strings there. */
@@ -63,8 +56,8 @@
 
 typedef void (*dwg_svg_write_cb)(const char *data, size_t len, void *user);
 
-static DWG_SVG_THREAD_LOCAL dwg_svg_write_cb g_svg_writer = NULL;
-static DWG_SVG_THREAD_LOCAL void *g_svg_writer_user = NULL;
+static DWG_THREAD_LOCAL dwg_svg_write_cb g_svg_writer = NULL;
+static DWG_THREAD_LOCAL void *g_svg_writer_user = NULL;
 
 SVG_PRINTF_ATTR
 static int

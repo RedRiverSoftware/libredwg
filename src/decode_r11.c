@@ -44,16 +44,16 @@
 #include "decode.h"
 #include "free.h"
 
-/* The logging level for the read (decode) path.
- * Yes, this library is not thread-safe.
+/* The logging level for the read (decode) path, loglevel, is process-wide:
+ * threads that read at the same time share it.
  */
 
 /* the current version per spec block */
-static int cur_ver = 0;
-static BITCODE_BL rcount1 = 0, rcount2 = 0;
+static DWG_THREAD_LOCAL int cur_ver = 0;
+static DWG_THREAD_LOCAL BITCODE_BL rcount1 = 0, rcount2 = 0;
 
 #ifdef DWG_ABORT
-static unsigned int errors = 0;
+static DWG_THREAD_LOCAL unsigned int errors = 0;
 #  ifndef DWG_ABORT_LIMIT
 #    define DWG_ABORT_LIMIT 200
 #  endif

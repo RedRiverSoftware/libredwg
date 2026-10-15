@@ -53,14 +53,9 @@
 void dwg_set_next_objhandle (Dwg_Object *obj);
 void dwg_set_handle_size (Dwg_Handle *restrict hdl);
 
-/* The loop counters shared by the generated functions, as in free.c, but
-   one set per thread. */
-#if defined(_MSC_VER) && !defined(__clang__)
-#  define COPY_THREAD_LOCAL __declspec (thread)
-#else
-#  define COPY_THREAD_LOCAL _Thread_local
-#endif
-static COPY_THREAD_LOCAL BITCODE_BL rcount1, rcount2;
+/* The loop counters shared by the generated functions, as in free.c, one
+   set per thread. */
+static DWG_THREAD_LOCAL BITCODE_BL rcount1, rcount2;
 
 /* What a refused copy returns, with a bit for the reason. */
 #define COPY_REFUSED DWG_ERR_INVALIDDWG

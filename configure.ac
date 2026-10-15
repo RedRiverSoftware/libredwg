@@ -141,6 +141,18 @@ AC_CHECK_HEADERS([endian.h sys/endian.h machine/endian.h winsock2.h], [break])
 AC_CHECK_HEADERS([byteswap.h byteorder.h sys/byteorder.h], [break])
 dnl optionally use a better allocator with --enable-mimalloc
 AC_CHECK_HEADERS([mimalloc-override.h])
+dnl threads_test reads drawings on several threads at once: Windows threads,
+dnl or else pthreads where pthread_create links
+PTHREAD_LIBS=
+AC_CHECK_HEADER([pthread.h],
+  [libredwg_save_LIBS=$LIBS
+   AC_SEARCH_LIBS([pthread_create], [pthread],
+     [AC_DEFINE([HAVE_PTHREAD], [1],
+        [Define to 1 if <pthread.h> is there and pthread_create links.])
+      test "x$ac_cv_search_pthread_create" = "xnone required" ||
+        PTHREAD_LIBS=$ac_cv_search_pthread_create])
+   LIBS=$libredwg_save_LIBS])
+AC_SUBST([PTHREAD_LIBS])
 AC_C_BIGENDIAN
 AC_CHECK_HEADER_STDBOOL
 AX_INCLUDE_STRCASECMP
