@@ -1654,6 +1654,31 @@ copy_names (Dwg_Data *restrict dst, const Dwg_Data *restrict src,
   return 0;
 }
 
+/* Frees the names copy_names gave dst's copies from index first on that
+   have no data: a failure stops the copy before their data is copied, and
+   dwg_free_object frees nothing of an object without data. */
+static void
+copy_free_names (Dwg_Data *restrict dst, const BITCODE_BL first)
+{
+  BITCODE_BL i;
+  for (i = first; i < dst->num_objects; i++)
+    {
+      Dwg_Object *obj = &dst->object[i];
+      if (obj->tio.object)
+        continue;
+      if (dst->opts & DWG_OPTS_IN)
+        {
+          free (obj->dxfname);
+          obj->dxfname = NULL;
+        }
+      if (dst->opts & DWG_OPTS_INJSON)
+        {
+          free (obj->name);
+          obj->name = NULL;
+        }
+    }
+}
+
 /* Points dst's objects of a class, from index first on, at their class:
    adding a class may move dst->dwg_class. */
 static void
@@ -1704,6 +1729,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
   cdat.src = src;
   cdat.dst = dst;
   cdat.map = map;
+  first = dst->num_objects;
 
   /* Check every source object before dst changes. */
   src_index = (BITCODE_BL *)calloc (num_handles, sizeof (BITCODE_BL));
@@ -1757,7 +1783,6 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
 
   /* The copies and their handles, so that the walk can map references
      between them and recompute relative codes. */
-  first = dst->num_objects;
   for (i = 0; i < num_handles; i++)
     {
       const Dwg_Object *srcobj;
@@ -1813,6 +1838,7 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
 
 done:
   error |= cdat.error;
+  copy_free_names (dst, first);
   // classes added before a failure may have moved dst->dwg_class
   if (classes_moved)
     copy_point_at_classes (dst, 0);
