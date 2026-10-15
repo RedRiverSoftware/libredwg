@@ -7279,12 +7279,14 @@ dwg_encode_xdata (Bit_Chain *restrict dat, Dwg_Object_XRECORD *restrict _obj,
                                            rbuf->value.str.codepage)
                                      : NULL;
                     size_t destlen = dest ? strlen (dest) : 0;
-                    if (destlen > UINT16_MAX)
+                    // dwg_decode_xdata () reads a length above INT16_MAX
+                    // as negative and skips the string
+                    if (destlen > INT16_MAX)
                       {
                         LOG_WARN ("xdata[%u]: overlong string truncated "
                                   "(len=%" PRIuSIZE ")",
                                   j, destlen);
-                        destlen = UINT16_MAX;
+                        destlen = INT16_MAX;
                       }
                     bit_write_RS (dat, (BITCODE_RS)destlen);
                     bit_write_RC (dat, rbuf->value.str.codepage);

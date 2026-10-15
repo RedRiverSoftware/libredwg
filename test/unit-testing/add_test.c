@@ -3012,6 +3012,72 @@ test_non_ascii_text_r11 (void)
   return numfailed ();
 }
 
+/* An XRECORD string that becomes longer than INT16_MAX bytes in the
+   codepage is truncated to INT16_MAX, the most the reader takes: 9500
+   characters U+0234, 19000 bytes of UTF-8, are 66500 bytes of \U+0234 in
+   codepage 1252. Read back, the records after it are intact. */
+static int
+test_long_xrecord_string (void)
+{
+  const char *file = "add_long_xrecord_string.dwg";
+  const char *what = "long XRECORD string";
+  const int count = 9500;
+  const size_t len = 2 * (size_t)count;
+  Dwg_Data *dwg = dwg_new_Document (R_2004, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_DICTIONARY *dict;
+  Dwg_Object_XRECORD *xrecord;
+  BITCODE_RLL xrecord_handle;
+  char *str = (char *)malloc (len + 1);
+  const Dwg_Object *obj = NULL;
+  Dwg_Resbuf *rbuf;
+
+  failed = 0;
+  for (int i = 0; i < count; i++)
+    {
+      str[2 * i] = '\xC8';
+      str[(2 * i) + 1] = '\xB4';
+    }
+  str[len] = '\0';
+  dict = dwg_add_DICTIONARY (dwg, "LONGSTRING", NULL, 0);
+  xrecord = dwg_add_XRECORD (dict, "Strings");
+  dwg_add_XRECORD_string (xrecord, 1, (BITCODE_BS)len, str);
+  dwg_add_XRECORD_int16 (xrecord, 70, 1234);
+  dwg_add_XRECORD_string (xrecord, 1, 3, "end");
+  free (str);
+  xrecord_handle = dwg_obj_generic_handlevalue (xrecord);
+
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    if (read.object[i].fixedtype == DWG_TYPE_XRECORD
+        && read.object[i].handle.value == xrecord_handle)
+      obj = &read.object[i];
+  rbuf = obj ? obj->tio.object->tio.XRECORD->xdata : NULL;
+  if (!rbuf || rbuf->type != 1 || rbuf->value.str.size != INT16_MAX
+      || !rbuf->value.str.u.data
+      || memcmp (rbuf->value.str.u.data, "\\U+0234", 7)
+      || memcmp (&rbuf->value.str.u.data[INT16_MAX - 7], "\\U+0234", 7))
+    fail ("%s: first string read back with %d bytes", what,
+          rbuf && rbuf->type == 1 ? (int)rbuf->value.str.size : -1);
+  else if (!(rbuf = rbuf->nextrb) || rbuf->type != 70
+           || rbuf->value.i16 != 1234)
+    fail ("%s: the int16 after it read back as %d", what,
+          rbuf ? (int)rbuf->type : -1);
+  else if (!(rbuf = rbuf->nextrb) || rbuf->type != 1
+           || rbuf->value.str.size != 3 || !rbuf->value.str.u.data
+           || memcmp (rbuf->value.str.u.data, "end", 3))
+    fail ("%s: the last string read back as %d", what,
+          rbuf ? (int)rbuf->type : -1);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("%s truncated to INT16_MAX, the records after it intact", what);
+      unlink (file);
+    }
+  return numfailed ();
+}
+
 /* r2007+ documents built with the add API keep 8-bit UTF-8 too. */
 static int
 test_non_ascii_text_r2007 (void)
@@ -3522,6 +3588,7 @@ main (int argc, char *argv[])
   error += test_non_ascii_text (R_2000);
   error += test_non_ascii_text (R_2004);
   error += test_non_ascii_text_r11 ();
+  error += test_long_xrecord_string ();
   error += test_non_ascii_text_r2007 ();
 
 #ifndef DISABLE_DXF
