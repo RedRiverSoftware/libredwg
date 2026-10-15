@@ -417,6 +417,7 @@ if USE_WRITE
 check_minimal += add_test$(EXEEXT)
 check_minimal += dynblocks_test$(EXEEXT)
 check_minimal += dynblock_eval_test$(EXEEXT)
+check_minimal += dynblock_insert_test$(EXEEXT)
 check_minimal += fields_test$(EXEEXT)
 check_minimal += summaryinfo_test$(EXEEXT)
 check_minimal += copy_test$(EXEEXT)

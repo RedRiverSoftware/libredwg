@@ -953,7 +953,8 @@ copy_into_dst (Block_Copy *restrict bc, Dwg_Copy_Map *restrict map)
  * The API
  */
 
-/* The object of src that src_block is the BLOCK_HEADER of, or NULL. */
+/* The object of src that src_block is the BLOCK_HEADER of, or NULL. A copy
+   of a block's struct links to the block's object too, but isn't it. */
 static const Dwg_Object *
 block_object (const Dwg_Data *src, const Dwg_Object_BLOCK_HEADER *src_block)
 {
@@ -962,7 +963,8 @@ block_object (const Dwg_Data *src, const Dwg_Object_BLOCK_HEADER *src_block)
     return NULL;
   obj = &src->object[src_block->parent->objid];
   if (obj->fixedtype != DWG_TYPE_BLOCK_HEADER
-      || obj->tio.object != src_block->parent)
+      || obj->tio.object != src_block->parent
+      || obj->tio.object->tio.BLOCK_HEADER != src_block)
     return NULL;
   return obj;
 }
