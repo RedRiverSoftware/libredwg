@@ -130,7 +130,7 @@ test_add (const Dwg_Object_Type type, const char *restrict file,
   Dwg_Object_BLOCK_HEADER *hdr;
   int n_failed;
   char dwgfile[256];
-  char what[96];
+  char what[sizeof (dwgfile) + 64];
   int todo = 0;
 
   strcpy (dwgfile, file);
@@ -1632,7 +1632,8 @@ test_entity_count (const Dwg_Version_Type version)
   return numfailed ();
 }
 
-#ifndef DISABLE_JSON
+// dwg_write_json () is in out_json.c, which needs DXF
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
 /* The JSON importer counts the entities it reads. */
 static int
 test_entity_count_json (void)
@@ -1782,7 +1783,6 @@ test_entity_count_read (void)
   failed = 0;
   for (int i = 0; i < ARRAY_SIZE (files); i++)
     {
-      const char *ext = strrchr (files[i], '.');
       int error;
       snprintf (what, sizeof (what), "entity_count: read %s", files[i]);
       if (!test_data_file (files[i], path, sizeof (path)))
@@ -1792,8 +1792,12 @@ test_entity_count_read (void)
         }
       memset (&dwg, 0, sizeof (dwg));
       dwg.opts = tracelevel;
-      error = strcmp (ext, ".dwg") ? dxf_read_file (path, &dwg)
-                                   : dwg_read_file (path, &dwg);
+#ifndef DISABLE_DXF
+      if (strcmp (strrchr (files[i], '.'), ".dwg"))
+        error = dxf_read_file (path, &dwg);
+      else
+#endif
+        error = dwg_read_file (path, &dwg);
       if (error >= DWG_ERR_CRITICAL)
         fail ("%s: error 0x%x", what, error);
       else
@@ -2199,6 +2203,86 @@ test_attrib_realloc (const int at)
     }
   dwg_free (dwg);
   free (dwg);
+  return numfailed ();
+}
+
+/* ATTRIBs added to a document read from a file are linked as AutoCAD
+   links them too: an INSERT's first, its second, and the next INSERT's
+   with an object added in between, in the document and in the file written
+   from it. */
+static int
+test_attrib_links_read (const Dwg_Version_Type version)
+{
+  const char *vername = version >= R_2004 ? "r2004" : "r2000";
+  char file[40], file2[48], what[96];
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms;
+  Dwg_Entity_INSERT *ins[2] = { NULL, NULL };
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p = { 10.0, 5.0, 0.0 };
+  const BITCODE_BL num_attribs[2] = { 2, 1 };
+  BITCODE_H b1;
+  BITCODE_RLL h_b1, h_ins[2] = { 0, 0 };
+  int error;
+
+  failed = 0;
+  snprintf (file, sizeof (file), "add_attribs_read_%s.dwg", vername);
+  if (write_and_read (new_document_with_block (version), file, &read)
+      >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  b1 = dwg_find_tablehandle (&read, "B1", "BLOCK");
+  h_b1 = b1 ? b1->absolute_ref : 0;
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (&read));
+  if (ms)
+    ins[0] = dwg_add_INSERT (ms, &o, "B1", 1.0, 1.0, 1.0, 0.0);
+  if (!h_b1 || !ins[0]
+      || !dwg_add_ATTRIB (ins[0], 1.0, 0, &o, "TAG1", "one"))
+    {
+      fail ("attrib_links_read %s: adding the first ATTRIB failed", vername);
+      dwg_free (&read);
+      return numfailed ();
+    }
+  h_ins[0] = entity_handle (&read, ins[0]);
+  snprintf (what, sizeof (what), "attrib_links_read %s: the first ATTRIB",
+            vername);
+  check_attrib_links (what, &read, h_ins[0], h_b1, 1);
+  // an object between this INSERT's ATTRIBs and the next INSERT
+  if (!dwg_add_ATTRIB (ins[0], 1.0, 0, &p, "TAG2", "two")
+      || !dwg_add_LAYER (&read, "BETWEEN")
+      || !(ins[1] = dwg_add_INSERT (ms, &p, "B1", 1.0, 1.0, 1.0, 0.0))
+      || !dwg_add_ATTRIB (ins[1], 1.0, 0, &o, "TAG1", "three"))
+    fail ("attrib_links_read %s: adding more failed", vername);
+  h_ins[1] = entity_handle (&read, ins[1]);
+  for (int i = 0; i < 2; i++)
+    {
+      snprintf (what, sizeof (what), "attrib_links_read %s: INSERT %d",
+                vername, i);
+      check_attrib_links (what, &read, h_ins[i], h_b1, num_attribs[i]);
+    }
+
+  snprintf (file2, sizeof (file2), "add_attribs_read_%s_2.dwg", vername);
+  unlink (file2);
+  error = dwg_write_file (file2, &read);
+  dwg_free (&read);
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("attrib_links_read %s: dwg_write_file 0x%x", vername, error);
+  else if ((error = dwg_read_file (file2, &read)) >= DWG_ERR_CRITICAL)
+    fail ("attrib_links_read %s: dwg_read_file 0x%x", vername, error);
+  else
+    for (int i = 0; i < 2; i++)
+      {
+        snprintf (what, sizeof (what),
+                  "attrib_links_read %s: read INSERT %d", vername, i);
+        check_attrib_links (what, &read, h_ins[i], h_b1, num_attribs[i]);
+      }
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      unlink (file);
+      unlink (file2);
+    }
   return numfailed ();
 }
 
@@ -2716,7 +2800,7 @@ main (int argc, char *argv[])
   error += test_r2000_insert_into_read (2);
   error += test_entity_count (R_2000);
   error += test_entity_count (R_2004);
-#ifndef DISABLE_JSON
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
   error += test_entity_count_json ();
 #endif
 #ifndef DISABLE_DXF
@@ -2733,6 +2817,8 @@ main (int argc, char *argv[])
   error += test_attrib_realloc (2);
   error += test_attrib_interleaved (R_2000);
   error += test_attrib_interleaved (R_2004);
+  error += test_attrib_links_read (R_2000);
+  error += test_attrib_links_read (R_2004);
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

@@ -25886,7 +25886,15 @@ add_attrib_links (Dwg_Entity_INSERT *restrict insert,
       insert->attribs = (BITCODE_H *)malloc (sizeof (BITCODE_H));
       insert->attribs[0]
           = dwg_add_handleref (dwg, 3, attobj->handle.value, NULL);
+      // the only ATTRIB yet: no link before or after it, where
+      // in_postprocess_handles may have left neighbours by handle
+      replace_entity_link (&attobj->tio.entity->prev_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
+      replace_entity_link (&attobj->tio.entity->next_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
+      attobj->tio.entity->nolinks = 0;
       IN_POSTPROCESS_SEQEND (obj, insert->num_owned, insert->attribs);
+      seqend = obj;
     }
   else
     {
@@ -25907,10 +25915,16 @@ add_attrib_links (Dwg_Entity_INSERT *restrict insert,
       replace_entity_link (
           &attobj->tio.entity->prev_entity,
           dwg_add_handleref (dwg, 4, lastobj->handle.value, attobj));
+      replace_entity_link (&attobj->tio.entity->next_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
       attobj->tio.entity->nolinks = 0;
-      seqend = dwg_ref_object (dwg, insert->seqend);
       IN_POSTPROCESS_SEQEND (seqend, insert->num_owned, insert->attribs);
     }
+  // The INSERT's sequence ends here: in_postprocess_handles links the next
+  // entity added to the last one added, which would then be this ATTRIB
+  // (r13-r2000), linking on to an entity outside its INSERT. A SEQEND it
+  // links to nothing.
+  insobj->parent->prev_entity_index = seqend->index;
   return insert;
 }
 
