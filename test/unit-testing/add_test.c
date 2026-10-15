@@ -1400,6 +1400,154 @@ test_r2004_write (void)
   return numfailed ();
 }
 
+/* A text in a document built with the add API, written and read back. */
+typedef struct
+{
+  const char *value; // the TEXT's value, the ATTDEF's and ATTRIB's tag
+  Dwg_Object_Type type;
+  BITCODE_2DPOINT ins_pt, alignment_pt;
+  BITCODE_BS horiz_alignment, vert_alignment;
+} Aligned_Text;
+
+/* TEXT, ATTDEF and ATTRIB keep their alignment points when written. The
+   encoder works out dataflags for a document built with the add API, and
+   AutoCAD leaves the alignment point out (bit 0x02) only when it is (0,0),
+   reading it back as such: not when it is the insertion point. */
+static int
+test_text_alignment (const Dwg_Version_Type version)
+{
+  const char *vername = version >= R_2004 ? "r2004" : "r2000";
+  const Aligned_Text texts[] = {
+    // both points where AutoCAD puts them for an empty centred text; the
+    // value only names the text, to find it again
+    { "centred", DWG_TYPE_TEXT, { 7.0, 3.0 }, { 7.0, 3.0 }, 1, 0 },
+    { "right", DWG_TYPE_TEXT, { 1.25, -6.0 }, { 2.0, -6.0 }, 2, 0 },
+    // middle-centred on the base point
+    { "middle", DWG_TYPE_TEXT, { -2.25, -1.25 }, { 0.0, 0.0 }, 1, 2 },
+    // as dwg_add_TEXT () makes it
+    { "left", DWG_TYPE_TEXT, { 5.0, 5.0 }, { 0.0, 0.0 }, 0, 0 },
+    { "ATTDEF", DWG_TYPE_ATTDEF, { 4.0, 2.0 }, { 4.0, 2.0 }, 1, 0 },
+    { "ATTRIB", DWG_TYPE_ATTRIB, { 14.0, 12.0 }, { 14.0, 12.0 }, 4, 0 },
+  };
+  const unsigned num_texts = sizeof (texts) / sizeof (texts[0]);
+  char file[40];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms, *blk;
+  Dwg_Entity_INSERT *insert;
+  const dwg_point_3d at = { 10.0, 10.0, 0.0 };
+  unsigned found = 0;
+
+  failed = 0;
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  blk = dwg_add_BLOCK_HEADER (dwg, "T");
+  dwg_add_BLOCK (blk, "T");
+  for (unsigned i = 0; i < num_texts; i++)
+    {
+      const Aligned_Text *t = &texts[i];
+      const dwg_point_3d pt = { t->ins_pt.x, t->ins_pt.y, 0.0 };
+      if (t->type == DWG_TYPE_TEXT)
+        {
+          Dwg_Entity_TEXT *_obj = dwg_add_TEXT (ms, t->value, &pt, 1.0);
+          if (!_obj)
+            continue;
+          _obj->alignment_pt = t->alignment_pt;
+          _obj->horiz_alignment = t->horiz_alignment;
+          _obj->vert_alignment = t->vert_alignment;
+        }
+      else if (t->type == DWG_TYPE_ATTDEF)
+        {
+          Dwg_Entity_ATTDEF *_obj
+              = dwg_add_ATTDEF (blk, 1.0, 0, "Prompt", &pt, t->value, "");
+          if (!_obj)
+            continue;
+          _obj->alignment_pt = t->alignment_pt;
+          _obj->horiz_alignment = t->horiz_alignment;
+          _obj->vert_alignment = t->vert_alignment;
+        }
+    }
+  dwg_add_ENDBLK (blk);
+  insert = dwg_add_INSERT (ms, &at, "T", 1.0, 1.0, 1.0, 0.0);
+  for (unsigned i = 0; insert && i < num_texts; i++)
+    {
+      const Aligned_Text *t = &texts[i];
+      const dwg_point_3d pt = { t->ins_pt.x, t->ins_pt.y, 0.0 };
+      Dwg_Entity_ATTRIB *_obj;
+      if (t->type != DWG_TYPE_ATTRIB)
+        continue;
+      _obj = dwg_add_ATTRIB (insert, 1.0, 0, &pt, t->value, "value");
+      if (!_obj)
+        continue;
+      _obj->alignment_pt = t->alignment_pt;
+      _obj->horiz_alignment = t->horiz_alignment;
+      _obj->vert_alignment = t->vert_alignment;
+    }
+
+  snprintf (file, sizeof (file), "add_text_alignment_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    {
+      const Dwg_Object *obj = &read.object[i];
+      const char *value = NULL;
+      const BITCODE_2DPOINT *ins_pt = NULL, *alignment_pt = NULL;
+      BITCODE_RC dataflags = 0;
+      const Aligned_Text *t = NULL;
+      if (obj->fixedtype == DWG_TYPE_TEXT)
+        {
+          const Dwg_Entity_TEXT *_obj = obj->tio.entity->tio.TEXT;
+          value = _obj->text_value;
+          ins_pt = &_obj->ins_pt;
+          alignment_pt = &_obj->alignment_pt;
+          dataflags = _obj->dataflags;
+        }
+      else if (obj->fixedtype == DWG_TYPE_ATTDEF)
+        {
+          const Dwg_Entity_ATTDEF *_obj = obj->tio.entity->tio.ATTDEF;
+          value = _obj->tag;
+          ins_pt = &_obj->ins_pt;
+          alignment_pt = &_obj->alignment_pt;
+          dataflags = _obj->dataflags;
+        }
+      else if (obj->fixedtype == DWG_TYPE_ATTRIB)
+        {
+          const Dwg_Entity_ATTRIB *_obj = obj->tio.entity->tio.ATTRIB;
+          value = _obj->tag;
+          ins_pt = &_obj->ins_pt;
+          alignment_pt = &_obj->alignment_pt;
+          dataflags = _obj->dataflags;
+        }
+      for (unsigned k = 0; value && k < num_texts; k++)
+        if (texts[k].type == obj->fixedtype && !strcmp (texts[k].value, value))
+          t = &texts[k];
+      if (!t)
+        continue;
+      found++;
+      if (ins_pt->x == t->ins_pt.x && ins_pt->y == t->ins_pt.y
+          && alignment_pt->x == t->alignment_pt.x
+          && alignment_pt->y == t->alignment_pt.y
+          && !(dataflags & 0x02)
+                 == (t->alignment_pt.x != 0.0 || t->alignment_pt.y != 0.0))
+        ok ("text_alignment %s: %s %s read back at (%g, %g), alignment point "
+            "(%g, %g), dataflags 0x%x",
+            vername, obj->name, t->value, ins_pt->x, ins_pt->y,
+            alignment_pt->x, alignment_pt->y, (unsigned)dataflags);
+      else
+        fail ("text_alignment %s: %s %s read back at (%g, %g), alignment "
+              "point (%g, %g), dataflags 0x%x; expected (%g, %g), (%g, %g)",
+              vername, obj->name, t->value, ins_pt->x, ins_pt->y,
+              alignment_pt->x, alignment_pt->y, (unsigned)dataflags,
+              t->ins_pt.x, t->ins_pt.y, t->alignment_pt.x, t->alignment_pt.y);
+    }
+  if (found != num_texts)
+    fail ("text_alignment %s: %u of %u texts read back", vername, found,
+          num_texts);
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
 /* r2000: each block's entity chain must end with an explicit null next
    link. With nolinks set, an entity claims its neighbours are at
    handle - 1 and handle + 1; AutoCAD refuses a last entity that does. */
@@ -3318,6 +3466,8 @@ main (int argc, char *argv[])
   error += test_names ();
   error += test_api_version ();
   error += test_r2004_write ();
+  error += test_text_alignment (R_2000);
+  error += test_text_alignment (R_2004);
   error += test_r2000_entity_links ();
   error += test_r2000_insert_into_read (0);
   error += test_r2000_insert_into_read (1);
