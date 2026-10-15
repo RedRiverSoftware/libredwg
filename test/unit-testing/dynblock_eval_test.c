@@ -4902,13 +4902,22 @@ enum
 {
   M_CENTRED,     // ATTDEF centred on the middle
   M_CENTRED_90,  // the same, turned a quarter turn
+  M_CENTRED_30,  // ATTDEF centred on the baseline, turned 30 degrees
+  M_RIGHT,       // ATTDEF right on the top
+  M_MIDDLE,      // ATTDEF middle
   M_LEFT,        // ATTDEF left on the baseline
+  M_BOTTOM_LEFT, // ATTDEF left on the bottom
+  M_MIDDLE_LEFT, // ATTDEF left on the middle
+  M_TOP_LEFT,    // ATTDEF left on the top
   M_CONSTANT,    // constant ATTDEF, centred on the middle
   M_ALIGNED,     // ATTDEF aligned
   M_FIT,         // ATTDEF fit
+  M_UNKNOWN_H,   // ATTDEF of horizontal alignment 6, unknown
+  M_UNKNOWN_V,   // ATTDEF centred, of vertical alignment 4, unknown
   M_TEXT,        // TEXT centred on the middle
   M_UNMEASURED,  // MTEXT, the definition's extents unmeasured
   M_MEASURED,    // MTEXT, the definition's extents measured
+  M_NAN,         // MTEXT, the definition's extents not a number
   NUM_MEASURED
 };
 
@@ -4923,8 +4932,20 @@ measured_entity (Dwg_Object *obj, const int k)
       return line_to_attdef (obj, 1, 2, 0.0, 1.0, 2.0, 2.0, 2.5);
     case M_CENTRED_90:
       return line_to_attdef (obj, 1, 2, M_PI / 2.0, 5.5, 1.0, 5.0, 2.0);
+    case M_CENTRED_30:
+      return line_to_attdef (obj, 1, 0, M_PI / 6.0, 11.134, 1.5, 12.0, 2.0);
+    case M_RIGHT:
+      return line_to_attdef (obj, 2, 3, 0.0, 1.0, 14.0, 3.0, 15.0);
+    case M_MIDDLE:
+      return line_to_attdef (obj, 4, 0, 0.0, 1.0, 16.0, 2.0, 16.5);
     case M_LEFT:
       return line_to_attdef (obj, 0, 0, 0.0, 1.0, 4.0, 0.0, 0.0);
+    case M_BOTTOM_LEFT:
+      return line_to_attdef (obj, 0, 1, 0.0, 1.0, 18.0, 1.0, 17.8);
+    case M_MIDDLE_LEFT:
+      return line_to_attdef (obj, 0, 2, 0.0, 1.0, 20.0, 1.0, 20.5);
+    case M_TOP_LEFT:
+      return line_to_attdef (obj, 0, 3, 0.0, 1.0, 22.0, 1.0, 23.0);
     case M_CONSTANT:
       if (!line_to_attdef (obj, 1, 2, 0.0, 1.0, 6.0, 2.0, 6.5))
         return 0;
@@ -4934,6 +4955,10 @@ measured_entity (Dwg_Object *obj, const int k)
       return line_to_attdef (obj, 3, 0, 0.0, 1.0, 8.0, 3.0, 8.0);
     case M_FIT:
       return line_to_attdef (obj, 5, 0, 0.0, 1.0, 12.0, 3.0, 12.0);
+    case M_UNKNOWN_H:
+      return line_to_attdef (obj, 6, 0, 0.0, 1.0, 24.0, 2.0, 24.0);
+    case M_UNKNOWN_V:
+      return line_to_attdef (obj, 1, 4, 0.0, 1.0, 26.0, 2.0, 26.5);
     case M_TEXT:
       if (!line_to_text (obj, "text"))
         return 0;
@@ -4948,6 +4973,8 @@ measured_entity (Dwg_Object *obj, const int k)
       return line_to_mtext (obj, -1.0, -1.0);
     case M_MEASURED:
       return line_to_mtext (obj, 4.0, 1.0);
+    case M_NAN:
+      return line_to_mtext (obj, (double)NAN, (double)NAN);
     default:
       return 0;
     }
@@ -4955,16 +4982,20 @@ measured_entity (Dwg_Object *obj, const int k)
 
 /* What AutoCAD measures from laid-out text matches as equivalent: an
    attribute definition's insertion point moved along the baseline, where
-   it is justified so that its alignment point places it, and an MTEXT's
-   extents where one side has none measured. Text of the Trees definition
-   and of its 4 placements' blocks, made from LINEs: in AutoCAD's blocks,
-   R1's 2 centred attribute definitions moved along the baseline, and the
-   unmeasured MTEXT measured and the measured one unmeasured, match; R2's
-   centred one moved across the baseline differs, and its measured MTEXT
-   with extents 0, as AutoCAD writes them unmeasured too, matches; R3's
-   moves differ for an alignment point, a left, a constant, an aligned and
-   a fit attribute definition and a TEXT; and C145's MTEXT measured
-   differently differs. */
+   it is justified centre, right or middle, so that its alignment point
+   places it, and an MTEXT's extents where one side has none measured.
+   Text of the Trees definition and of its 4 placements' blocks, made from
+   LINEs: in AutoCAD's blocks, R1's 3 centred attribute definitions (at 0,
+   90 and 30 degrees), its right and its middle one moved along the
+   baseline, and the unmeasured MTEXT measured and the measured one
+   unmeasured, match; R2's centred one moved across the baseline differs,
+   and its measured MTEXT with extents 0, as AutoCAD writes them
+   unmeasured too, matches; R3's moves differ for an alignment point, 4
+   left attribute definitions (on the baseline, bottom, middle and top), a
+   constant, an aligned, a fit, one of horizontal alignment 6 and one of
+   vertical alignment 4, and a TEXT, and so do its MTEXT extents infinite
+   against the definition's -1 and -1 against the definition's NaN; and
+   C145's MTEXT measured differently differs. */
 static int
 test_check_measured (Dwg_Data *dwg)
 {
@@ -5013,6 +5044,16 @@ test_check_measured (Dwg_Data *dwg)
       ->tio.entity->tio.ATTDEF->ins_pt.y
       += 0.4;
   {
+    Dwg_Entity_ATTDEF *a
+        = rep_entity (dwg, 0xCFF7, idx[M_CENTRED_30])->tio.entity->tio.ATTDEF;
+    a->ins_pt.x += 0.4 * cos (M_PI / 6.0);
+    a->ins_pt.y += 0.4 * sin (M_PI / 6.0);
+    rep_entity (dwg, 0xCFF7, idx[M_RIGHT])->tio.entity->tio.ATTDEF->ins_pt.x
+        -= 0.4;
+    rep_entity (dwg, 0xCFF7, idx[M_MIDDLE])->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+  }
+  {
     Dwg_Entity_MTEXT *m
         = rep_entity (dwg, 0xCFF7, idx[M_UNMEASURED])->tio.entity->tio.MTEXT;
     m->extents_width = 5.0;
@@ -5038,6 +5079,15 @@ test_check_measured (Dwg_Data *dwg)
     a->alignment_pt.x += 0.4;
     rep_entity (dwg, 0xD49D, idx[M_LEFT])->tio.entity->tio.ATTDEF->ins_pt.x
         += 0.4;
+    for (int k = M_BOTTOM_LEFT; k <= M_TOP_LEFT; k++)
+      rep_entity (dwg, 0xD49D, idx[k])->tio.entity->tio.ATTDEF->ins_pt.x
+          += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_UNKNOWN_H])
+        ->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
+    rep_entity (dwg, 0xD49D, idx[M_UNKNOWN_V])
+        ->tio.entity->tio.ATTDEF->ins_pt.x
+        += 0.4;
     rep_entity (dwg, 0xD49D, idx[M_CONSTANT])
         ->tio.entity->tio.ATTDEF->ins_pt.x
         += 0.4;
@@ -5047,6 +5097,12 @@ test_check_measured (Dwg_Data *dwg)
         += 0.4;
     rep_entity (dwg, 0xD49D, idx[M_TEXT])->tio.entity->tio.TEXT->ins_pt.x
         += 0.4;
+    // extents that aren't finite on one side, unmeasured on the other
+    rep_entity (dwg, 0xD49D, idx[M_UNMEASURED])
+        ->tio.entity->tio.MTEXT->extents_width
+        = (double)INFINITY;
+    rep_entity (dwg, 0xD49D, idx[M_NAN])->tio.entity->tio.MTEXT->extents_width
+        = -1.0;
   }
   // C145's block
   rep_entity (dwg, 0xB6AC, idx[M_MEASURED])
@@ -5061,9 +5117,10 @@ test_check_measured (Dwg_Data *dwg)
       return 1;
     }
   c = find_check (report, 0xC8E0, 0xCFF7);
-  if (c && c->status == MATCH && !c->num_differing && c->num_equivalent == 4)
-    OK ("check measured: R1 matches 2 attribute definitions moved along "
-        "the baseline and 2 MTEXTs measured on one side");
+  if (c && c->status == MATCH && !c->num_differing && c->num_equivalent == 7)
+    OK ("check measured: R1 matches 5 attribute definitions moved along "
+        "the baseline, 3 centred, at 0, 90 and 30 degrees, a right and a "
+        "middle one, and 2 MTEXTs measured on one side");
   else
     {
       fail ("check measured R1: status %d, %u differ, %u equivalent, %s",
@@ -5088,10 +5145,12 @@ test_check_measured (Dwg_Data *dwg)
       failures++;
     }
   c = find_check (report, 0xC8E2, 0xD49D);
-  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 6
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 13
       && !c->num_equivalent)
-    OK ("check measured: R3 finds an alignment point, a left, a constant, "
-        "an aligned and a fit attribute definition and a TEXT moved: %s",
+    OK ("check measured: R3 finds an alignment point, 4 left (baseline, "
+        "bottom, middle, top), a constant, an aligned, a fit and 2 unknown "
+        "attribute definitions and a TEXT moved, and 2 MTEXTs whose extents "
+        "aren't finite on one side: %s",
         c->reason ? c->reason : "");
   else
     {
