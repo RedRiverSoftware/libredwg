@@ -70,8 +70,9 @@ typedef struct _dwg_copy_unresolved
    map keeps its target when src == dst. Otherwise it becomes a NULL handle
    and is reported in *unresolvedp, an array of *num_unresolvedp entries
    that the caller frees. A handle with code 0 is a value, not a reference
-   (SORTENTSTABLE's sort keys): it is mapped when it names a copied object,
-   and otherwise keeps its value and, between documents, is reported too.
+   (SORTENTSTABLE's sort keys): it is mapped when map has an entry for it,
+   a copy or not, and otherwise keeps its value and, between documents, is
+   reported too.
 
    The same goes for a copy's owner, reactors and extension dictionary when
    they are not copied. Within one document a copy keeps its original's, so
@@ -81,33 +82,44 @@ typedef struct _dwg_copy_unresolved
    drops it: a NULL handle and, from r2004, is_xdic_missing set.
 
    Raw bits that the encoder would write unchanged (unknown bits, raw EED)
-   are cleared, so the copies are encoded from their fields. Variable-type
-   classes the copies need are added to dst. Adding the copies to their
-   owners (a block's entity list, a dictionary) is the caller's, and so is
-   the r13-r2000 entity chain (prev_entity, next_entity) of copied entities
-   whose neighbours were not copied. The copies keep their sources'
-   nolinks, and while it is set the encoder writes no prev_entity and
-   next_entity, so a caller that links a copy into a chain clears it.
+   are cleared, so the copies are encoded from their fields. An EED group
+   read from a file, which has raw bytes, is left out when its items don't
+   hold all of those bytes: when the decoder failed on one of them, or left
+   unread a string that claims more bytes than the group has left, and so
+   the items after it. So is a group whose first item has no data.
+   Variable-type classes the copies need are added to dst. Adding the
+   copies to their owners (a block's entity list, a dictionary) is the
+   caller's, and so is the r13-r2000 entity chain (prev_entity,
+   next_entity) of copied entities whose neighbours were not copied. The
+   copies keep their sources' nolinks, and while it is set the encoder
+   writes no prev_entity and next_entity, so a caller that links a copy
+   into a chain clears it.
 
    The copy walks the specs, and so runs their unguarded statements again,
    some of which derive fields from others: from r2000, LAYER's frozen, off,
    frozen_in_new, locked, plotflag, linewt and flag are derived from flag0.
    The sources need their fields as decoded from a DWG file. A LAYER made
-   with the add API (flag0 0) loses its plotflag and linewt in the copy, and
-   one imported from DXF its frozen and locked.
+   with the add API or imported from DXF can have flags its flag0 doesn't
+   hold, and its copy loses them: with flag0 0, frozen, off, frozen_in_new,
+   locked, plotflag and linewt are all 0 in the copy.
 
-   src and dst must be r13 to r2004 documents of the same version and
-   codepage. Objects whose class LibreDWG cannot decode (UNKNOWN_ENT,
-   UNKNOWN_OBJ) are refused, as is a handle that is already in map. A
-   refusal changes nothing.
+   src and dst must be r13 to r2004 documents (R_13b1 to R_2004) of the same
+   version and codepage. Objects whose class LibreDWG cannot decode
+   (UNKNOWN_ENT, UNKNOWN_OBJ) are refused, as is a handle that is already in
+   map. A refusal changes nothing.
 
    Returns 0, or DWG_ERR_* bits. From DWG_ERR_CRITICAL up: a refusal, also
-   of a NULL dst, src, map or handles (DWG_ERR_INTERNALERROR), or an
-   allocation failure, after which dst keeps the copies made so far. Below
-   it, the copies are made with some data left out:
+   of a NULL dst, src or map, or of NULL handles when num_handles isn't 0
+   (DWG_ERR_INTERNALERROR); or an allocation failure (DWG_ERR_OUTOFMEM),
+   after which dst keeps the objects added so far, some of them incomplete,
+   but none pointing into src's data, so that both documents can be freed.
+   Below it, the copies are made, with some data left out:
    DWG_ERR_VALUEOUTOFBOUNDS for an array, or 3DSOLID ACIS data, that could
    not be copied and is NULL in the copy, and DWG_ERR_INVALIDEED for an EED
-   group, whose items could not be decoded, left out of a copy. */
+   group left out of a copy. DWG_ERR_VALUEOUTOFBOUNDS also comes from a
+   source whose class_version is above 10 (IMAGE, IMAGEDEF,
+   IMAGEDEF_REACTOR, GEODATA, RASTERVARIABLES): the decoder stops reading
+   such an object there, so the copy of one it read leaves nothing out. */
 int dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
                       const BITCODE_RLL *restrict handles,
                       const BITCODE_BL num_handles, Dwg_Copy_Map *restrict map,

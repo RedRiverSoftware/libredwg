@@ -24,12 +24,12 @@ if(WIN32)
   set_tests_properties(bits_test PROPERTIES FIXTURES_SETUP ${redwg}.dll)
 endif()
 
+# hash_test includes hash.c, to fail its allocations
 add_executable(hash_test
   hash_test.c
   ../../src/bits.c
   ../../src/logging.c
   ../../src/codepages.c
-  ../../src/hash.c
   ../../src/classes.c
   tests_common.h)
 #set_property(TARGET hash_test PROPERTY LINK_LIBRARIES -lm ${CMAKE_THREAD_LIBS_INIT})
@@ -181,5 +181,8 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     tests_common.h)
   if(NOT MSVC)
     add_test(copy_test ${TARGET_SYSTEM_EMULATOR} copy_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds test/test-data
+    set_tests_properties(copy_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
   endif()
 endif(NOT LIBREDWG_DISABLE_WRITE)

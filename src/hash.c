@@ -40,6 +40,11 @@ hash_new (uint64_t size)
     size <<= 1U;
   hash->array = (struct _hashbucket *)calloc (
       size, sizeof (struct _hashbucket)); // key+value pairs
+  if (!hash->array)
+    {
+      free (hash);
+      return NULL;
+    }
   hash->elems = 0;
   hash->size = size;
   return hash;
