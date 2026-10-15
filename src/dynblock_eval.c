@@ -871,8 +871,8 @@ block_representation (const Dwg_Data *dwg, const Dwg_Object *insert)
 
 /* Reads the values of the placement at insert_handle, as
    dwg_dynblock_get_values (). *def_handlep gets the definition the
-   placement names once it is found, also when reading the definition or a
-   value then fails. */
+   placement names as soon as it is found, also when reading the stored
+   values or the definition then fails. */
 static int
 placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
                   BITCODE_RLL *def_handlep, Dwg_DynValue **valuesp,
@@ -910,6 +910,7 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
         }
       def_handle
           = ref_handle (repdata->tio.object->tio.BLOCKREPRESENTATION->block);
+      *def_handlep = def_handle;
       data = dict_item (dwg, dict_item (dwg, rep, "AppDataCache"),
                         "ACAD_ENHANCEDBLOCKDATA");
       if (!data || data->fixedtype != DWG_TYPE_DICTIONARY)
@@ -922,9 +923,11 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
         }
     }
   else
-    // a placement at the defaults draws the definition itself
-    def_handle = ref_handle (placement_block (insert));
-  *def_handlep = def_handle;
+    {
+      // a placement at the defaults draws the definition itself
+      def_handle = ref_handle (placement_block (insert));
+      *def_handlep = def_handle;
+    }
   error = definition_params (dwg, def_handle, &list, &parametric, reason,
                              reason_size);
   if (error)

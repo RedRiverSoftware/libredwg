@@ -3666,25 +3666,47 @@ set_btag (Dwg_Data *dwg, const BITCODE_RLL blk, const BITCODE_RLL def)
   return 0;
 }
 
+/* The AppDataCache DICTIONARY of placement insert, or NULL. */
+static Dwg_Object *
+app_data_cache (Dwg_Data *dwg, const BITCODE_RLL insert)
+{
+  Dwg_Object *obj = dwg_resolve_handle (dwg, insert);
+  if (!obj || obj->supertype != DWG_SUPERTYPE_ENTITY)
+    return NULL;
+  return dict_entry (
+      dwg,
+      dict_entry (dwg,
+                  dwg_ref_object (dwg, obj->tio.entity->xdicobjhandle),
+                  "AcDbBlockRepresentation"),
+      "AppDataCache");
+}
+
+/* The name placement insert's AppDataCache lists its
+   ACAD_ENHANCEDBLOCKDATA by, or NULL. */
+static char *
+enhanced_data_name (Dwg_Data *dwg, const BITCODE_RLL insert)
+{
+  Dwg_Object *cache = app_data_cache (dwg, insert);
+  const Dwg_Object_DICTIONARY *_cache;
+  if (!cache || cache->fixedtype != DWG_TYPE_DICTIONARY)
+    return NULL;
+  _cache = cache->tio.object->tio.DICTIONARY;
+  for (BITCODE_BL i = 0; _cache->texts && i < _cache->numitems; i++)
+    if (_cache->texts[i]
+        && !strcmp (_cache->texts[i], "ACAD_ENHANCEDBLOCKDATA"))
+      return _cache->texts[i];
+  return NULL;
+}
+
 /* The XRECORD of a placement's stored values for the graph node with node
    id nodeid, or NULL. */
 static Dwg_Object_XRECORD *
 stored_value (Dwg_Data *dwg, const BITCODE_RLL insert, const BITCODE_BL nodeid)
 {
-  Dwg_Object *obj = dwg_resolve_handle (dwg, insert);
-  Dwg_Object *data;
+  Dwg_Object *obj;
+  Dwg_Object *data
+      = dict_entry (dwg, app_data_cache (dwg, insert), "ACAD_ENHANCEDBLOCKDATA");
   char key[16];
-  if (!obj || obj->supertype != DWG_SUPERTYPE_ENTITY)
-    return NULL;
-  data = dict_entry (
-      dwg,
-      dict_entry (dwg,
-                  dict_entry (dwg,
-                              dwg_ref_object (dwg,
-                                              obj->tio.entity->xdicobjhandle),
-                              "AcDbBlockRepresentation"),
-                  "AppDataCache"),
-      "ACAD_ENHANCEDBLOCKDATA");
   snprintf (key, sizeof (key), "%u", (unsigned)nodeid);
   obj = dict_entry (dwg, data, key);
   return obj && obj->fixedtype == DWG_TYPE_XRECORD
@@ -3694,11 +3716,12 @@ stored_value (Dwg_Data *dwg, const BITCODE_RLL insert, const BITCODE_BL nodeid)
 
 /* How the check reports a placement whose values can't be read: as failed
    when they are damaged, here W4's stored Window Width, whose first point
-   item (10) is made 11, and the Door's placements, whose definition has a
-   graph node that doesn't resolve; as unsupported when the drawing isn't
-   r2004. Each names the definition the placement's values name, here the
-   Door for D1, whose block's AcDbBlockRepBTag is made to name the
-   Window. */
+   item (10) is made 11, W3's, whose ACAD_ENHANCEDBLOCKDATA is renamed, and
+   the Door's placements, whose definition has a graph node that doesn't
+   resolve; as unsupported when the drawing isn't r2004. Each names the
+   definition the placement's values name, here the Window for W3 and the
+   Door for D1, whose blocks' AcDbBlockRepBTag are made to name the
+   other. */
 static int
 test_check_status (Dwg_Data *dwg)
 {
@@ -3707,6 +3730,7 @@ test_check_status (Dwg_Data *dwg)
   Dwg_Object_EVALUATION_GRAPH *door_graph = definition_graph (dwg, DOOR);
   Dwg_Object_XRECORD *xrecord
       = width ? stored_value (dwg, 0xC8D3, width->evalexpr.nodeid) : NULL;
+  char *w3_data = enhanced_data_name (dwg, 0xC8D2);
   Dwg_DynBlock_Check_Report *report;
   const Dwg_DynBlock_Check *c;
   const Dwg_Version_Type version = dwg->header.from_version;
@@ -3720,13 +3744,15 @@ test_check_status (Dwg_Data *dwg)
         rb->type = 11;
         damaged = 1;
       }
-  if (!damaged || !door_graph || !door_graph->nodes
-      || !door_graph->num_nodes || !set_btag (dwg, 0xC9F2, WINDOW))
+  if (!damaged || !w3_data || !door_graph || !door_graph->nodes
+      || !door_graph->num_nodes || !set_btag (dwg, 0xC9F2, WINDOW)
+      || !set_btag (dwg, 0xC9AA, DOOR))
     {
       fail ("check status: fixture objects not found");
       return 1;
     }
   door_graph->nodes[0].evalexpr = dwg_add_handleref (dwg, 4, 0xFFFFFE, NULL);
+  w3_data[0] = 'X';
 
   report = dwg_dynblock_check (dwg, TOLERANCE);
   loglevel = test_loglevel;
@@ -3744,6 +3770,19 @@ test_check_status (Dwg_Data *dwg)
   else
     {
       fail ("check status W4: status %d, definition " FORMAT_HV ", %s",
+            c ? (int)c->status : -1, c ? c->definition : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  c = find_check (report, 0xC8D2, 0xC9AA);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_FAILED && c->definition == WINDOW
+      && !c->evaluated && c->reason
+      && strstr (c->reason, "has no ACAD_ENHANCEDBLOCKDATA"))
+    OK ("check status: values missing fail, naming the Window: %s",
+        c->reason);
+  else
+    {
+      fail ("check status W3: status %d, definition " FORMAT_HV ", %s",
             c ? (int)c->status : -1, c ? c->definition : 0,
             c && c->reason ? c->reason : "");
       failures++;
@@ -3771,13 +3810,14 @@ test_check_status (Dwg_Data *dwg)
         }
     }
   num_failed = report->num_failed;
-  if (num_door != 5 || num_failed != num_door + 1)
+  if (num_door != 5 || num_failed != num_door + 2)
     {
       fail ("check status: %u failed, expected %u", (unsigned)num_failed,
-            (unsigned)num_door + 1);
+            (unsigned)num_door + 2);
       failures++;
     }
   dwg_dynblock_free_check_report (report);
+  w3_data[0] = 'A';
 
   // reading the values refuses a drawing other than r2004
   dwg->header.from_version = R_2000;
