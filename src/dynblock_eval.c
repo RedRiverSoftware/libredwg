@@ -3197,14 +3197,35 @@ move_hatch (Dwg_Entity_HATCH *_obj, const BITCODE_3BD *delta)
     }
 }
 
+/* Sets the dataflags bit 0x02 of a TEXT, ATTDEF or ATTRIB when its
+   alignment point is (0,0), which the bit leaves out, and clears it
+   otherwise. The encoder works the flags out afresh (dwg_set_dataflags)
+   only for documents built with the add API, DXF imports and drawings
+   read from r2000 or older: it writes the flags of a drawing read from a
+   later release as they are. */
+#define SET_ALIGNMENT_FLAG(_obj)                                              \
+  do                                                                          \
+    {                                                                         \
+      if ((_obj)->alignment_pt.x == 0.0 && (_obj)->alignment_pt.y == 0.0)     \
+        (_obj)->dataflags |= 0x02;                                            \
+      else                                                                    \
+        (_obj)->dataflags &= ~0x02;                                           \
+    }                                                                         \
+  while (0)
+
 /* Moves a TEXT, ATTDEF or ATTRIB by delta, in its OCS: its insertion
-   point, and its alignment point when it has one. */
+   point, and the alignment point of text that isn't left-aligned on the
+   baseline, also when that is (0,0) and not stored. Left-aligned text
+   doesn't use its alignment point, and AutoCAD keeps it (0,0). */
 #define MOVE_TEXT(_obj, delta)                                                \
   do                                                                          \
     {                                                                         \
-      MOVE_2D ((_obj)->ins_pt, delta);                                       \
-      if (!((_obj)->dataflags & 0x02))                                        \
-        MOVE_2D ((_obj)->alignment_pt, delta);                               \
+      MOVE_2D ((_obj)->ins_pt, delta);                                        \
+      if ((_obj)->horiz_alignment || (_obj)->vert_alignment)                  \
+        {                                                                     \
+          MOVE_2D ((_obj)->alignment_pt, delta);                              \
+          SET_ALIGNMENT_FLAG (_obj);                                          \
+        }                                                                     \
     }                                                                         \
   while (0)
 
@@ -3342,15 +3363,19 @@ turn_vector (double *x, double *y, const Dynblock_Frame *f)
 #define TURN_2D(pt, f) turn_xy (&(pt).x, &(pt).y, f)
 #define TURN_VECTOR(v, f) turn_vector (&(v).x, &(v).y, f)
 
-/* Turns a TEXT or ATTRIB by frame f, in its OCS: its insertion point, its
-   alignment point when it has one, and its rotation, which the encoder of
-   an r2004 drawing stores only when dataflags says so. */
+/* Turns a TEXT or ATTRIB by frame f, in its OCS: its insertion point, the
+   alignment point of text that isn't left-aligned on the baseline, as
+   MOVE_TEXT moves it, and its rotation, which the encoder of an r2004
+   drawing stores only when dataflags says so. */
 #define TURN_TEXT(_obj, f)                                                    \
   do                                                                          \
     {                                                                         \
       TURN_2D ((_obj)->ins_pt, f);                                            \
-      if (!((_obj)->dataflags & 0x02))                                        \
-        TURN_2D ((_obj)->alignment_pt, f);                                    \
+      if ((_obj)->horiz_alignment || (_obj)->vert_alignment)                  \
+        {                                                                     \
+          TURN_2D ((_obj)->alignment_pt, f);                                  \
+          SET_ALIGNMENT_FLAG (_obj);                                          \
+        }                                                                     \
       (_obj)->rotation = normal_angle ((_obj)->rotation + (f)->angle);        \
       if ((_obj)->rotation != 0.0)                                            \
         (_obj)->dataflags &= ~0x08;                                           \
