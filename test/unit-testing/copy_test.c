@@ -138,7 +138,7 @@ test_strdup (const char *s)
 #undef strdup
 #include "tests_common.h"
 #include "dwg_api.h"
-#ifndef DISABLE_JSON
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
 #  include "in_json.h"
 #  include "out_json.h"
 #endif
@@ -2060,7 +2060,7 @@ cleanup:
   free (handles);
 }
 
-#ifndef DISABLE_JSON
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
 /* Writes dwg as JSON to file and imports it again into imported. */
 static int
 json_round_trip (Dwg_Data *dwg, const char *file, Dwg_Data *imported)
@@ -2166,7 +2166,7 @@ test_copy_kinds (void)
     }
   num_states = layer_states (&ref, states);
 
-#ifndef DISABLE_JSON
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
   // a JSON import holds flag0, and strings in UTF-8
   if (json_round_trip (&ref, "copy_kinds.json", &imported) < DWG_ERR_CRITICAL)
     {
