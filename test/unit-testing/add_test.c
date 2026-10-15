@@ -3269,6 +3269,52 @@ test_layer_flags (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* The layer named name has colour 7. */
+static void
+check_layer_colour (const char *what, Dwg_Data *dwg, const char *name)
+{
+  Dwg_Object_LAYER *layer = find_layer (dwg, name);
+  if (!layer)
+    fail ("%s: no layer %s", what, name);
+  else if (layer->color.index == 7)
+    ok ("%s: layer %s colour 7", what, name);
+  else
+    fail ("%s: layer %s colour %d, expected 7", what, name,
+          layer->color.index);
+}
+
+/* Before r2000 too, layer 0 and a layer from dwg_add_LAYER have colour 7,
+   in the document and written and read back. */
+static int
+test_layer_colour (const Dwg_Version_Type version)
+{
+  const char *vername = dwg_version_type (version);
+  char file[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+
+  failed = 0;
+  if (!dwg_add_LAYER (dwg, "L1"))
+    fail ("layer_colour %s: dwg_add_LAYER L1 failed", vername);
+  snprintf (what, sizeof (what), "layer_colour %s: new document", vername);
+  check_layer_colour (what, dwg, "0");
+  check_layer_colour (what, dwg, "L1");
+
+  snprintf (file, sizeof (file), "add_layer_colour_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  if (read.header.version != version)
+    fail ("layer_colour %s: read back version %s", vername,
+          dwg_version_type (read.header.version));
+  snprintf (what, sizeof (what), "layer_colour %s: read back", vername);
+  check_layer_colour (what, &read, "0");
+  check_layer_colour (what, &read, "L1");
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
 // dwg_write_json () is in out_json.c, which needs DXF
 #if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
 /* A document imported from JSON writes a layer's flag0 as the JSON has it:
@@ -3360,7 +3406,7 @@ test_layer_flags_json (void)
 static int
 test_layer_flags_dxf (void)
 {
-  static const Layer_Flags flags = { "D", 1, 1, 0, 1, 1, 31 };
+  static const Layer_Flags flags = { "D", 1, 1, 1, 1, 1, 31 };
   const char *dxffile = "add_layers.dxf";
   const char *dwgfile = "add_layers_dxf.dwg";
   Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
@@ -3371,7 +3417,7 @@ test_layer_flags_dxf (void)
 
   failed = 0;
   // the DXF writer takes 70 from flag, the sign of 62 from flag0
-  layer->flag = 1 | 4;
+  layer->flag = 1 | 2 | 4;
   layer->flag0 = layer_flags_flag0 (&flags);
   dat.version = dat.from_version = dwg->header.version;
   dat.codepage = dwg->header.codepage;
@@ -3487,6 +3533,8 @@ main (int argc, char *argv[])
   error += test_layer_flags (R_2004);
   error += test_layer_flags (R_2010);
   error += test_layer_flags (R_2018);
+  error += test_layer_colour (R_11);
+  error += test_layer_colour (R_14);
 #if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
   error += test_layer_flags_json ();
 #endif

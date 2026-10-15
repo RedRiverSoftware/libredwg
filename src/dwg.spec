@@ -3322,9 +3322,9 @@ DWG_TABLE (LAYER)
     int flag0;
     ENCODER {
       // A JSON import writes flag0 as it is. A DXF import takes the fields
-      // from flag (70) and the colour sign, plotted. A decoded document and
-      // one built with the add API (both import flags) take flag0 from the
-      // fields.
+      // from flag (70) and the colour sign, plotted. A document read from a
+      // DWG file (no import flag) and one built with the add API (both
+      // import flags) take flag0 from the fields.
       if ((dwg->opts & DWG_OPTS_IN) == DWG_OPTS_INDXF) {
         FIELD_VALUE (off)           = FIELD_VALUE (color.index) < 0;
         FIELD_VALUE (frozen)        = FIELD_VALUE (flag) & 1;

@@ -28206,11 +28206,11 @@ dwg_add_BLOCK_HEADER (Dwg_Data *restrict dwg, const char *restrict name)
 EXPORT Dwg_Object_LAYER *
 dwg_add_LAYER (Dwg_Data *restrict dwg, const char *restrict name)
 {
+  // Colour 7, as 0 is ByBlock, which a layer can't have.
   if (dwg->header.version >= R_2000)
     {
       // PLOTSTYLE placeholder. Plotted, lineweight Default, in flag0 too:
-      // the DXF and JSON writers take them from flag0. Colour 7, as 0 is
-      // ByBlock, which a layer can't have.
+      // the DXF and JSON writers take them from flag0.
       API_ADD_TABLE (LAYER, LAYER_CONTROL, {
         _obj->plotstyle = dwg_add_handleref (dwg, 5, UINT64_C (0xF), NULL);
         _obj->plotflag = 1;
