@@ -939,8 +939,8 @@ copy_handle_value (Copy_Chain *restrict cdat,
 /* The length of an 8-bit EED string as the encoder writes it: a string that
    starts with NUL as the empty string. The decoder leaves a string that
    claims more bytes than are left in its group unread, with that length and
-   zero bytes, in an item sized by what is left of its group (for a group's
-   later items, one byte more), so its length can't be trusted. */
+   zero bytes, in an item sized by what is left of its group, so its length
+   can't be trusted. */
 static BITCODE_RS
 eed_string_length (const Dwg_Eed_Data *restrict data)
 {
@@ -1034,7 +1034,8 @@ eed_item_file_size (const Dwg_Eed_Data *restrict data)
    it: every one of them decoded, their sizes adding up to the group's. They
    don't when the decoder failed on a later item, which it leaves without
    data, or left a string unread, after which it skips to the group's end:
-   the items after it are then only in the group's raw bytes. */
+   the items after it are then only in the group's raw bytes. Nor when it
+   skipped a byte left over at the group's end, too short for an item. */
 static int
 eed_group_decoded (const Dwg_Eed *restrict eed, const BITCODE_BL num_eed,
                    const BITCODE_BL first)

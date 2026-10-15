@@ -86,7 +86,8 @@ typedef struct _dwg_copy_unresolved
    read from a file, which has raw bytes, is left out when its items don't
    hold all of those bytes: when the decoder failed on one of them, or left
    unread a string that claims more bytes than the group has left, and so
-   the items after it. So is a group whose first item has no data.
+   the items after it, or skipped a byte left over at the group's end. So
+   is a group whose first item has no data.
    Variable-type classes the copies need are added to dst. Adding the
    copies to their owners (a block's entity list, a dictionary) is the
    caller's, and so is the r13-r2000 entity chain (prev_entity,
