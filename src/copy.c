@@ -70,6 +70,24 @@ struct _dwg_copy_map
   dwg_inthash *hash;
 };
 
+/* The kinds of document, by the import flags their opts carry. The encoder
+   writes some fields of each kind differently. */
+typedef enum COPY_KIND
+{
+  COPY_KIND_DWG,     /* read from a DWG file */
+  COPY_KIND_DXF,     /* imported from DXF */
+  COPY_KIND_JSON,    /* imported from JSON */
+  COPY_KIND_ADD_API, /* built with the add API, which sets both flags */
+} Copy_Kind;
+
+/* How the copy converts 8-bit strings (TV, and T before r2007). */
+typedef enum COPY_TV
+{
+  COPY_TV_AS_IS,
+  COPY_TV_TO_UTF8,  /* from the codepage */
+  COPY_TV_FROM_UTF8 /* to the codepage */
+} Copy_Tv;
+
 /* The slots of one copy that hold copied data already: an open-addressed
    set of addresses. */
 typedef struct _copy_slots
@@ -91,6 +109,8 @@ typedef struct _copy_chain
   Dwg_Copy_Unresolved *unresolved;
   BITCODE_BL num_unresolved;
   BITCODE_BL max_unresolved;
+  Copy_Kind src_kind, dst_kind;
+  Copy_Tv tv;
   int error;
 } Copy_Chain;
 
@@ -476,8 +496,9 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
 #define DYNAPI_NAME(token) ((#token)[0] == '_' ? &(#token)[1] : #token)
 
 /* dwg_copy_TOKEN copies the common data, then the class's struct: a byte
-   copy, then fixups that need explicit code, the spec walk, and a sweep of
-   the struct's references and strings for any the walk didn't reach. The
+   copy, then fixups that need explicit code, the spec walk, the source's
+   values again where the walk derived others, and a sweep of the struct's
+   references and strings for any the walk didn't reach. The
    class's struct is allocated first, so that a copy with common data has a
    class struct as its source has, which dwg_free () walks. When out of
    memory, every pointer the walk can't copy is cleared, so that freeing
@@ -492,6 +513,8 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                                const Dwg_Object *restrict srcobj)             \
   {                                                                           \
     const Dwg_Entity_##token *src = srcobj->tio.entity->tio.token;            \
+    const Dwg_DYNAPI_field *fields                                            \
+        = dwg_dynapi_entity_fields (DYNAPI_NAME (token));                     \
     Dwg_Entity_##token *_obj = NULL;                                          \
     int error;                                                                \
     if (src)                                                                  \
@@ -513,10 +536,9 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
     obj->tio.entity->tio.token = _obj;                                        \
     error |= copy_fixup_before (CHAIN, obj, srcobj, DWG_TYPE_##token);        \
     error |= dwg_copy_##token##_private (dat, dat, dat, obj);                 \
+    copy_restore_values (fields, _obj, src);                                  \
     error |= copy_fixup_after (CHAIN, obj, srcobj, DWG_TYPE_##token);         \
-    error |= copy_sweep (CHAIN, obj,                                          \
-                         dwg_dynapi_entity_fields (DYNAPI_NAME (token)),      \
-                         _obj);                                               \
+    error |= copy_sweep (CHAIN, obj, fields, _obj);                           \
     return error;                                                             \
   }                                                                           \
                                                                               \
@@ -548,6 +570,8 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                                const Dwg_Object *restrict srcobj)             \
   {                                                                           \
     const Dwg_Object_##token *src = srcobj->tio.object->tio.token;            \
+    const Dwg_DYNAPI_field *fields                                            \
+        = dwg_dynapi_entity_fields (DYNAPI_NAME (token));                     \
     Dwg_Object_##token *_obj = NULL;                                          \
     int error;                                                                \
     if (src)                                                                  \
@@ -569,10 +593,9 @@ static int copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
     obj->tio.object->tio.token = _obj;                                        \
     error |= copy_fixup_before (CHAIN, obj, srcobj, DWG_TYPE_##token);        \
     error |= dwg_copy_##token##_private (dat, dat, dat, obj);                 \
+    copy_restore_values (fields, _obj, src);                                  \
     error |= copy_fixup_after (CHAIN, obj, srcobj, DWG_TYPE_##token);         \
-    error |= copy_sweep (CHAIN, obj,                                          \
-                         dwg_dynapi_entity_fields (DYNAPI_NAME (token)),      \
-                         _obj);                                               \
+    error |= copy_sweep (CHAIN, obj, fields, _obj);                           \
     return error;                                                             \
   }                                                                           \
                                                                               \
@@ -708,6 +731,49 @@ slots_clear (Copy_Slots *restrict s)
   s->count = 0;
 }
 
+/* A copy of the 8-bit string str, of len bytes, converted as cdat->tv says
+   with the given codepage, or NULL when out of memory. Converted to UTF-8,
+   \U+XXXX becomes the character; converted to the codepage, a character
+   the codepage lacks becomes \U+XXXX, as the encoder converts it. A string
+   that is not UTF-8 in a document whose strings are is copied as it is,
+   with DWG_ERR_VALUEOUTOFBOUNDS: bit_utf8_to_TV () fails on it whatever
+   room it has. */
+static char *
+copy_tv (Copy_Chain *restrict cdat, const char *restrict str,
+         const size_t len, const BITCODE_RS codepage)
+{
+  char *copy;
+  if (cdat->tv == COPY_TV_TO_UTF8)
+    {
+      // str itself when there is nothing to convert, NULL when out of memory
+      char *utf8 = bit_TV_to_utf8 (str, codepage);
+      if (utf8 != str)
+        return utf8;
+    }
+  else if (cdat->tv == COPY_TV_FROM_UTF8)
+    {
+      /* A character takes at most 7 bytes as \U+XXXX, for 2 or 3 bytes of
+         UTF-8, and \uXXXX takes 7 for its 6. */
+      const size_t size = len * 4 + 8;
+      copy = (char *)malloc (size);
+      if (!copy)
+        return NULL;
+      if (bit_utf8_to_TV (copy, (const unsigned char *)str, size, len, 0,
+                          codepage))
+        return copy;
+      free (copy);
+      LOG_WARN ("copy: string \"%s\" is not UTF-8, copied as it is", str);
+      cdat->error |= DWG_ERR_VALUEOUTOFBOUNDS;
+    }
+  copy = (char *)malloc (len + 1);
+  if (copy)
+    {
+      memcpy (copy, str, len);
+      copy[len] = '\0';
+    }
+  return copy;
+}
+
 static void
 copy_string (Copy_Chain *restrict cdat, char **restrict slot,
              const Copy_String kind)
@@ -719,13 +785,15 @@ copy_string (Copy_Chain *restrict cdat, char **restrict slot,
   if (!str || !slot_claim (cdat, (void **)slot))
     return;
   if (kind == COPY_TU || (kind == COPY_T && IS_FROM_TU (dat)))
-    size = (bit_wcs2len ((BITCODE_TU)str) + 1) * 2;
+    {
+      size = (bit_wcs2len ((BITCODE_TU)str) + 1) * 2;
+      copy = (char *)malloc (size);
+      if (copy)
+        memcpy (copy, str, size);
+    }
   else
-    size = strlen (str) + 1;
-  copy = (char *)malloc (size);
-  if (copy)
-    memcpy (copy, str, size);
-  else
+    copy = copy_tv (cdat, str, strlen (str), dat->codepage);
+  if (!copy)
     cdat->error |= DWG_ERR_OUTOFMEM;
   *slot = copy;
 }
@@ -1167,6 +1235,39 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
       switch (dwg_resbuf_value_type (rbuf->type))
         {
         case DWG_VT_STRING:
+          /* converted as the other strings are, with its own codepage, as
+             the encoder converts it */
+          if (rbuf->value.str.u.data && !rbuf->value.str.is_tu
+              && cdat->tv != COPY_TV_AS_IS)
+            {
+              const char *str = rbuf->value.str.u.data;
+              size_t len = 0;
+              char *conv;
+              while (len < rbuf->value.str.size && str[len])
+                len++;
+              conv = copy_tv (cdat, str, len, rbuf->value.str.codepage);
+              copy->value.str.u.data = conv;
+              if (!conv)
+                {
+                  copy->value.str.size = 0;
+                  cdat->error |= DWG_ERR_OUTOFMEM;
+                }
+              else if (strlen (conv) > 0xFFFF)
+                {
+                  LOG_ERROR ("copy: %s " FORMAT_HV " XRECORD string of %u "
+                             "bytes too long once converted",
+                             holder->name, holder->handle.value,
+                             (unsigned)rbuf->value.str.size);
+                  free (conv);
+                  copy->value.str.u.data = NULL;
+                  copy->value.str.size = 0;
+                  cdat->error |= DWG_ERR_VALUEOUTOFBOUNDS;
+                }
+              else
+                copy->value.str.size = (BITCODE_RS)strlen (conv);
+              break;
+            }
+          // fall through
         case DWG_VT_BINARY:
           if (rbuf->value.str.u.data)
             {
@@ -1312,10 +1413,12 @@ copy_common_object (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
   return error;
 }
 
-/* Copies, or clears, the references, strings and arrays in a struct's
-   fields that the spec walk didn't reach, as listed by dynapi: references
-   and strings are copied; an array of unknown length can't be, and is
-   cleared, as a NULL is safer than an array shared with src. */
+/* Copies, or clears, the references, strings, arrays and binary chunks in a
+   struct's fields that the spec walk didn't reach, as listed by dynapi:
+   references and strings are copied; an array or binary chunk of unknown
+   length can't be, and is cleared, as a NULL is safer than data shared
+   with src. A source imported from JSON can set fields that the specs
+   don't walk, as EXTRUDEDSURFACE's bindata. */
 static int
 copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
             const Dwg_DYNAPI_field *fields, void *restrict _obj)
@@ -1339,10 +1442,13 @@ copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
                || strEQc (type, "T32"))
         copy_string (cdat, (char **)slot, COPY_T);
       /* The other pointers to data the struct owns: arrays, and binary
-         chunks, whose length the spec walk knows. Pointers to other
-         structs (parent, dwg) don't own what they point to. */
-      else if (f->is_malloc && len && type[len - 1] == '*'
-               && !memBEGINc (type, "struct ") && strNE (type, "Dwg_Eed*")
+         chunks (TF), whose length only the spec walk knows. Pointers to
+         other structs (parent, dwg) don't own what they point to. */
+      else if (f->is_malloc
+               && (strEQc (type, "TF")
+                   || (len && type[len - 1] == '*'
+                       && !memBEGINc (type, "struct ")
+                       && strNE (type, "Dwg_Eed*")))
                && *(void **)slot && !slot_visited (cdat, slot))
         {
           LOG_ERROR ("copy: %s.%s [%s] not copied", obj->name, f->name,
@@ -1352,6 +1458,117 @@ copy_sweep (Copy_Chain *restrict cdat, const Dwg_Object *obj,
         }
     }
   return error;
+}
+
+/* Whether a field of this dynapi type is a plain value, which the byte copy
+   copied whole: a number, a point or a date, but not a colour, which holds
+   strings and a reference, nor a struct. */
+static int
+copy_is_value_type (const char *type)
+{
+  static const char *const types[]
+      = { "B",   "BB",   "3B",      "4BITS",   "BS",      "BSd",     "BSx",
+          "BL",  "BLd",  "BLx",     "BLL",     "BD",      "BE",      "BT",
+          "RC",  "RCd",  "RS",      "RSd",     "RL",      "RLd",     "RLx",
+          "RLL", "RD",   "MC",      "MS",      "2RD",     "2BD",     "2BD_1",
+          "2DD", "3RD",  "3BD",     "3BD_1",   "3DD",     "2DPOINT", "3DPOINT",
+          "int", "TIMEBLL", "TIMERLL", "int32_t", "unsigned long", NULL };
+  const char *const *t;
+  for (t = types; *t; t++)
+    if (strEQ (type, *t))
+      return 1;
+  return 0;
+}
+
+/* The walk runs the specs' statements that set fields from other fields, as
+   the decoder needs them: LAYER's frozen, off, locked, plotflag and linewt
+   from flag0, a table record's DXF flag from its bits, PROXY_ENTITY's
+   versions. For a source read from a DWG file they change nothing, but a
+   source built with the add API or imported from DXF or JSON can hold
+   values they don't derive. So the copy's value fields take their
+   source's values again, but for counts, num_* and *_size, which the walk
+   may have set to the number of elements it copied (TABLESTYLE's three
+   row styles, IMAGE's two clip vertices of a rectangle). */
+static void
+copy_restore_values (const Dwg_DYNAPI_field *fields, void *restrict _obj,
+                     const void *restrict src)
+{
+  const Dwg_DYNAPI_field *f;
+  if (!fields)
+    return;
+  for (f = fields; f->name; f++)
+    {
+      const size_t len = strlen (f->name);
+      if (f->is_malloc || !copy_is_value_type (f->type)
+          || memBEGINc (f->name, "num_")
+          || (len > 5 && strEQc (&f->name[len - 5], "_size")))
+        continue;
+      memcpy ((char *)_obj + f->offset, (const char *)src + f->offset,
+              f->size);
+    }
+}
+
+/* From r2000 a LAYER holds its flags three ways: flag0, the bitmask a DWG
+   file stores; the fields frozen, off, frozen_in_new, locked, plotflag and
+   linewt; and flag, DXF group 70, with the sign of the colour index for
+   off. The encoder writes flag0, but takes it from a different one for
+   each kind of document: as it is from a document imported from JSON;
+   from flag and the colour of one imported from DXF, plotted; and from the
+   fields of any other. This is the flag0 a layer of src stands for: what
+   the encoder writes of it, but from the fields for the add API, which
+   sets those (plotflag, linewt) and not flag0. */
+static BITCODE_BS
+copy_layer_flag0 (const Dwg_Object_LAYER *restrict src, const Copy_Kind kind)
+{
+  int frozen, off, frozen_in_new, locked, plotflag;
+  if (kind == COPY_KIND_JSON)
+    return src->flag0;
+  if (kind == COPY_KIND_DXF)
+    {
+      frozen = src->flag & 1;
+      frozen_in_new = src->flag & 2;
+      locked = src->flag & 4;
+      off = src->color.index < 0;
+      plotflag = 1;
+    }
+  else
+    {
+      frozen = src->frozen;
+      frozen_in_new = src->frozen_in_new;
+      locked = src->locked;
+      off = src->off;
+      plotflag = src->plotflag;
+    }
+  return (BITCODE_BS)((frozen ? 1 : 0) | (off ? 2 : 0) | (frozen_in_new ? 4 : 0)
+                      | (locked ? 8 : 0) | (plotflag ? 16 : 0)
+                      | ((src->linewt & 0x1F) << 5));
+}
+
+/* A copy of a LAYER into a document of another kind holds its flags the
+   three ways, as copy_layer_flag0 () reads them from its source, so that
+   dst's encoder writes them whichever way it takes them. */
+static void
+copy_layer_flags (const Copy_Chain *restrict cdat,
+                  Dwg_Object_LAYER *restrict _obj,
+                  const Dwg_Object_LAYER *restrict src)
+{
+  BITCODE_BS flag0;
+  if (cdat->src_kind == cdat->dst_kind || cdat->dat.from_version < R_2000b)
+    return;
+  flag0 = copy_layer_flag0 (src, cdat->src_kind);
+  _obj->flag0 = flag0;
+  _obj->frozen = flag0 & 1;
+  _obj->off = (flag0 & 2) ? 1 : 0;
+  _obj->frozen_in_new = (flag0 & 4) ? 1 : 0;
+  _obj->locked = (flag0 & 8) ? 1 : 0;
+  _obj->plotflag = (flag0 & 16) ? 1 : 0;
+  _obj->linewt = (flag0 & 0x03E0) >> 5;
+  _obj->flag = (BITCODE_RC)((_obj->flag & ~7) | _obj->frozen
+                            | (_obj->frozen_in_new << 1)
+                            | (_obj->locked << 2));
+  if (cdat->dst_kind == COPY_KIND_DXF)
+    _obj->color.index = _obj->off ? -abs (_obj->color.index)
+                                  : abs (_obj->color.index);
 }
 
 /*--------------------------------------------------------------------------------
@@ -1382,6 +1599,15 @@ copy_fixup_before (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
       {
         Dwg_Object_PROXY_OBJECT *_obj = obj->tio.object->tio.PROXY_OBJECT;
         copy_bytes (cdat, &_obj->data, ((size_t)_obj->data_numbits + 7) / 8);
+      }
+      break;
+    /* Only the DXF writer walks oleclient, so dwg_free () never frees it:
+       the decoder points it at a static string. The copy shares it, which
+       the sweep would clear. */
+    case DWG_TYPE_OLE2FRAME:
+      {
+        Dwg_Entity_OLE2FRAME *_obj = obj->tio.entity->tio.OLE2FRAME;
+        (void)slot_first_visit (cdat, &_obj->oleclient);
       }
       break;
     default:
@@ -1424,6 +1650,10 @@ copy_fixup_after (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
               copy_string (cdat, &_obj->dashes[i].text, COPY_T);
           }
       }
+      break;
+    case DWG_TYPE_LAYER:
+      copy_layer_flags (cdat, obj->tio.object->tio.LAYER,
+                        srcobj->tio.object->tio.LAYER);
       break;
     default:
       break;
@@ -1521,6 +1751,32 @@ dwg_copy_map_get (const Dwg_Copy_Map *restrict map,
     return 0;
   value = hash_get (map->hash, src_handle);
   return value == HASH_NOT_FOUND ? 0 : value;
+}
+
+static Copy_Kind
+copy_kind (const Dwg_Data *dwg)
+{
+  switch (dwg->opts & DWG_OPTS_IN)
+    {
+    case DWG_OPTS_IN:
+      return COPY_KIND_ADD_API;
+    case DWG_OPTS_INDXF:
+      return COPY_KIND_DXF;
+    case DWG_OPTS_INJSON:
+      return COPY_KIND_JSON;
+    default:
+      return COPY_KIND_DWG;
+    }
+}
+
+/* Whether a document's 8-bit strings are UTF-8 rather than in its codepage:
+   the encoder converts them to the codepage when it writes a document
+   imported from JSON or built with the add API (bit_write_TV (), and
+   XRECORD strings), and writes the others as they are. */
+static int
+copy_tv_is_utf8 (const Dwg_Data *dwg)
+{
+  return (dwg->opts & DWG_OPTS_INJSON) != 0;
 }
 
 /* Why src and dst can't be copied between, or 0. */
@@ -1704,6 +1960,12 @@ dwg_copy_objects (Dwg_Data *dst, Dwg_Data *src,
   cdat.src = src;
   cdat.dst = dst;
   cdat.map = map;
+  cdat.src_kind = copy_kind (src);
+  cdat.dst_kind = copy_kind (dst);
+  if (copy_tv_is_utf8 (src) == copy_tv_is_utf8 (dst))
+    cdat.tv = COPY_TV_AS_IS;
+  else
+    cdat.tv = copy_tv_is_utf8 (dst) ? COPY_TV_TO_UTF8 : COPY_TV_FROM_UTF8;
 
   /* Check every source object before dst changes. */
   src_index = (BITCODE_BL *)calloc (num_handles, sizeof (BITCODE_BL));

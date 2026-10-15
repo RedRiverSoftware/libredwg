@@ -332,10 +332,19 @@ typedef struct _compare
   /* the documents' version, which sizes LTYPE.strings_area */
   Dwg_Version_Type version;
   /* a read back of a document built with the add API, see
-     ADD_API_ACAD_APPID, and the strings in it that lost their characters
-     outside ASCII */
+     ADD_API_ACAD_APPID */
   int add_api_readback;
-  unsigned non_ascii;
+  /* Whether a's and b's 8-bit strings are UTF-8, as in a document imported
+     from JSON or built with the add API, rather than in the codepage. When
+     only one side's are, the copy converted them, and they are compared
+     as UTF-8; EED strings it copies as they are. */
+  int a_utf8, b_utf8;
+  BITCODE_RS codepage;
+  /* compare strings as UTF-8 whatever the documents */
+  int as_utf8;
+  /* Copies of LAYERs into a document of another kind, whose flags the copy
+     converts: check_layer_states () checks them as written instead. */
+  int layer_kinds_differ;
   /* For copies: the copy's handle, which its references with a relative
      code (6, 8, 0xA, 0xC) are relative to, and how many such references
      the comparison met, and how many of them have another target than
@@ -438,25 +447,6 @@ compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
   compare_handle (c, name, ta, tb);
 }
 
-/* Whether b equals a with a's bytes from 0x80 up removed, and a has at
-   least one: the loss a document built with the add API reads back, see
-   ADD_API_ACAD_APPID. */
-static int
-lost_non_ascii (const char *a, const char *b)
-{
-  int lost = 0;
-  if (!a)
-    return 0;
-  if (!b)
-    b = "";
-  for (; *a; a++)
-    if ((unsigned char)*a >= 0x80)
-      lost = 1;
-    else if (*b++ != *a)
-      return 0;
-  return lost && !*b;
-}
-
 static void
 compare_string (Compare *c, const char *name, const char *a, const char *b,
                 const int wide)
@@ -472,19 +462,46 @@ compare_string (Compare *c, const char *name, const char *a, const char *b,
       la = a ? strlen (a) : 0;
       lb = b ? strlen (b) : 0;
     }
-  if ((la != lb || (la && memcmp (a, b, la))) && c->add_api_readback && !wide
-      && lost_non_ascii (a, b))
-    {
-      // see ADD_API_ACAD_APPID
-      if (c->non_ascii++ < (unsigned)max_reported && test_loglevel >= 2)
-        printf ("  # TODO P3-06 %s: %s: \"%s\", expected \"%s\"\n", c->what,
-                name, b ? b : "", a);
-    }
-  else if (la != lb || (la && memcmp (a, b, la)))
+  if (la != lb || (la && memcmp (a, b, la)))
     compare_fail (c, "%s: \"%s\", expected \"%s\"", name,
                   b && !wide ? b : "", a && !wide ? a : "");
   else if (c->map && a && a == b)
     compare_fail (c, "%s: shares its string with the source", name);
+}
+
+/* An 8-bit string as UTF-8, with \U+XXXX as the character it stands for,
+   in a new allocation, or NULL. */
+static char *
+utf8_of (const char *s, const int is_utf8, const BITCODE_RS codepage)
+{
+  char *u;
+  if (!s)
+    return NULL;
+  u = bit_TV_to_utf8 (s, is_utf8 ? CP_UTF8 : codepage);
+  return u == s ? strdup (s) : u;
+}
+
+/* A string field, which the copy converts between documents whose 8-bit
+   strings are held differently: compared as UTF-8 then. */
+static void
+compare_text (Compare *c, const char *name, const char *a, const char *b,
+              const int wide)
+{
+  char *ua, *ub;
+  if (wide || (c->a_utf8 == c->b_utf8 && !c->as_utf8))
+    {
+      compare_string (c, name, a, b, wide);
+      return;
+    }
+  ua = utf8_of (a, c->a_utf8, c->codepage);
+  ub = utf8_of (b, c->b_utf8, c->codepage);
+  if (!ua != !ub || (ua && strNE (ua, ub)))
+    compare_fail (c, "%s: \"%s\", expected \"%s\", as UTF-8", name,
+                  ub ? ub : "", ua ? ua : "");
+  else if (c->map && a && a == b)
+    compare_fail (c, "%s: shares its string with the source", name);
+  free (ua);
+  free (ub);
 }
 
 static int
@@ -603,9 +620,9 @@ compare_color (Compare *c, const char *name, const Dwg_Color *a,
     compare_fail (c, "%s: color %d/0x%x/0x%x, expected %d/0x%x/0x%x", name,
                   b->index, b->flag, b->rgb, a->index, a->flag, a->rgb);
   snprintf (sub, sizeof (sub), "%s.name", name);
-  compare_string (c, sub, a->name, b->name, c->is_tu);
+  compare_text (c, sub, a->name, b->name, c->is_tu);
   snprintf (sub, sizeof (sub), "%s.book_name", name);
-  compare_string (c, sub, a->book_name, b->book_name, c->is_tu);
+  compare_text (c, sub, a->book_name, b->book_name, c->is_tu);
   snprintf (sub, sizeof (sub), "%s.handle", name);
   compare_ref (c, sub, a->handle, b->handle);
 }
@@ -775,8 +792,8 @@ compare_value (Compare *c, const char *name, const char *type, const void *a,
   if (strEQc (type, "H"))
     compare_ref (c, name, *(const BITCODE_H *)a, *(const BITCODE_H *)b);
   else if (is_string_type (type))
-    compare_string (c, name, *(char *const *)a, *(char *const *)b,
-                    is_wide_type (c, type));
+    compare_text (c, name, *(char *const *)a, *(char *const *)b,
+                  is_wide_type (c, type));
   else if (strEQc (type, "CMC") || strEQc (type, "CMTC")
            || strEQc (type, "ENC"))
     compare_color (c, name, (const Dwg_Color *)a, (const Dwg_Color *)b);
@@ -1300,6 +1317,26 @@ compare_xdata (Compare *c, const Dwg_Resbuf *a, const Dwg_Resbuf *b)
       switch (dwg_resbuf_value_type (a->type))
         {
         case DWG_VT_STRING:
+          if (c->a_utf8 != c->b_utf8 && !a->value.str.is_tu)
+            {
+              // converted with its own codepage, see compare_text ()
+              const BITCODE_RS codepage = c->codepage;
+              c->codepage = a->value.str.codepage;
+              if (b->value.str.codepage != a->value.str.codepage)
+                compare_fail (c, "%s: codepage %u, expected %u", name,
+                              b->value.str.codepage, a->value.str.codepage);
+              else if (b->value.str.u.data
+                       && strlen (b->value.str.u.data) != b->value.str.size)
+                compare_fail (c, "%s: size %u, %u bytes", name,
+                              b->value.str.size,
+                              (unsigned)strlen (b->value.str.u.data));
+              else
+                compare_text (c, name, a->value.str.u.data,
+                              b->value.str.u.data, 0);
+              c->codepage = codepage;
+              break;
+            }
+          // fall through
         case DWG_VT_BINARY:
           if (a->value.str.size != b->value.str.size
               || (a->value.str.size && a->value.str.u.data
@@ -1396,7 +1433,24 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
           return;
         }
       fields = dwg_dynapi_entity_fields (a->name);
-      if (fields)
+      if (fields && c->layer_kinds_differ && a->fixedtype == DWG_TYPE_LAYER)
+        {
+          // the flags the copy converts, with the sign of the colour index
+          Dwg_Object_LAYER la = *oa->tio.LAYER;
+          const Dwg_Object_LAYER *lb = ob->tio.LAYER;
+          la.flag0 = lb->flag0;
+          la.frozen = lb->frozen;
+          la.off = lb->off;
+          la.frozen_in_new = lb->frozen_in_new;
+          la.locked = lb->locked;
+          la.plotflag = lb->plotflag;
+          la.linewt = lb->linewt;
+          la.flag = lb->flag;
+          if (abs (la.color.index) == abs (lb->color.index))
+            la.color.index = lb->color.index;
+          compare_fields (c, "", a->name, fields, &la, lb, NULL);
+        }
+      else if (fields)
         compare_fields (c, "", a->name, fields, oa->tio.APPID,
                         ob->tio.APPID, NULL);
       else
@@ -1706,6 +1760,277 @@ cleanup:
   free (unresolved);
   free (handles);
   return numfailed ();
+}
+
+/*--------------------------------------------------------------------------------
+ * Copies between documents of different kinds: read from a DWG file,
+ * imported from DXF or JSON, or built with the add API
+ */
+
+/* What kind of document the import flags in opts make. */
+static const char *
+kind_name (const unsigned opts)
+{
+  switch (opts & DWG_OPTS_IN)
+    {
+    case DWG_OPTS_IN:
+      return "the add API";
+    case DWG_OPTS_INDXF:
+      return "DXF";
+    case DWG_OPTS_INJSON:
+      return "JSON";
+    default:
+      return "DWG";
+    }
+}
+
+/* A layer's flags as LibreDWG reads them from a DWG file. */
+typedef struct _layer_state
+{
+  char name[64];
+  int frozen, off, frozen_in_new, locked, plotflag, linewt;
+} Layer_State;
+
+#define MAX_LAYERS 16
+
+static unsigned
+layer_states (const Dwg_Data *dwg, Layer_State *states)
+{
+  unsigned n = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects && n < MAX_LAYERS; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      const Dwg_Object_LAYER *l;
+      if (obj->fixedtype != DWG_TYPE_LAYER || !obj->tio.object
+          || !obj->tio.object->tio.LAYER)
+        continue;
+      l = obj->tio.object->tio.LAYER;
+      snprintf (states[n].name, sizeof (states[n].name), "%s",
+                l->name ? l->name : "");
+      states[n].frozen = l->frozen;
+      states[n].off = l->off;
+      states[n].frozen_in_new = l->frozen_in_new;
+      states[n].locked = l->locked;
+      states[n].plotflag = l->plotflag;
+      states[n].linewt = l->linewt;
+      n++;
+    }
+  return n;
+}
+
+/* The layers of readback, read from a DWG file, have the flags expected,
+   all of them. */
+static void
+check_layer_states (const char *what, const Dwg_Data *readback,
+                    const Layer_State *expected, const unsigned num_expected)
+{
+  Layer_State states[MAX_LAYERS];
+  const unsigned n = layer_states (readback, states);
+  unsigned matched = 0;
+  int differ = 0;
+  for (unsigned i = 0; i < num_expected; i++)
+    {
+      const Layer_State *e = &expected[i];
+      const Layer_State *s = NULL;
+      for (unsigned k = 0; k < n && !s; k++)
+        if (strEQ (states[k].name, e->name))
+          s = &states[k];
+      if (!s)
+        {
+          if (differ++ < max_reported && test_loglevel >= 2)
+            printf ("  # %s: layer %s not read back\n", what, e->name);
+          continue;
+        }
+      if (s->frozen != e->frozen || s->off != e->off
+          || s->frozen_in_new != e->frozen_in_new || s->locked != e->locked
+          || s->plotflag != e->plotflag || s->linewt != e->linewt)
+        {
+          if (differ++ < max_reported && test_loglevel >= 2)
+            printf ("  # %s: layer %s: frozen %d off %d frozen_in_new %d "
+                    "locked %d plotflag %d linewt %d, expected %d %d %d %d "
+                    "%d %d\n",
+                    what, e->name, s->frozen, s->off, s->frozen_in_new,
+                    s->locked, s->plotflag, s->linewt, e->frozen, e->off,
+                    e->frozen_in_new, e->locked, e->plotflag, e->linewt);
+          continue;
+        }
+      matched++;
+    }
+  if (!differ && num_expected && n == num_expected)
+    OK ("%s: the %u layers read back with their flags", what, matched);
+  else
+    FAIL ("%s: %u of %u layers read back with their flags, %u read back",
+          what, matched, num_expected, n);
+}
+
+/* The text an entity shows, which its document holds 8-bit, or NULL. */
+static const char *
+entity_text (const Dwg_Object *obj)
+{
+  if (!obj->tio.entity || !obj->tio.entity->tio.UNUSED)
+    return NULL;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_TEXT:
+      return obj->tio.entity->tio.TEXT->text_value;
+    case DWG_TYPE_ATTRIB:
+      return obj->tio.entity->tio.ATTRIB->text_value;
+    case DWG_TYPE_ATTDEF:
+      return obj->tio.entity->tio.ATTDEF->default_value;
+    case DWG_TYPE_MTEXT:
+      return obj->tio.entity->tio.MTEXT->text;
+    default:
+      return NULL;
+    }
+}
+
+/* The texts of the copies, read back from a DWG file, show their sources'
+   characters. */
+static void
+check_texts (const char *what, Dwg_Data *src, Dwg_Data *readback,
+             const Dwg_Copy_Map *map)
+{
+  Compare c;
+  unsigned texts = 0;
+  memset (&c, 0, sizeof (c));
+  c.what = what;
+  c.a_utf8 = (src->opts & DWG_OPTS_INJSON) != 0;
+  c.codepage = src->header.codepage;
+  // a document of another kind may write \U+XXXX as the character
+  c.as_utf8 = 1;
+  for (BITCODE_BL i = 0; i < src->num_objects; i++)
+    {
+      const Dwg_Object *a = &src->object[i];
+      const char *ta = entity_text (a);
+      const Dwg_Object *b;
+      char name[64];
+      if (!ta)
+        continue;
+      b = dwg_resolve_handle (readback,
+                              dwg_copy_map_get (map, a->handle.value));
+      snprintf (name, sizeof (name), "%s " FORMAT_HV " text", a->name,
+                a->handle.value);
+      if (!b || b->fixedtype != a->fixedtype)
+        compare_fail (&c, "%s not read back", name);
+      else
+        compare_text (&c, name, ta, entity_text (b), 0);
+      texts++;
+    }
+  if (!c.failed && texts)
+    OK ("%s: %u texts read back with their characters", what, texts);
+  else
+    FAIL ("%s: %d of %u texts read back differ", what, c.failed, texts);
+}
+
+/* An empty document like src, of the kind the import flags dst_in give. */
+static Dwg_Data *
+new_document_of_kind (const Dwg_Data *src, const unsigned dst_in)
+{
+  Dwg_Data *dwg = new_document_like (src);
+  if (dwg)
+    dwg->opts = (src->opts & ~DWG_OPTS_IN) | dst_in;
+  return dwg;
+}
+
+/* Copies every object of src, of any kind, into an empty document of the
+   kind dst_in gives, and compares the copies with their sources: every
+   field, strings as UTF-8 where the copy converted them, and layer flags
+   in the read back. Writes the copy as file, reads it back, and checks its
+   layers' flags and the texts' characters. */
+static void
+clone_into_kind (const char *source, Dwg_Data *src, const unsigned dst_in,
+                 const Layer_State *expected, const unsigned num_expected,
+                 const char *file)
+{
+  char what[200];
+  Dwg_Data *dst = new_document_of_kind (src, dst_in);
+  BITCODE_RLL *handles
+      = (BITCODE_RLL *)calloc (src->num_objects, sizeof (BITCODE_RLL));
+  Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0, num_handles = 0;
+  Dwg_Data readback;
+  Compare c;
+  int error;
+
+  snprintf (what, sizeof (what), "copy %s into a document of %s", source,
+            kind_name (dst_in));
+  memset (&readback, 0, sizeof (readback));
+  if (!dst || !handles || !map)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
+  for (BITCODE_BL i = 0; i < src->num_objects; i++)
+    if (is_copyable (&src->object[i]))
+      handles[num_handles++] = src->object[i].handle.value;
+  loglevel = tracelevel;
+  error = dwg_copy_objects (dst, src, handles, num_handles, map, &unresolved,
+                            &num_unresolved);
+  if (!error && num_handles && dst->num_objects == num_handles)
+    OK ("%s: copied %u objects", what, (unsigned)num_handles);
+  else
+    {
+      FAIL ("%s: copy error 0x%x, %u of %u objects", what, (unsigned)error,
+            (unsigned)dst->num_objects, (unsigned)num_handles);
+      goto cleanup;
+    }
+  (void)copy_header_vars (dst, src, map);
+
+  memset (&c, 0, sizeof (c));
+  c.map = map;
+  c.version = src->header.from_version;
+  c.a_utf8 = (src->opts & DWG_OPTS_INJSON) != 0;
+  c.b_utf8 = (dst->opts & DWG_OPTS_INJSON) != 0;
+  c.codepage = src->header.codepage;
+  c.layer_kinds_differ = (src->opts & DWG_OPTS_IN) != (dst->opts & DWG_OPTS_IN)
+                         && src->header.from_version >= R_2000;
+  for (BITCODE_BL i = 0; i < num_handles; i++)
+    {
+      const Dwg_Object *a = dwg_resolve_handle (src, handles[i]);
+      const Dwg_Object *b
+          = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[i]));
+      char obj_what[64];
+      snprintf (obj_what, sizeof (obj_what), "%s " FORMAT_HV, a->name,
+                a->handle.value);
+      c.what = obj_what;
+      if (!b)
+        compare_fail (&c, "copy not found");
+      else
+        compare_object (&c, src, a, dst, b);
+    }
+  if (!c.failed)
+    OK ("%s: every copy has its source's fields%s", what,
+        c.a_utf8 != c.b_utf8 ? ", strings as UTF-8" : "");
+  else
+    FAIL ("%s: %d field differences between copies and sources", what,
+          c.failed);
+  check_refs (what, dst, src->header_vars.HANDSEED->absolute_ref);
+
+  loglevel = tracelevel;
+  error = write_dwg (file, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (file, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+      goto cleanup;
+    }
+  check_layer_states (what, &readback, expected, num_expected);
+  check_texts (what, src, &readback, map);
+  if (!numfailed () && !getenv ("COPY_TEST_KEEP"))
+    unlink (file);
+
+cleanup:
+  free_dwg (&readback);
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  dwg_copy_map_free (map);
+  free (unresolved);
+  free (handles);
 }
 
 /* The model space entities of dwg, with the vertices, attributes and
