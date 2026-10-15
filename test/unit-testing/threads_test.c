@@ -42,7 +42,7 @@ static int test_loglevel;
 #  include <windows.h>
 #  include <process.h>
 #  define HAVE_TEST_THREADS
-#elif defined(HAVE_PTHREAD_H)
+#elif defined(HAVE_PTHREAD)
 #  include <pthread.h>
 #  define HAVE_TEST_THREADS
 #endif

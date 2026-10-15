@@ -97,6 +97,9 @@ if(Threads_FOUND)
     ../../src/classes.c
     tests_common.h)
   target_link_libraries(threads_test ${CMAKE_THREAD_LIBS_INIT})
+  if(CMAKE_USE_PTHREADS_INIT)
+    target_compile_definitions(threads_test PRIVATE HAVE_PTHREAD)
+  endif()
   if(NOT MSVC)
     add_test(threads_test ${TARGET_SYSTEM_EMULATOR} threads_test${CMAKE_EXECUTABLE_SUFFIX})
     # where the test finds test/test-data
