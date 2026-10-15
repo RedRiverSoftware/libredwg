@@ -948,9 +948,8 @@ entity_handle (const Dwg_Data *dwg, const Dwg_Object_Entity *ent)
   return dwg->object[ent->objid].handle.value;
 }
 
-/* Makes the entity ref names owned by the object with handle owner, as
-   AutoCAD does for the entities an INSERT, POLYLINE or TABLE owns, where
-   the add API makes the block their owner. */
+/* Makes the entity ref names owned by the object with handle owner, for
+   entities moved from the object that owned them to another. */
 static void
 set_owner (Dwg_Data *dwg, const BITCODE_H ref, const BITCODE_RLL owner)
 {
@@ -1048,8 +1047,7 @@ test_evaluate_owned (Dwg_Data *dwg)
       fail ("evaluate owned: Trees not found");
       return 1;
     }
-  // 't' is a block alteZZa's INSERTs draw. dwg_add_ATTRIB, as
-  // dwg_add_Attribute links its ATTRIB twice.
+  // 't' is a block alteZZa's INSERTs draw
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
@@ -1077,13 +1075,6 @@ test_evaluate_owned (Dwg_Data *dwg)
       fail ("evaluate owned: could not make a TABLE");
       return 1;
     }
-  set_owner (dwg, insert->attribs[0], h_insert);
-  set_owner (dwg, insert->seqend, h_insert);
-  for (BITCODE_BL i = 0; i < pline->num_owned; i++)
-    set_owner (dwg, pline->vertex[i], h_pline);
-  set_owner (dwg, pline->seqend, h_pline);
-  set_owner (dwg, table->attribs[0], h_table);
-  set_owner (dwg, table->seqend, h_table);
 
   rep = dwg_dynblock_evaluate (def, NULL, 0, &error);
   loglevel = test_loglevel;
@@ -2147,8 +2138,6 @@ test_stretch_whole (Dwg_Data *dwg)
   // its insertion point: the decoder leaves it 0, and so does the copy
   unstored->horiz_alignment = 1;
   unstored->dataflags = 0x02;
-  set_owner (dwg, insert->attribs[0], entity_handle (dwg, insert->parent));
-  set_owner (dwg, insert->seqend, entity_handle (dwg, insert->parent));
 
   list[n++] = added (dwg, line->parent, 2, "LINE");
   list[n++] = added (dwg, arc->parent, 2, "ARC");
@@ -2365,8 +2354,6 @@ test_move (Dwg_Data *dwg)
   text->dataflags = 0x02;
   h_text = entity_handle (dwg, text->parent);
   h_insert = entity_handle (dwg, insert->parent);
-  set_owner (dwg, insert->attribs[0], h_insert);
-  set_owner (dwg, insert->seqend, h_insert);
   if (!add_move_entity (dwg, move, h_text)
       || !add_move_entity (dwg, move, h_insert))
     {

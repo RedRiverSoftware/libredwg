@@ -201,6 +201,7 @@ int decode_preR13_entities (BITCODE_RL start, BITCODE_RL end,
                             const EntitySectionIndexR11 entity_section_index);
 
 /* from dwg.c */
+BITCODE_BL dwg_count_entities (const Dwg_Data *restrict dwg);
 // from dat.fh
 EXPORT int dat_read_size (Bit_Chain *restrict dat);
 EXPORT int dat_read_file (Bit_Chain *restrict dat, FILE *restrict fp,
