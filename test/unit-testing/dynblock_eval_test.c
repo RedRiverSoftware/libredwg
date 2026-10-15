@@ -20,8 +20,10 @@
    The fixture's Window has three linear properties' stretch actions,
    'Stretch Width', 'Stretch Divider' (at a distance multiplier of 0.5) and
    'Stretch Height'; its Door has stretch actions at angle offsets of 0 to
-   90 degrees, a scale action and two move actions. Further cases are made
-   by adding entities to those actions, or changing them, in memory. */
+   90 degrees, a scale action and two move actions; its Toilet has a
+   rotation property, Angle, whose rotate action 'Rotate Plan' turns part
+   of it about the origin. Further cases are made by adding entities to
+   those actions, or changing them, in memory. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -638,11 +640,6 @@ test_refusals (Dwg_Data *dwg)
   failures += test_refusal (dwg, WINDOW, v, 1,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a linear value below 0");
-  v[0].name = (char *)"Angle";
-  v[0].value = M_PI / 6;
-  failures += test_refusal (dwg, TOILET, v, 1,
-                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                            "a changed rotation value");
   v[0].name = (char *)"Flip view";
   v[0].value = 1.0;
   failures += test_refusal (dwg, TOILET, v, 1,
@@ -1448,10 +1445,13 @@ test_linear_order (Dwg_Data *dwg)
 
 /* Actions that move each other's parameters: 'Stretch Width' made to move
    the end point of Window Height, and 'Stretch Height' that of Window
-   Width. Only the actions of the properties given a value run, so the
-   Window evaluates with no values, and with Width alone, whose stretch
-   then moves Height's end point; with both changed, the order AutoCAD
-   evaluates them in isn't known, and the evaluator refuses them. */
+   Width. Only the actions of the properties that run run, so the Window
+   evaluates with no values, with Width alone, as Height isn't given and
+   its stretch doesn't run, and with both given at their lengths, when
+   neither runs. With Width changed and Height given, Width's stretch
+   moves Height's end point, so Height runs too, and the order AutoCAD
+   evaluates them in isn't known: the evaluator refuses them, as with both
+   changed. */
 static int
 test_linear_cycle (Dwg_Data *dwg)
 {
@@ -1530,6 +1530,26 @@ test_linear_cycle (Dwg_Data *dwg)
                             REFUSED (DWG_ERR_NOTYETSUPPORTED),
                             "linear values whose actions move each other's "
                             "parameters");
+  v[1].value = 36.0;
+  failures += test_refusal (dwg, WINDOW, v, 2,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a changed linear value whose action moves "
+                            "another given one, whose action moves it");
+  v[0].value = 36.0;
+  rep = evaluate (dwg, WINDOW, v, 2, "linear cycle, both at their lengths");
+  frame = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+  if (frame && frame->fixedtype == DWG_TYPE_LWPOLYLINE
+      && frame->tio.entity->tio.LWPOLYLINE->num_points == 4
+      && is_point (frame->tio.entity->tio.LWPOLYLINE->points[2].x,
+                   frame->tio.entity->tio.LWPOLYLINE->points[2].y, 36.0, 36.0))
+    OK ("linear cycle: both given at their lengths, neither runs");
+  else if (rep)
+    {
+      fail ("linear cycle: both at their lengths moved the frame");
+      failures++;
+    }
+  else
+    failures++;
   pop_stretch_code (height_stretch);
   pop_stretch_code (width_stretch);
   return failures;
@@ -1548,7 +1568,7 @@ test_linear_refusals (Dwg_Data *dwg)
       = linear_param (dwg, WINDOW, "Window Width");
   Dwg_Object_BLOCKLINEARPARAMETER *height
       = linear_param (dwg, WINDOW, "Window Height");
-  Dwg_Object *frame = dwg_resolve_handle (dwg, 0xBBD3);
+  const Dwg_Object *frame = dwg_resolve_handle (dwg, 0xBBD3);
   Dwg_DynValue v;
   int failures = 0;
   memset (&v, 0, sizeof (v));
@@ -1577,16 +1597,16 @@ test_linear_refusals (Dwg_Data *dwg)
     width->def_endpt = width->def_basept;
     failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
                               "a linear parameter of no length");
-    // a huge value on a short parameter: the frame's vertex 3 moves to
-    // about 1e308, and stays at y 0
+    // a huge value on a short parameter: the frame's vertex 3, (36, 0),
+    // moves by 1e308 - 0.5 to about 1e308, and stays at y 0
     width->def_endpt.x = width->def_basept.x + 0.5;
     v.value = 1e308;
     rep = evaluate (dwg, WINDOW, &v, 1, "linear 1e308");
     copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
     if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
         && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
-        && isfinite (copy->tio.entity->tio.LWPOLYLINE->points[3].x)
-        && copy->tio.entity->tio.LWPOLYLINE->points[3].x > 1e307
+        && fabs (copy->tio.entity->tio.LWPOLYLINE->points[3].x / 1e308 - 1.0)
+               < 1e-9
         && copy->tio.entity->tio.LWPOLYLINE->points[3].y == 0.0)
       OK ("linear: 1e308 on a parameter 0.5 long moves points by about it");
     else
@@ -1628,14 +1648,16 @@ test_linear_refusals (Dwg_Data *dwg)
                               REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                               "a value an action can't move points by");
     stretch->action_offset_x = 1.0;
-    // 1.5e308 moves the frame's vertices 2 and 3 once each
+    // 1.5e308 moves the frame's vertices 2 and 3 once each: vertex 3,
+    // (36, 0), by 1.5e308 - 36 to 1.5e308
     v.value = 1.5e308;
     rep = evaluate (dwg, WINDOW, &v, 1, "linear 1.5e308");
     copy = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
     if (copy && copy->fixedtype == DWG_TYPE_LWPOLYLINE
         && copy->tio.entity->tio.LWPOLYLINE->num_points == 4
-        && isfinite (copy->tio.entity->tio.LWPOLYLINE->points[3].x)
-        && copy->tio.entity->tio.LWPOLYLINE->points[3].x > 1e308)
+        && fabs (copy->tio.entity->tio.LWPOLYLINE->points[3].x / 1.5e308
+                 - 1.0)
+               < 1e-9)
       OK ("linear: 1.5e308 moves each stretched vertex once");
     else
       {
@@ -1756,9 +1778,11 @@ test_linear_refusals (Dwg_Data *dwg)
     stretch->hdls[0].hdl = hdl;
   }
 
-  // the frame, BBD3, which 'Stretch Width' stretches, along X
+  // the frame, BBD3, which 'Stretch Width' stretches, along X; found again,
+  // as the evaluations added objects
   {
-    Dwg_Entity_LWPOLYLINE *_frame = frame->tio.entity->tio.LWPOLYLINE;
+    Dwg_Entity_LWPOLYLINE *_frame
+        = dwg_resolve_handle (dwg, 0xBBD3)->tio.entity->tio.LWPOLYLINE;
     const BITCODE_BE extrusion = _frame->extrusion;
     _frame->extrusion.x = 1.0;
     _frame->extrusion.y = 0.0;
@@ -2469,6 +2493,13 @@ test_selected_nodes (Dwg_Data *dwg)
       }
   }
 
+  // found again, as the evaluations added objects
+  swing = graph_node (dwg, DOOR, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
+  if (!swing)
+    {
+      fail ("selected nodes: the Door's swing not found again");
+      return failures + 1;
+    }
   _swing = swing->tio.object->tio.BLOCKFLIPPARAMETER;
   _swing->chain_actions = 1;
   failures += test_refusal (dwg, DOOR, &v, 1,
@@ -2489,12 +2520,916 @@ test_selected_nodes (Dwg_Data *dwg)
   return failures;
 }
 
+/* A parameter an action selects (deps) without listing it among those it
+   moves (a stretch's codes, a move's node ids) would move with the
+   selection, and run its actions if it chains them: the evaluator refuses
+   one that chains its actions, other than the action's own parameter.
+   Here Window Height, added to 'Stretch Width''s selection, and the
+   Door's flip parameter hinge, added to MoveSwing's. */
+static int
+test_selected_deps (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCKSTRETCHACTION *stretch
+      = stretch_action (dwg, WINDOW, "Stretch Width");
+  Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  Dwg_Object_BLOCKLINEARPARAMETER *height
+      = linear_param (dwg, WINDOW, "Window Height");
+  Dwg_Object *hinge
+      = graph_node (dwg, DOOR, DWG_TYPE_BLOCKFLIPPARAMETER, "hinge");
+  Dwg_DynValue v;
+  BITCODE_RLL h_height, h_hinge;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!stretch || !move || !width || !height || !hinge)
+    {
+      fail ("selected deps: fixture objects not found");
+      return 1;
+    }
+  h_height = dwg->object[height->parent->objid].handle.value;
+  h_hinge = hinge->handle.value;
+
+  // its own parameter, Window Width, is in 'Stretch Width''s selection
+  v.name = (char *)"Window Width";
+  v.value = 24.0;
+  width->chain_actions = 1;
+  if (evaluate (dwg, WINDOW, &v, 1, "a stretch selecting its own chained "
+                                    "parameter"))
+    OK ("selected deps: a stretch's own parameter may chain its actions");
+  else
+    failures++;
+  width->chain_actions = 0;
+
+  if (add_dep (dwg, &stretch->deps, &stretch->num_deps, h_height))
+    {
+      if (evaluate (dwg, WINDOW, &v, 1, "a stretch selecting another "
+                                        "parameter"))
+        OK ("selected deps: a stretch may select another parameter that "
+            "doesn't chain its actions");
+      else
+        failures++;
+      height->chain_actions = 1;
+      failures += test_refusal (dwg, WINDOW, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a stretch selecting, not listing, a "
+                                "parameter chaining its actions");
+      height->chain_actions = 0;
+      stretch->num_deps--;
+    }
+  else
+    {
+      fail ("selected deps: out of memory");
+      failures++;
+    }
+
+  v.name = (char *)"Wall Thickness";
+  v.value = 6.0;
+  if (add_move_entity (dwg, move, h_hinge))
+    {
+      Dwg_Object_BLOCKFLIPPARAMETER *_hinge
+          = hinge->tio.object->tio.BLOCKFLIPPARAMETER;
+      _hinge->chain_actions = 1;
+      failures += test_refusal (dwg, DOOR, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a move selecting, not listing, a parameter "
+                                "chaining its actions");
+      _hinge->chain_actions = 0;
+      move->num_deps--;
+    }
+  else
+    {
+      fail ("selected deps: out of memory");
+      failures++;
+    }
+  return failures;
+}
+
+/*--------------------------------------------------------------------------------
+ * Rotation properties, and their rotate actions
+ */
+
+/* The Toilet's rotation parameter, Angle, and its rotate action 'Rotate
+   Plan', which turns 65 of its entities about the origin, its base
+   point. */
+#define TOILET_ANGLE 0xB8FE
+#define ROTATE_PLAN 0xB90C
+
+static Dwg_Object_BLOCKROTATEACTION *
+rotate_action (Dwg_Data *dwg, const BITCODE_RLL def, const char *name)
+{
+  Dwg_Object *obj = graph_node (dwg, def, DWG_TYPE_BLOCKROTATEACTION, name);
+  return obj ? obj->tio.object->tio.BLOCKROTATEACTION : NULL;
+}
+
+/* Whether angles a and b are the same, around the circle. */
+static int
+is_angle (const double a, const double b)
+{
+  const double d = fmod (fabs (a - b), 2.0 * M_PI);
+  return fmin (d, 2.0 * M_PI - d) <= TOLERANCE;
+}
+
+/* Whether angle a is in [0, 2 pi), as AutoCAD keeps a turned one. */
+static int
+is_normal (const double a)
+{
+  return a >= 0.0 && a < 2.0 * M_PI;
+}
+
+/* Whether the point x, y is sx, sy turned about the origin by angle. Both
+   are in the OCS of an entity whose extrusion has the sign sign: one
+   along -Z has its OCS X axis along the block's -X. */
+static int
+is_turned_xy (const double x, const double y, const double sx,
+              const double sy, const double sign, const double angle)
+{
+  const double bx = sign * sx;
+  return is_point (sign * x, y, bx * cos (angle) - sy * sin (angle),
+                   bx * sin (angle) + sy * cos (angle));
+}
+
+#define TURNED_2D(b, a, sign, angle)                                          \
+  is_turned_xy ((b).x, (b).y, (a).x, (a).y, sign, angle)
+
+static double
+ocs_sign (const BITCODE_BE *extrusion)
+{
+  return extrusion->z < 0.0 ? -1.0 : 1.0;
+}
+
+/* Whether a TEXT or ATTRIB b is a turned by angle: its insertion point,
+   its alignment point when it has one, and its rotation, which dataflags
+   says is stored unless it is 0. */
+#define IS_TURNED_TEXT(b, a, angle)                                           \
+  (TURNED_2D ((b)->ins_pt, (a)->ins_pt, ocs_sign (&(a)->extrusion), angle)    \
+   && ((a)->dataflags & 0x02                                                  \
+           ? is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,             \
+                       (a)->alignment_pt.x, (a)->alignment_pt.y)              \
+           : TURNED_2D ((b)->alignment_pt, (a)->alignment_pt,                \
+                        ocs_sign (&(a)->extrusion), angle))                   \
+   && is_angle ((b)->rotation,                                                \
+                (a)->rotation + ocs_sign (&(a)->extrusion) * (angle))         \
+   && is_normal ((b)->rotation)                                               \
+   && !((b)->dataflags & 0x08) == ((b)->rotation != 0.0))
+
+/* Whether copy is src turned whole about the origin by angle, counter-
+   clockwise in the block: every point and direction of it, and the
+   ATTRIBs of an INSERT. Angle 0 checks that it is unchanged. */
+static int
+is_turned (Dwg_Data *dwg, const Dwg_Object *src, const Dwg_Object *copy,
+           const double angle)
+{
+  if (!src || !copy || src->fixedtype != copy->fixedtype)
+    return 0;
+  switch (src->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      {
+        const Dwg_Entity_LINE *a = src->tio.entity->tio.LINE;
+        const Dwg_Entity_LINE *b = copy->tio.entity->tio.LINE;
+        return TURNED_2D (b->start, a->start, 1.0, angle)
+               && TURNED_2D (b->end, a->end, 1.0, angle)
+               && b->start.z == a->start.z && b->end.z == a->end.z;
+      }
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *a = src->tio.entity->tio.LWPOLYLINE;
+        const Dwg_Entity_LWPOLYLINE *b = copy->tio.entity->tio.LWPOLYLINE;
+        int same = a->num_points == b->num_points;
+        for (BITCODE_BL i = 0; same && i < a->num_points; i++)
+          same = TURNED_2D (b->points[i], a->points[i],
+                            ocs_sign (&a->extrusion), angle);
+        return same;
+      }
+    case DWG_TYPE_ARC:
+      {
+        const Dwg_Entity_ARC *a = src->tio.entity->tio.ARC;
+        const Dwg_Entity_ARC *b = copy->tio.entity->tio.ARC;
+        const double sign = ocs_sign (&a->extrusion);
+        return TURNED_2D (b->center, a->center, sign, angle)
+               && is_angle (b->start_angle, a->start_angle + sign * angle)
+               && is_angle (b->end_angle, a->end_angle + sign * angle)
+               && is_normal (b->start_angle) && is_normal (b->end_angle)
+               && b->radius == a->radius;
+      }
+    case DWG_TYPE_CIRCLE:
+      return TURNED_2D (copy->tio.entity->tio.CIRCLE->center,
+                        src->tio.entity->tio.CIRCLE->center,
+                        ocs_sign (&src->tio.entity->tio.CIRCLE->extrusion),
+                        angle);
+    case DWG_TYPE_ELLIPSE:
+      {
+        const Dwg_Entity_ELLIPSE *a = src->tio.entity->tio.ELLIPSE;
+        const Dwg_Entity_ELLIPSE *b = copy->tio.entity->tio.ELLIPSE;
+        // the major axis turns as a vector, which about the origin is the
+        // same as a point
+        return TURNED_2D (b->center, a->center, 1.0, angle)
+               && TURNED_2D (b->sm_axis, a->sm_axis, 1.0, angle)
+               && b->start_angle == a->start_angle
+               && b->end_angle == a->end_angle;
+      }
+    case DWG_TYPE_SPLINE:
+      {
+        const Dwg_Entity_SPLINE *a = src->tio.entity->tio.SPLINE;
+        const Dwg_Entity_SPLINE *b = copy->tio.entity->tio.SPLINE;
+        int same = a->num_fit_pts == b->num_fit_pts
+                   && a->num_ctrl_pts == b->num_ctrl_pts
+                   && TURNED_2D (b->beg_tan_vec, a->beg_tan_vec, 1.0, angle)
+                   && TURNED_2D (b->end_tan_vec, a->end_tan_vec, 1.0, angle);
+        for (BITCODE_BS i = 0; same && i < a->num_fit_pts; i++)
+          same = TURNED_2D (b->fit_pts[i], a->fit_pts[i], 1.0, angle);
+        for (BITCODE_BL i = 0; same && i < a->num_ctrl_pts; i++)
+          same = TURNED_2D (b->ctrl_pts[i], a->ctrl_pts[i], 1.0, angle);
+        return same;
+      }
+    case DWG_TYPE_TEXT:
+      return IS_TURNED_TEXT (copy->tio.entity->tio.TEXT,
+                             src->tio.entity->tio.TEXT, angle);
+    case DWG_TYPE_ATTRIB:
+      return IS_TURNED_TEXT (copy->tio.entity->tio.ATTRIB,
+                             src->tio.entity->tio.ATTRIB, angle);
+    case DWG_TYPE_MTEXT:
+      return TURNED_2D (copy->tio.entity->tio.MTEXT->ins_pt,
+                        src->tio.entity->tio.MTEXT->ins_pt, 1.0, angle)
+             && TURNED_2D (copy->tio.entity->tio.MTEXT->x_axis_dir,
+                           src->tio.entity->tio.MTEXT->x_axis_dir, 1.0,
+                           angle);
+    case DWG_TYPE_INSERT:
+      {
+        const Dwg_Entity_INSERT *a = src->tio.entity->tio.INSERT;
+        const Dwg_Entity_INSERT *b = copy->tio.entity->tio.INSERT;
+        const double sign = ocs_sign (&a->extrusion);
+        int same = TURNED_2D (b->ins_pt, a->ins_pt, sign, angle)
+                   && is_angle (b->rotation, a->rotation + sign * angle)
+                   && is_normal (b->rotation) && a->num_owned == b->num_owned;
+        for (BITCODE_BL i = 0; same && a->attribs && i < a->num_owned; i++)
+          same = is_turned (dwg, dwg_ref_object (dwg, a->attribs[i]),
+                            dwg_ref_object (dwg, b->attribs[i]), angle);
+        return same;
+      }
+    case DWG_TYPE_HATCH:
+      {
+        const Dwg_Entity_HATCH *a = src->tio.entity->tio.HATCH;
+        const Dwg_Entity_HATCH *b = copy->tio.entity->tio.HATCH;
+        const double sign = ocs_sign (&a->extrusion);
+        int same
+            = a->num_paths == b->num_paths && a->num_seeds == b->num_seeds;
+        for (BITCODE_BL i = 0; same && i < a->num_paths; i++)
+          {
+            const Dwg_HATCH_Path *pa = &a->paths[i], *pb = &b->paths[i];
+            same = pa->num_segs_or_paths == pb->num_segs_or_paths;
+            for (BITCODE_BL j = 0; same && j < pa->num_segs_or_paths; j++)
+              same = pa->flag & 2
+                         ? TURNED_2D (pb->polyline_paths[j].point,
+                                      pa->polyline_paths[j].point, sign,
+                                      angle)
+                               && pb->polyline_paths[j].bulge
+                                      == pa->polyline_paths[j].bulge
+                         : TURNED_2D (pb->segs[j].first_endpoint,
+                                      pa->segs[j].first_endpoint, sign, angle)
+                               && TURNED_2D (pb->segs[j].second_endpoint,
+                                             pa->segs[j].second_endpoint,
+                                             sign, angle);
+          }
+        for (BITCODE_BL i = 0; same && i < a->num_seeds; i++)
+          same = TURNED_2D (b->seeds[i], a->seeds[i], sign, angle);
+        return same;
+      }
+    case DWG_TYPE_POINT:
+      {
+        const Dwg_Entity_POINT *a = src->tio.entity->tio.POINT;
+        const Dwg_Entity_POINT *b = copy->tio.entity->tio.POINT;
+        return is_turned_xy (b->x, b->y, a->x, a->y, 1.0, angle)
+               && is_angle (b->x_ang,
+                            a->x_ang + ocs_sign (&a->extrusion) * angle)
+               && is_normal (b->x_ang);
+      }
+    default:
+      return 0;
+    }
+}
+
+/* Whether entity handle is in the selection of rotate action a. */
+static int
+is_selected (const Dwg_Object_BLOCKROTATEACTION *a, const BITCODE_RLL handle)
+{
+  for (BITCODE_BL i = 0; a->deps && i < a->num_deps; i++)
+    if (a->deps[i] && a->deps[i]->absolute_ref == handle)
+      return 1;
+  return 0;
+}
+
+/* Checks that the Toilet evaluated at Angle angle, as block rep, has the
+   entities of 'Rotate Plan''s selection turned by turn, and the others
+   unchanged. */
+static int
+check_toilet (Dwg_Data *dwg, const Dwg_Object_BLOCK_HEADER *rep,
+              const double turn, const char *what)
+{
+  const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, TOILET);
+  const Dwg_Object_BLOCKROTATEACTION *a
+      = rotate_action (dwg, TOILET, "Rotate Plan");
+  BITCODE_BL turned = 0, kept = 0;
+  if (!def || !a || !rep || rep->num_owned != def->num_owned)
+    {
+      fail ("%s: no block like the Toilet", what);
+      return 1;
+    }
+  for (BITCODE_BL i = 0; i < def->num_owned; i++)
+    {
+      const Dwg_Object *src = dwg_ref_object (dwg, def->entities[i]);
+      const Dwg_Object *copy = dwg_ref_object (dwg, rep->entities[i]);
+      const int selected = src && is_selected (a, src->handle.value);
+      if (!is_turned (dwg, src, copy, selected ? turn : 0.0))
+        {
+          fail ("%s: %s " FORMAT_HV " is not %s", what,
+                src ? dwg_type_name (src->fixedtype) : "?",
+                src ? src->handle.value : 0,
+                selected ? "turned" : "as it was");
+          return 1;
+        }
+      if (selected)
+        turned++;
+      else
+        kept++;
+    }
+  if (turned != 65 || kept != 150)
+    {
+      fail ("%s: %u entities turned, %u kept, expected 65 and 150", what,
+            (unsigned)turned, (unsigned)kept);
+      return 1;
+    }
+  if (turn != 0.0)
+    OK ("%s: the 65 entities of the selection turned, 150 as they were",
+        what);
+  else
+    OK ("%s: all 215 entities as they were", what);
+  return 0;
+}
+
+/* The Toilet at Angle 1.2: 'Rotate Plan' turns its selection, LINEs, ARCs
+   and LWPOLYLINEs, about the origin by 1.2, and leaves the rest. A value
+   a whole turn away gives the same block, as AutoCAD keeps the angles a
+   turn changes in [0, 2 pi); one at the definition's value, 0 or 2 pi,
+   turns nothing. */
+static int
+test_rotation (Dwg_Data *dwg)
+{
+  static const double values[] = { 1.2, 1.2 - 2.0 * M_PI, 1.2 + 4.0 * M_PI };
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Angle";
+  for (size_t i = 0; i < sizeof (values) / sizeof (values[0]); i++)
+    {
+      char what[64];
+      snprintf (what, sizeof (what), "rotation Angle %.4f", values[i]);
+      v.value = values[i];
+      failures += check_toilet (dwg, evaluate (dwg, TOILET, &v, 1, what),
+                                1.2, what);
+    }
+  v.value = 2.0 * M_PI;
+  failures += check_toilet (
+      dwg, evaluate (dwg, TOILET, &v, 1, "rotation Angle 2 pi"), 0.0,
+      "rotation Angle 2 pi, the definition's");
+  return failures;
+}
+
+/* Entities of each type the evaluator turns, added to the Toilet and to
+   'Rotate Plan''s selection: at Angle 1.2 each turns by 1.2 about the
+   origin, an entity whose extrusion is -Z the other way in its OCS. A
+   TEXT whose rotation the decoder left unstored (dataflags 0x08) gets it
+   stored, and keeps it written as r2004 and read back. Then what the
+   evaluator refuses to turn. */
+static int
+test_turn_whole (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCK_HEADER *def = block_header (dwg, TOILET);
+  Dwg_Object_BLOCKROTATEACTION *act
+      = rotate_action (dwg, TOILET, "Rotate Plan");
+  const dwg_point_2d square[4]
+      = { { 40.0, 0.0 }, { 42.0, 0.0 }, { 42.0, 2.0 }, { 40.0, 2.0 } };
+  const dwg_point_2d tri[3] = { { -29.0, 15.0 }, { -31.0, 15.0 },
+                                { -31.0, 17.0 } };
+  const dwg_point_3d fit[3] = { { 29.0, 27.0, 0.0 },
+                                { 30.0, 28.5, 0.0 },
+                                { 31.0, 27.0, 0.0 } };
+  const dwg_point_3d tan = { 1.0, 1.0, 0.0 };
+  dwg_point_3d pt = { 30.0, 4.0, 0.0 };
+  Added list[20];
+  int n = 0, failures = 0, error;
+  Dwg_Entity_CIRCLE *circle, *mirrored, *boundary;
+  Dwg_Entity_ARC *arc;
+  Dwg_Entity_LWPOLYLINE *lwpline, *closed, *bulged;
+  Dwg_Entity_ELLIPSE *ellipse;
+  Dwg_Entity_SPLINE *spline;
+  Dwg_Entity_TEXT *text, *centred;
+  Dwg_Entity_MTEXT *mtext;
+  Dwg_Entity_INSERT *insert;
+  Dwg_Entity_ATTDEF *attdef;
+  Dwg_Entity_POINT *point, *mpoint;
+  Dwg_Entity_RAY *ray;
+  Dwg_Entity_HATCH *hatch, *bulged_hatch, *arc_hatch;
+  Dwg_Object_BLOCK_HEADER *rep;
+  Dwg_DynValue v;
+  BITCODE_RLL h_text = 0, rep_handle;
+  Dwg_Data readback;
+  memset (&v, 0, sizeof (v));
+  if (!def || !act)
+    {
+      fail ("turn whole: fixture objects not found");
+      return 1;
+    }
+  circle = dwg_add_CIRCLE (def, &pt, 1.0);
+  pt.x = -30.0; // at x 30 in the block
+  pt.y = 8.0;
+  mirrored = dwg_add_CIRCLE (def, &pt, 1.0);
+  pt.y = 12.0;
+  arc = dwg_add_ARC (def, &pt, 1.0, 0.3, 2.0);
+  lwpline = dwg_add_LWPOLYLINE (def, 3, tri);
+  pt.x = 30.0;
+  pt.y = 20.0;
+  ellipse = dwg_add_ELLIPSE (def, &pt, 2.0, 0.5);
+  spline = dwg_add_SPLINE (def, 3, fit, &tan, &tan);
+  pt.y = 31.0;
+  text = dwg_add_TEXT (def, "left", &pt, 1.0);
+  pt.y = 33.0;
+  centred = dwg_add_TEXT (def, "centred", &pt, 1.0);
+  pt.y = 40.0;
+  mtext = dwg_add_MTEXT (def, &pt, 4.0, "mtext");
+  pt.y = 44.0;
+  insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.2);
+  pt.x = 31.0;
+  if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
+    insert = NULL;
+  closed = dwg_add_LWPOLYLINE (def, 4, square);
+  bulged = dwg_add_LWPOLYLINE (def, 4, square);
+  pt.x = 30.0;
+  pt.y = 56.0;
+  point = dwg_add_POINT (def, &pt);
+  pt.y = 58.0;
+  mpoint = dwg_add_POINT (def, &pt);
+  pt.y = 60.0;
+  attdef = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "TURNTAG", "default");
+  ray = dwg_add_RAY (def, &pt, &tan);
+  pt.y = 64.0;
+  boundary = dwg_add_CIRCLE (def, &pt, 1.0);
+  loglevel = test_loglevel;
+  if (!circle || !mirrored || !arc || !lwpline || !ellipse || !spline
+      || !text || !centred || !mtext || !insert || !closed || !bulged
+      || !point || !mpoint || !attdef || !ray || !boundary)
+    {
+      fail ("turn whole: could not add the entities");
+      return 1;
+    }
+  mirrored->extrusion.z = arc->extrusion.z = lwpline->extrusion.z = -1.0;
+  mpoint->extrusion.z = -1.0;
+  ellipse->sm_axis.x = 2.0;
+  ellipse->sm_axis.y = 0.5;
+  // as the decoder leaves a left-aligned text at rotation 0
+  text->dataflags = 0xFF;
+  centred->horiz_alignment = 1;
+  centred->alignment_pt.x = 30.5;
+  centred->alignment_pt.y = 33.0;
+  centred->rotation = 0.3;
+  point->x_ang = mpoint->x_ang = 0.4;
+  closed->flag |= 512;
+  bulged->flag |= 512;
+  {
+    // a bulge on each edge makes dwg_add_HATCH () give a polyline path
+    BITCODE_BD *bulges = (BITCODE_BD *)calloc (4, sizeof (BITCODE_BD));
+    if (!bulges)
+      {
+        fail ("turn whole: out of memory");
+        return 1;
+      }
+    bulges[0] = 0.5;
+    bulged->bulges = bulges;
+    bulged->num_bulges = 4;
+    bulged->flag |= 16;
+  }
+  set_owner (dwg, insert->attribs[0], entity_handle (dwg, insert->parent));
+  set_owner (dwg, insert->seqend, entity_handle (dwg, insert->parent));
+  {
+    const Dwg_Object *pathobjs[1];
+    pathobjs[0] = &dwg->object[closed->parent->objid];
+    hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
+    pathobjs[0] = &dwg->object[bulged->parent->objid];
+    bulged_hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
+    pathobjs[0] = &dwg->object[boundary->parent->objid];
+    arc_hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
+    loglevel = test_loglevel;
+    if (!hatch || !bulged_hatch || !arc_hatch || hatch->num_paths != 1
+        || hatch->paths[0].flag & 2 || !(bulged_hatch->paths[0].flag & 2))
+      {
+        fail ("turn whole: could not add the HATCHes");
+        return 1;
+      }
+    hatch->extrusion.z = bulged_hatch->extrusion.z = 1.0;
+    arc_hatch->extrusion.z = 1.0;
+    // a seed point each
+    hatch->seeds = (BITCODE_2RD *)calloc (1, sizeof (BITCODE_2RD));
+    if (!hatch->seeds)
+      {
+        fail ("turn whole: out of memory");
+        return 1;
+      }
+    hatch->seeds[0].x = 41.0;
+    hatch->seeds[0].y = 1.0;
+    hatch->num_seeds = 1;
+  }
+
+  list[n++] = added (dwg, circle->parent, 0, "CIRCLE");
+  list[n++] = added (dwg, mirrored->parent, 0, "CIRCLE mirrored");
+  list[n++] = added (dwg, arc->parent, 0, "ARC mirrored");
+  list[n++] = added (dwg, lwpline->parent, 0, "LWPOLYLINE mirrored");
+  list[n++] = added (dwg, ellipse->parent, 0, "ELLIPSE");
+  list[n++] = added (dwg, spline->parent, 0, "SPLINE");
+  list[n++] = added (dwg, text->parent, 0, "TEXT, rotation unstored");
+  list[n++] = added (dwg, centred->parent, 0, "TEXT centred, rotated");
+  list[n++] = added (dwg, mtext->parent, 0, "MTEXT");
+  list[n++] = added (dwg, insert->parent, 0, "INSERT with an ATTRIB");
+  list[n++] = added (dwg, closed->parent, 0, "LWPOLYLINE, a boundary");
+  list[n++] = added (dwg, hatch->parent, 0, "HATCH of lines, with a seed");
+  list[n++] = added (dwg, bulged->parent, 0, "LWPOLYLINE with a bulge");
+  list[n++] = added (dwg, bulged_hatch->parent, 0, "HATCH of a polyline");
+  list[n++] = added (dwg, point->parent, 0, "POINT");
+  list[n++] = added (dwg, mpoint->parent, 0, "POINT mirrored");
+  for (int i = 0; i < n; i++)
+    if (!add_dep (dwg, &act->deps, &act->num_deps, list[i].handle))
+      {
+        fail ("turn whole: out of memory");
+        return 1;
+      }
+
+  v.name = (char *)"Angle";
+  v.value = 1.2;
+  rep = evaluate (dwg, TOILET, &v, 1, "turn whole");
+  if (!rep)
+    return 1;
+  rep_handle = block_handle (rep);
+  for (int i = 0; i < n; i++)
+    {
+      const Dwg_Object *copy = copy_of (dwg, def, rep, list[i].handle);
+      if (is_turned (dwg, dwg_resolve_handle (dwg, list[i].handle), copy, 1.2))
+        OK ("turn whole: the %s turns by 1.2", list[i].what);
+      else
+        {
+          fail ("turn whole: the %s doesn't turn by 1.2", list[i].what);
+          failures++;
+        }
+      if (list[i].handle == entity_handle (dwg, text->parent) && copy)
+        h_text = copy->handle.value;
+    }
+
+  // Written as r2004 and read back, the TEXT keeps its rotation.
+  unlink (WRITTEN);
+  loglevel = tracelevel;
+  error = dwg_write_file (WRITTEN, dwg);
+  loglevel = test_loglevel;
+  if (error >= DWG_ERR_CRITICAL || !h_text)
+    {
+      fail ("turn whole: write r2004: 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      error = read_dwg (WRITTEN, &readback);
+      {
+        const Dwg_Object *t = error & ~KNOWN_ERRORS
+                                  ? NULL
+                                  : dwg_resolve_handle (&readback, h_text);
+        const Dwg_Object_BLOCK_HEADER *blk
+            = t ? block_header (&readback, rep_handle) : NULL;
+        if (t && blk && t->fixedtype == DWG_TYPE_TEXT
+            && is_angle (t->tio.entity->tio.TEXT->rotation, 1.2)
+            && !(t->tio.entity->tio.TEXT->dataflags & 0x08))
+          OK ("turn whole: read back, the TEXT keeps its rotation, 1.2");
+        else
+          {
+            fail ("turn whole: read back 0x%x, the TEXT's rotation %g", error,
+                  t && t->fixedtype == DWG_TYPE_TEXT
+                      ? t->tio.entity->tio.TEXT->rotation
+                      : -1.0);
+            failures++;
+          }
+      }
+      free_dwg (&readback);
+    }
+  unlink (WRITTEN);
+
+  // what the evaluator refuses to turn: an ATTDEF, as AutoCAD left one a
+  // rotate action selected as it was; a RAY; a HATCH on an arc, or with a
+  // pattern; a CIRCLE not in the XY plane; a LINE turned beyond what a
+  // double holds; and an entity the action lists twice
+  {
+    const BITCODE_RLL h_attdef = entity_handle (dwg, attdef->parent);
+    const BITCODE_RLL h_ray = entity_handle (dwg, ray->parent);
+    const BITCODE_RLL h_arc_hatch = entity_handle (dwg, arc_hatch->parent);
+    const BITCODE_RLL h_circle = entity_handle (dwg, circle->parent);
+    Dwg_Entity_LINE *line = NULL;
+    for (BITCODE_BL j = 0; !line && j < act->num_deps; j++)
+      {
+        Dwg_Object *o = dwg_ref_object (dwg, act->deps[j]);
+        if (o && o->fixedtype == DWG_TYPE_LINE)
+          line = o->tio.entity->tio.LINE;
+      }
+    if (!line)
+      {
+        fail ("turn whole: no LINE in 'Rotate Plan''s selection");
+        return failures + 1;
+      }
+    if (add_dep (dwg, &act->deps, &act->num_deps, h_attdef))
+      {
+        failures += test_refusal (dwg, TOILET, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a turn of an ATTDEF");
+        act->num_deps--;
+      }
+    if (add_dep (dwg, &act->deps, &act->num_deps, h_ray))
+      {
+        failures += test_refusal (dwg, TOILET, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a turn of a RAY");
+        act->num_deps--;
+      }
+    if (add_dep (dwg, &act->deps, &act->num_deps, h_arc_hatch))
+      {
+        failures += test_refusal (dwg, TOILET, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a turn of a HATCH on an arc");
+        act->num_deps--;
+      }
+    hatch->is_solid_fill = 0;
+    failures += test_refusal (dwg, TOILET, &v, 1,
+                              REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                              "a turn of a HATCH with a pattern");
+    hatch->is_solid_fill = 1;
+    circle->extrusion.x = 1.0;
+    circle->extrusion.z = 0.0;
+    failures += test_refusal (dwg, TOILET, &v, 1,
+                              REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                              "a turn of a CIRCLE not in the XY plane");
+    circle->extrusion.x = 0.0;
+    circle->extrusion.z = 1.0;
+    {
+      const double x = line->start.x;
+      line->start.x = 1e308;
+      failures += test_refusal (dwg, TOILET, &v, 1,
+                                REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                "a turn beyond what a double holds");
+      line->start.x = x;
+    }
+    if (add_dep (dwg, &act->deps, &act->num_deps, h_circle))
+      {
+        failures += test_refusal (dwg, TOILET, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "an entity the rotate action lists twice");
+        act->num_deps--;
+      }
+  }
+  if (evaluate (dwg, TOILET, &v, 1, "turn whole, restored"))
+    OK ("turn whole: the Toilet evaluates again");
+  else
+    failures++;
+  return failures;
+}
+
+/* The Toilet's rotation parameter and 'Rotate Plan', moved into the
+   Window's evaluation graph under node ids it doesn't use, with the
+   action turning the Window's LINE BBD5, which only 'Stretch Height'
+   stretches: a definition with linear and rotation properties. Their
+   actions run in an order AutoCAD's evaluation doesn't fix unless they
+   are independent, so the evaluator refuses them when they share an
+   entity, when an action that runs moves the rotation parameter, or when
+   the rotate action that runs turns a linear parameter that runs. */
+typedef struct
+{
+  Dwg_Object_BLOCKROTATIONPARAMETER *param;
+  Dwg_Object_BLOCKROTATEACTION *action;
+  BITCODE_BL param_id, action_id, num_deps, num_actions, num_nodes;
+  BITCODE_BL codes[3];
+  BITCODE_H *deps;
+  BITCODE_BL *actions;
+  BITCODE_H line[2];
+} Graft;
+
+#define GRAFT_PARAM 905
+#define GRAFT_ACTION 920
+
+static int
+graft_rotation (Dwg_Data *dwg, Graft *g)
+{
+  Dwg_Object *param = dwg_resolve_handle (dwg, TOILET_ANGLE);
+  Dwg_Object *action = dwg_resolve_handle (dwg, ROTATE_PLAN);
+  Dwg_Object_EVALUATION_GRAPH *graph = definition_graph (dwg, WINDOW);
+  Dwg_EVAL_Node *nodes;
+  memset (g, 0, sizeof (*g));
+  if (!param || param->fixedtype != DWG_TYPE_BLOCKROTATIONPARAMETER || !action
+      || action->fixedtype != DWG_TYPE_BLOCKROTATEACTION || !graph)
+    return 0;
+  nodes = (Dwg_EVAL_Node *)realloc (
+      graph->nodes, (graph->num_nodes + 2) * sizeof (Dwg_EVAL_Node));
+  if (!nodes)
+    return 0;
+  graph->nodes = nodes;
+  memset (&nodes[graph->num_nodes], 0, 2 * sizeof (Dwg_EVAL_Node));
+  nodes[graph->num_nodes].evalexpr
+      = dwg_add_handleref (dwg, 5, TOILET_ANGLE, NULL);
+  nodes[graph->num_nodes + 1].evalexpr
+      = dwg_add_handleref (dwg, 5, ROTATE_PLAN, NULL);
+  g->num_nodes = graph->num_nodes;
+  graph->num_nodes += 2;
+  g->param = param->tio.object->tio.BLOCKROTATIONPARAMETER;
+  g->action = action->tio.object->tio.BLOCKROTATEACTION;
+  g->param_id = g->param->evalexpr.nodeid;
+  g->action_id = g->action->evalexpr.nodeid;
+  g->param->evalexpr.nodeid = GRAFT_PARAM;
+  g->action->evalexpr.nodeid = GRAFT_ACTION;
+  for (int i = 0; i < 3; i++)
+    {
+      g->codes[i] = g->action->conn_pts[i].code;
+      g->action->conn_pts[i].code = GRAFT_PARAM;
+    }
+  g->deps = g->action->deps;
+  g->num_deps = g->action->num_deps;
+  g->actions = g->action->actions;
+  g->num_actions = g->action->num_actions;
+  g->line[0] = g->line[1] = dwg_add_handleref (dwg, 4, 0xBBD5, NULL);
+  g->action->deps = g->line;
+  g->action->num_deps = 1;
+  g->action->num_actions = 0;
+  return 1;
+}
+
+static void
+ungraft_rotation (Dwg_Data *dwg, Graft *g)
+{
+  definition_graph (dwg, WINDOW)->num_nodes = g->num_nodes;
+  g->param->evalexpr.nodeid = g->param_id;
+  g->action->evalexpr.nodeid = g->action_id;
+  for (int i = 0; i < 3; i++)
+    g->action->conn_pts[i].code = g->codes[i];
+  g->action->deps = g->deps;
+  g->action->num_deps = g->num_deps;
+  g->action->actions = g->actions;
+  g->action->num_actions = g->num_actions;
+}
+
+static int
+test_rotation_graft (Dwg_Data *dwg)
+{
+  const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, WINDOW);
+  Dwg_Object_BLOCKSTRETCHACTION *width_stretch
+      = stretch_action (dwg, WINDOW, "Stretch Width");
+  Dwg_Object_BLOCKSTRETCHACTION *divider
+      = stretch_action (dwg, WINDOW, "Stretch Divider");
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  const Dwg_Object_BLOCK_HEADER *rep;
+  Dwg_DynValue v[2];
+  BITCODE_BL width_action = 0;
+  Graft g;
+  int failures = 0;
+  memset (v, 0, sizeof (v));
+  if (!def || !width_stretch || !divider || !width
+      || !graft_rotation (dwg, &g))
+    {
+      fail ("rotation graft: fixture objects not found");
+      return 1;
+    }
+  v[0].name = (char *)"Angle";
+  v[0].value = 1.2;
+  v[1].name = (char *)"Window Width";
+  v[1].value = 24.0;
+
+  rep = evaluate (dwg, WINDOW, v, 1, "rotation graft, Angle");
+  if (rep
+      && is_turned (dwg, dwg_resolve_handle (dwg, 0xBBD5),
+                    copy_of (dwg, def, rep, 0xBBD5), 1.2)
+      && is_turned (dwg, dwg_resolve_handle (dwg, 0xBBD3),
+                    copy_of (dwg, def, rep, 0xBBD3), 0.0))
+    OK ("rotation graft: Angle 1.2 turns the LINE, and nothing else");
+  else
+    {
+      fail ("rotation graft: Angle 1.2 doesn't turn the LINE alone");
+      failures++;
+    }
+  // Width's stretches don't move BBD5: as in test_linear, vertex 2 of the
+  // frame moves to (24, 36)
+  rep = evaluate (dwg, WINDOW, v, 2, "rotation graft, Angle and Width");
+  {
+    const Dwg_Object *frame = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+    if (rep && frame && frame->fixedtype == DWG_TYPE_LWPOLYLINE
+        && is_turned (dwg, dwg_resolve_handle (dwg, 0xBBD5),
+                      copy_of (dwg, def, rep, 0xBBD5), 1.2)
+        && is_point (frame->tio.entity->tio.LWPOLYLINE->points[2].x,
+                     frame->tio.entity->tio.LWPOLYLINE->points[2].y, 24.0,
+                     36.0))
+      OK ("rotation graft: Angle and Width, independent, both apply");
+    else
+      {
+        fail ("rotation graft: Angle and Width don't both apply");
+        failures++;
+      }
+  }
+  v[1].name = (char *)"Window Height";
+  v[1].value = 54.0;
+  failures += test_refusal (dwg, WINDOW, v, 2,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "an entity turned and stretched");
+  v[1].name = (char *)"Window Width";
+  v[1].value = 24.0;
+
+  // 'Stretch Width' moving the rotation parameter's base point
+  if (add_stretch_code (width_stretch, GRAFT_PARAM, 0))
+    {
+      failures += test_refusal (dwg, WINDOW, v, 2,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a stretch moving a rotation parameter "
+                                "given a value");
+      if (evaluate (dwg, WINDOW, &v[1], 1, "rotation graft, moved, no Angle"))
+        OK ("rotation graft: a stretch may move a rotation parameter given "
+            "no value");
+      else
+        failures++;
+      pop_stretch_code (width_stretch);
+    }
+  // and selecting it without listing it
+  if (add_dep (dwg, &width_stretch->deps, &width_stretch->num_deps,
+               TOILET_ANGLE))
+    {
+      failures += test_refusal (dwg, WINDOW, v, 2,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a stretch selecting, not listing, a "
+                                "rotation parameter given a value");
+      width_stretch->num_deps--;
+    }
+  // 'Rotate Plan' turning Window Width's parameter
+  width_action = width->evalexpr.nodeid;
+  g.action->actions = &width_action;
+  g.action->num_actions = 1;
+  failures += test_refusal (dwg, WINDOW, v, 2,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a turn of a linear parameter whose value "
+                            "changes");
+  v[1].value = 36.0;
+  if (evaluate (dwg, WINDOW, v, 2, "rotation graft, Width at its length"))
+    OK ("rotation graft: a rotate action may turn a linear parameter that "
+        "doesn't run");
+  else
+    failures++;
+  v[1].value = 24.0;
+  g.action->num_actions = 0;
+  // connections, base point and offset the evaluator doesn't support
+  {
+    BITCODE_T name = g.action->conn_pts[2].name;
+    g.action->conn_pts[2].name = (char *)"UpdatedAngle";
+    failures += test_refusal (dwg, WINDOW, v, 1,
+                              REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                              "a rotate action taking another point");
+    g.action->conn_pts[2].name = name;
+  }
+  g.action->dependent = 0;
+  failures += test_refusal (dwg, WINDOW, v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a rotate action with an independent base point");
+  g.action->dependent = 1;
+  g.action->offset.x = 1.0;
+  failures += test_refusal (dwg, WINDOW, v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a rotate action with its base point offset");
+  g.action->offset.x = 0.0;
+  // 'Stretch Divider' taking the rotation's value
+  {
+    BITCODE_BL codes[2];
+    for (int i = 0; i < 2; i++)
+      {
+        codes[i] = divider->conn_pts[i].code;
+        divider->conn_pts[i].code = GRAFT_PARAM;
+      }
+    failures += test_refusal (dwg, WINDOW, v, 1,
+                              REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                              "a rotation property driving a stretch");
+    for (int i = 0; i < 2; i++)
+      divider->conn_pts[i].code = codes[i];
+  }
+  // BBD5 listed twice
+  g.action->num_deps = 2;
+  failures += test_refusal (dwg, WINDOW, v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "an entity the rotate action lists twice");
+  g.action->num_deps = 1;
+  ungraft_rotation (dwg, &g);
+  return failures;
+}
+
 /* What the check reports for each placement of the fixture: the
    definition, and the number of entities compared. AutoCAD computed the
-   placements at the defaults, the visibility ones and the linear ones,
-   which the evaluator matches; the others change kinds it refuses, the
-   Door's Door Size drives a scale action, and Door Elevation is
-   constraint-based. */
+   placements at the defaults, the visibility, linear and rotation ones,
+   which the evaluator matches; the Door's Door Size drives a scale action,
+   and Door Elevation is constraint-based, which it refuses. */
 typedef struct
 {
   BITCODE_RLL insert;
@@ -2526,13 +3461,10 @@ static const Expected_Check expected_checks[] = {
   { 0xC8D7, 0xCA6C, MATCH, KIND (VISIBILITY), DOOR, 11 },
   { 0xC8D8, 0xCAA9, MATCH, KIND (LINEAR) | KIND (VISIBILITY), DOOR, 11 },
   { 0xC8DA, 0xCB0F, MATCH, KIND (VISIBILITY), TOILET, 215 },
-  { 0xC8DB, 0xCC00, UNSUPPORTED, KIND (ROTATION) | KIND (VISIBILITY), TOILET,
-    0 },
-  { 0xC8DC, 0xCD02, UNSUPPORTED, KIND (ROTATION) | KIND (VISIBILITY), TOILET,
-    0 },
-  { 0xC8DD, 0xCE04, UNSUPPORTED, KIND (ROTATION) | KIND (VISIBILITY), TOILET,
-    0 },
-  { 0xC8DE, 0xCF06, UNSUPPORTED, KIND (ROTATION), TOILET, 0 },
+  { 0xC8DB, 0xCC00, MATCH, KIND (ROTATION) | KIND (VISIBILITY), TOILET, 215 },
+  { 0xC8DC, 0xCD02, MATCH, KIND (ROTATION) | KIND (VISIBILITY), TOILET, 215 },
+  { 0xC8DD, 0xCE04, MATCH, KIND (ROTATION) | KIND (VISIBILITY), TOILET, 215 },
+  { 0xC8DE, 0xCF06, MATCH, KIND (ROTATION), TOILET, 215 },
   { 0xC8E0, 0xCFF7, MATCH, KIND (VISIBILITY), TREES, 582 },
   { 0xC8E1, 0xD24A, MATCH, KIND (VISIBILITY), TREES, 582 },
   { 0xC8E2, 0xD49D, MATCH, KIND (VISIBILITY), TREES, 582 },
@@ -2812,6 +3744,56 @@ test_check_finds (Dwg_Data *dwg)
   return failures;
 }
 
+/* The check compares the angles a turn changes around the circle: an ARC
+   of AutoCAD's block of T4 (C8DD), at Angle 225 degrees, still matches
+   with its start angle a whole turn on, as AutoCAD can keep an angle just
+   below 2 pi where the evaluator has it just above 0; a quarter turn on,
+   it differs. */
+static int
+test_check_turned_angles (Dwg_Data *dwg)
+{
+  Dwg_Object *arc = first_of_type (dwg, 0xCE04, DWG_TYPE_ARC);
+  Dwg_DynBlock_Check_Report *report;
+  const Dwg_DynBlock_Check *c;
+  double start;
+  int failures = 0;
+  loglevel = test_loglevel;
+  if (!arc)
+    {
+      fail ("check turned angles: fixture objects not found");
+      return 1;
+    }
+  start = arc->tio.entity->tio.ARC->start_angle;
+  arc->tio.entity->tio.ARC->start_angle = start + 2.0 * M_PI;
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  c = report ? find_check (report, 0xC8DD, 0xCE04) : NULL;
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MATCH)
+    OK ("check turned angles: an ARC's start angle a whole turn on matches");
+  else
+    {
+      fail ("check turned angles: a whole turn on: status %d, %s",
+            c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  arc->tio.entity->tio.ARC->start_angle = start + M_PI / 2.0;
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  c = report ? find_check (report, 0xC8DD, 0xCE04) : NULL;
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 1
+      && c->reason && strstr (c->reason, "start_angle"))
+    OK ("check turned angles: a quarter turn on differs: %s", c->reason);
+  else
+    {
+      fail ("check turned angles: a quarter turn on: status %d, %s",
+            c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
 /* A placement whose evaluation left out data, here an EED group of a Trees
    entity that couldn't be decoded, which the copy drops with
    DWG_ERR_INVALIDEED, is not a match, though the comparison, which doesn't
@@ -2908,6 +3890,116 @@ test_check_copy_warning (Dwg_Data *dwg)
     {
       fail ("check copy warning: %u Trees placements, %u mismatch, %u match",
             (unsigned)num_trees, (unsigned)report->num_mismatch,
+            (unsigned)report->num_match);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
+/* A placement whose evaluation's copy left out an EED group the decoder
+   read only in part: its first item decoded, a later one not, as copy
+   test's test_eed_partly_decoded shows the decoder leaves one. Here the
+   Window's LINE BBD7 gets such a group of the ACAD APPID, after its
+   AcDbBlockRepETag: the raw bytes of a string and a long, with the
+   string's item and none for the long. (An r2004 file keeps its objects
+   compressed, so the bytes can't be changed in a written file as that
+   test does with an r2000 one.) The copy drops the group with
+   DWG_ERR_INVALIDEED, and each Window placement is then a mismatch,
+   though the comparison, which doesn't compare EED, finds no
+   difference. */
+static int
+test_check_eed_read_in_part (Dwg_Data *dwg)
+{
+  static const char text[] = "read in part";
+  const size_t len = sizeof (text) - 1;
+  Dwg_Object *line = dwg_resolve_handle (dwg, 0xBBD7);
+  BITCODE_H acad = dwg_find_tablehandle (dwg, "ACAD", "APPID");
+  Dwg_Object_Entity *ent;
+  Dwg_Eed *eed;
+  Dwg_Eed_Data *data;
+  Dwg_DynBlock_Check_Report *report;
+  char bits[16];
+  BITCODE_BL num_window = 0;
+  int failures = 0;
+  loglevel = test_loglevel;
+  if (!line || line->fixedtype != DWG_TYPE_LINE || !acad)
+    {
+      fail ("check EED read in part: fixture objects not found");
+      return 1;
+    }
+  ent = line->tio.entity;
+  eed = (Dwg_Eed *)realloc (ent->eed, (ent->num_eed + 2) * sizeof (Dwg_Eed));
+  if (!eed)
+    {
+      fail ("check EED read in part: out of memory");
+      return 1;
+    }
+  ent->eed = eed;
+  eed = &ent->eed[ent->num_eed];
+  memset (eed, 0, 2 * sizeof (Dwg_Eed));
+  // the string, code 0: length, codepage (big-endian), the bytes; the
+  // long, code 71, little-endian
+  eed[0].size = (BITCODE_BS)(4 + len + 5);
+  eed[0].handle = acad->handleref;
+  eed[0].raw = (BITCODE_TF)calloc (eed[0].size, 1);
+  data = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data) + len + 1);
+  if (!eed[0].raw || !data)
+    {
+      free (eed[0].raw);
+      free (data);
+      fail ("check EED read in part: out of memory");
+      return 1;
+    }
+  eed[0].raw[1] = (unsigned char)len;
+  eed[0].raw[3] = (unsigned char)dwg->header.codepage;
+  memcpy (&eed[0].raw[4], text, len);
+  eed[0].raw[4 + len] = 71;
+  eed[0].raw[4 + len + 1] = 0x2A;
+  data->code = 0;
+  data->u.eed_0.length = (BITCODE_RS)len;
+  data->u.eed_0.codepage = dwg->header.codepage;
+  memcpy (data->u.eed_0.string, text, len + 1);
+  eed[0].data = data;
+  // eed[1]: the long, which the decoder left without data
+  ent->num_eed += 2;
+  snprintf (bits, sizeof (bits), "(0x%x)", (unsigned)DWG_ERR_INVALIDEED);
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check EED read in part: no report");
+      return 1;
+    }
+  for (size_t i = 0; i < NUM_CHECKS; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      const Dwg_DynBlock_Check *c = find_check (report, e->insert, e->block);
+      if (e->definition != WINDOW)
+        continue;
+      num_window++;
+      if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->evaluated
+          && c->num_entities == e->num_entities && !c->num_differing
+          && c->reason && strstr (c->reason, bits))
+        OK ("check EED read in part " FORMAT_HV ": %s", e->insert, c->reason);
+      else
+        {
+          fail ("check EED read in part " FORMAT_HV ": status %d, %u "
+                "entities, %u differ: %s; expected a mismatch naming %s",
+                e->insert, c ? (int)c->status : -1,
+                c ? (unsigned)c->num_entities : 0,
+                c ? (unsigned)c->num_differing : 0,
+                c && c->reason ? c->reason : "", bits);
+          failures++;
+        }
+    }
+  if (num_window != 5 || report->num_mismatch != num_window
+      || report->num_match != expected (MATCH) - num_window)
+    {
+      fail ("check EED read in part: %u Window placements, %u mismatch, %u "
+            "match",
+            (unsigned)num_window, (unsigned)report->num_mismatch,
             (unsigned)report->num_match);
       failures++;
     }
@@ -3850,7 +4942,9 @@ test_check_status (Dwg_Data *dwg)
 /* The check reports the placements of a block whose linear properties'
    actions move each other's parameters as unsupported, not failed: here
    the Window with test_linear_cycle's codes, whose placements each store
-   both its linear values, which the check gives the evaluator. */
+   both its linear values, which the check gives the evaluator. The
+   placement at the defaults, C17F, matches, as neither of its values
+   runs. */
 static int
 test_check_cycle (Dwg_Data *dwg)
 {
@@ -3888,8 +4982,22 @@ test_check_cycle (Dwg_Data *dwg)
         continue;
       c = find_check (report, e->insert, e->block);
       num_window++;
-      if (c && c->status == UNSUPPORTED && c->definition == WINDOW
-          && c->reason && strstr (c->reason, "cycle"))
+      if (!e->kinds)
+        {
+          if (c && c->status == MATCH && c->num_entities == e->num_entities)
+            OK ("check cycle " FORMAT_HV ": at the defaults, a match",
+                e->insert);
+          else
+            {
+              fail ("check cycle " FORMAT_HV ": status %d, %s; expected a "
+                    "match",
+                    e->insert, c ? (int)c->status : -1,
+                    c && c->reason ? c->reason : "");
+              failures++;
+            }
+        }
+      else if (c && c->status == UNSUPPORTED && c->definition == WINDOW
+               && c->reason && strstr (c->reason, "cycle"))
         OK ("check cycle " FORMAT_HV ": unsupported: %s", e->insert,
             c->reason);
       else
@@ -3899,9 +5007,10 @@ test_check_cycle (Dwg_Data *dwg)
           failures++;
         }
     }
+  // C17F at the defaults, and four that change a value
   if (num_window != 5 || report->num_failed
-      || report->num_unsupported != expected (UNSUPPORTED) + num_window
-      || report->num_match != expected (MATCH) - num_window)
+      || report->num_unsupported != expected (UNSUPPORTED) + num_window - 1
+      || report->num_match != expected (MATCH) - num_window + 1)
     {
       fail ("check cycle: %u Window placements, %u match, %u unsupported, "
             "%u failed",
@@ -3943,6 +5052,18 @@ test_linear_all (Dwg_Data *dwg)
   failures += test_stretch_selection (dwg);
   failures += test_move (dwg);
   failures += test_selected_nodes (dwg);
+  failures += test_selected_deps (dwg);
+  return failures;
+}
+
+/* The evaluations of rotation properties, on one reading of the fixture:
+   the ones that change it come last. */
+static int
+test_rotation_all (Dwg_Data *dwg)
+{
+  int failures = test_rotation (dwg);
+  failures += test_rotation_graft (dwg);
+  failures += test_turn_whole (dwg);
   return failures;
 }
 
@@ -3983,10 +5104,13 @@ main (int argc, char *argv[])
 
   failures += on_fixture (test_evaluate_all);
   failures += on_fixture (test_linear_all);
+  failures += on_fixture (test_rotation_all);
   // each check adds its evaluations to the document: a fresh one each
   failures += on_fixture (test_check);
   failures += on_fixture (test_check_finds);
+  failures += on_fixture (test_check_turned_angles);
   failures += on_fixture (test_check_copy_warning);
+  failures += on_fixture (test_check_eed_read_in_part);
   failures += on_fixture (test_check_proxy);
   failures += on_fixture (test_check_ellipse);
   failures += on_fixture (test_check_mleader);
