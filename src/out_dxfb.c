@@ -2339,6 +2339,8 @@ dxfb_ENDBLK_empty (Bit_Chain *restrict dat, const Dwg_Object *restrict hdr)
   obj->parent = hdr->parent;
   obj->index = obj->parent->num_objects;
   dwg_setup_ENDBLK (obj);
+  // which counts it in num_entities, as if it were in dwg->object[]
+  obj->parent->num_entities--;
   obj->tio.entity->ownerhandle
       = (Dwg_Object_Ref *)calloc (1, sizeof (Dwg_Object_Ref));
   obj->tio.entity->ownerhandle->obj = (Dwg_Object *)hdr;
@@ -2348,6 +2350,11 @@ dxfb_ENDBLK_empty (Bit_Chain *restrict dat, const Dwg_Object *restrict hdr)
   free (obj->tio.entity->tio.ENDBLK);
   free (obj->tio.entity->ownerhandle);
   free (obj->tio.entity);
+  // which dwg_setup_ENDBLK copied, as dxf_ENDBLK_empty frees them
+  if (obj->parent->opts & DWG_OPTS_IN)
+    free (obj->dxfname);
+  if (obj->parent->opts & DWG_OPTS_INJSON)
+    free (obj->name);
   free (obj);
 }
 

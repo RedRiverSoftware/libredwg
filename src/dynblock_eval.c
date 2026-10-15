@@ -35,6 +35,7 @@
 #include "classes.h"
 #include "hash.h"
 #include "copy.h"
+#include "geom.h"
 #include "dwg_dynblock_api.h"
 
 #define DWG_LOGLEVEL loglevel
@@ -44,7 +45,9 @@
 /* What a refused call returns, with a bit for the reason, as copy.c's. */
 #define DYNBLOCK_REFUSED DWG_ERR_INVALIDDWG
 
-/* How far a value may be from the definition's and still be at it. */
+/* How far a value may be from the definition's and still be at it; also
+   the tolerance of the geometry the evaluator checks: a length, an angle,
+   or a coordinate against a plane or a frame. */
 #define DYNBLOCK_VALUE_EPSILON 1e-9
 
 #define REASON_SIZE 512
@@ -57,15 +60,37 @@ typedef struct _dynblock_element
   Dwg_EvalExpr evalexpr;
 } Dynblock_Element;
 
+/* Cuts UTF-8 string s, which vsnprintf cut to its size, back to the end of
+   its last whole character. */
+static void
+utf8_trim (char *s)
+{
+  size_t len = strlen (s), start = len, need;
+  unsigned char lead;
+  while (start > 0 && ((unsigned char)s[start - 1] & 0xC0) == 0x80)
+    start--;
+  if (!start)
+    return;
+  start--;
+  lead = (unsigned char)s[start];
+  need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+  if (len - start < need)
+    s[start] = '\0';
+}
+
+/* Formats the UTF-8 reason. */
 static void ATTRIBUTE_FORMAT (3, 4)
     set_reason (char *reason, const size_t size, const char *fmt, ...)
 {
   va_list ap;
+  int len;
   if (!reason || !size)
     return;
   va_start (ap, fmt);
-  vsnprintf (reason, size, fmt, ap);
+  len = vsnprintf (reason, size, fmt, ap);
   va_end (ap);
+  if (len >= (int)size)
+    utf8_trim (reason);
 }
 
 static void
@@ -296,11 +321,11 @@ dwg_dynparam_kind_name (const Dwg_DynParam_Kind kind)
     }
 }
 
+/* hypot, as squaring a large component would overflow */
 static double
 distance_3d (const BITCODE_3BD *a, const BITCODE_3BD *b)
 {
-  const double dx = b->x - a->x, dy = b->y - a->y, dz = b->z - a->z;
-  return sqrt (dx * dx + dy * dy + dz * dz);
+  return hypot (hypot (b->x - a->x, b->y - a->y), b->z - a->z);
 }
 
 /* The angle of end about base, from the direction of base_angle, in
@@ -314,7 +339,8 @@ rotation_angle (const BITCODE_3BD *base, const BITCODE_3BD *end,
   angle = fmod (angle, 2.0 * M_PI);
   if (angle < 0.0)
     angle += 2.0 * M_PI;
-  return angle;
+  // a tiny negative angle plus 2 pi rounds to 2 pi
+  return angle < 2.0 * M_PI ? angle : 0.0;
 }
 
 /* The distance between two angles, around the circle. */
@@ -349,6 +375,7 @@ typedef struct _param_list
   BITCODE_BL count;
   BITCODE_BL size;
   int error;
+  BITCODE_RLL unresolved; /* a graph node that doesn't resolve */
   const char *unknown_class;
 } Param_List;
 
@@ -447,7 +474,8 @@ class_name (const Dwg_Data *dwg, const Dwg_Object *obj)
 
 /* The properties of the parameters in graph, in node order, into list.
    *parametricp is set when the graph is constraint-based, and
-   list->unknown_class names a node of a class LibreDWG can't decode. */
+   list->unknown_class names a node of a class LibreDWG can't decode. A
+   node that doesn't resolve sets list->error and list->unresolved. */
 static void
 collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
                 Param_List *list, int *parametricp)
@@ -459,6 +487,12 @@ collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
     {
       const Dwg_Object *obj = ref_object (dwg, _graph->nodes[i].evalexpr);
       Dwg_DynParam *p = NULL;
+      if (!obj && ref_handle (_graph->nodes[i].evalexpr))
+        {
+          list->error = DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+          list->unresolved = ref_handle (_graph->nodes[i].evalexpr);
+          return;
+        }
       if (!obj)
         continue;
       if (obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
@@ -633,10 +667,17 @@ definition_params (const Dwg_Data *dwg, const BITCODE_RLL def_handle,
     *parametricp = 1;
   if (list->error)
     {
-      set_reason (reason, reason_size, "out of memory");
+      const int list_error = list->error;
+      if (list->unresolved)
+        set_reason (reason, reason_size,
+                    "the evaluation graph's node " FORMAT_HV
+                    " doesn't resolve",
+                    list->unresolved);
+      else
+        set_reason (reason, reason_size, "out of memory");
       dwg_dynblock_free_params (list->params, list->count);
       memset (list, 0, sizeof (*list));
-      return DWG_ERR_OUTOFMEM;
+      return list_error;
     }
   return 0;
 }
@@ -829,7 +870,9 @@ block_representation (const Dwg_Data *dwg, const Dwg_Object *insert)
 }
 
 /* Reads the values of the placement at insert_handle, as
-   dwg_dynblock_get_values (). */
+   dwg_dynblock_get_values (). *def_handlep gets the definition the
+   placement names as soon as it is found, also when reading the stored
+   values or the definition then fails. */
 static int
 placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
                   BITCODE_RLL *def_handlep, Dwg_DynValue **valuesp,
@@ -867,6 +910,7 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
         }
       def_handle
           = ref_handle (repdata->tio.object->tio.BLOCKREPRESENTATION->block);
+      *def_handlep = def_handle;
       data = dict_item (dwg, dict_item (dwg, rep, "AppDataCache"),
                         "ACAD_ENHANCEDBLOCKDATA");
       if (!data || data->fixedtype != DWG_TYPE_DICTIONARY)
@@ -879,13 +923,15 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
         }
     }
   else
-    // a placement at the defaults draws the definition itself
-    def_handle = ref_handle (placement_block (insert));
+    {
+      // a placement at the defaults draws the definition itself
+      def_handle = ref_handle (placement_block (insert));
+      *def_handlep = def_handle;
+    }
   error = definition_params (dwg, def_handle, &list, &parametric, reason,
                              reason_size);
   if (error)
     return error;
-  *def_handlep = def_handle;
   values = (Dwg_DynValue *)calloc (list.count ? list.count : 1,
                                    sizeof (Dwg_DynValue));
   if (!values)
@@ -926,7 +972,6 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
   if (error)
     {
       dwg_dynblock_free_values (values, count);
-      *def_handlep = 0;
       return error;
     }
   *valuesp = values;
@@ -976,7 +1021,8 @@ dwg_dynblock_get_values (const Dwg_Entity_INSERT *insert,
  */
 
 /* The handles of def's entities, in its order, with the owned ATTRIBs,
-   VERTEXes and SEQENDs of each after it, into a new array. */
+   VERTEXes and SEQENDs of each after it (of an INSERT, MINSERT, POLYLINE
+   or TABLE), into a new array. */
 static int
 definition_entities (const Dwg_Data *dwg,
                      const Dwg_Object_BLOCK_HEADER *_def,
@@ -1003,8 +1049,16 @@ definition_entities (const Dwg_Data *dwg,
           free (handles);
           return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
         }
-      if (ent->supertype != DWG_SUPERTYPE_ENTITY
-          || ent->fixedtype == DWG_TYPE_UNKNOWN_ENT)
+      if (ent->supertype != DWG_SUPERTYPE_ENTITY)
+        {
+          set_reason (reason, reason_size,
+                      "the definition's entity " FORMAT_HV
+                      " is not an entity",
+                      ent->handle.value);
+          free (handles);
+          return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+        }
+      if (ent->fixedtype == DWG_TYPE_UNKNOWN_ENT)
         {
           set_reason (reason, reason_size,
                       "entity " FORMAT_HV " is of a class LibreDWG can't "
@@ -1033,6 +1087,11 @@ definition_entities (const Dwg_Data *dwg,
           num_owned = ent->tio.entity->tio.POLYLINE_2D->num_owned;
           owned = ent->tio.entity->tio.POLYLINE_2D->vertex;
           seqend = ent->tio.entity->tio.POLYLINE_2D->seqend;
+          break;
+        case DWG_TYPE_TABLE:
+          num_owned = ent->tio.entity->tio.TABLE->num_owned;
+          owned = ent->tio.entity->tio.TABLE->attribs;
+          seqend = ent->tio.entity->tio.TABLE->seqend;
           break;
         default:
           break;
@@ -1124,6 +1183,1506 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
   ent->num_reactors = kept;
 }
 
+/*--------------------------------------------------------------------------------
+ * Linear parameters, and their stretch and move actions
+ *
+ * A LINEAR value moves its parameter's end point along the parameter, to
+ * the value's distance from its base point. The stretch and move actions
+ * connected to that end point then move entities by its change: a move
+ * action its whole selection, a stretch action the stretch points its
+ * frame holds, which AutoCAD lists with the action (hdls) by their index
+ * in the entity's own list of stretch points. An entity wholly inside the
+ * frame has all its stretch points listed and so moves whole. AutoCAD also
+ * moves whole an entity of the selection (deps) that lies wholly outside
+ * the frame; how it lists one is not known, so the evaluator refuses an
+ * entity of the selection with no stretch point listed. Each action scales
+ * the change by its distance multiplier and turns it by its angle offset.
+ *
+ * Actions also move the points of other parameters in their selection
+ * (codes, for a stretch, and the node ids a move lists), which changes
+ * those parameters' values unless they are set too. So each parameter is
+ * evaluated after the actions that move it, of the properties given a
+ * value: the actions of the others don't run. The evaluation graph doesn't
+ * list its nodes in that order. As every action translates, the order
+ * doesn't change the geometry otherwise.
+ *
+ * Everything is planned on the definition first, as moves of its
+ * entities, so that a refusal comes before anything is copied.
+ */
+
+/* A linear parameter during the evaluation: its points as the actions
+   evaluated so far moved them, and the value it is set to. */
+typedef struct _dynblock_linear
+{
+  const Dwg_Object *obj;
+  const char *name; /* the property's, UTF-8 */
+  BITCODE_BL nodeid;
+  BITCODE_3BD base;
+  BITCODE_3BD end;
+  int given;
+  double value;
+  int done;
+} Dynblock_Linear;
+
+/* An action of the evaluation graph, and the linear parameter whose value
+   it takes. */
+typedef struct _dynblock_action
+{
+  const Dwg_Object *obj;
+  char *name; /* UTF-8 */
+  int linear; /* index into the linear parameters, or -1 */
+} Dynblock_Action;
+
+/* A move of a definition entity, which its copy gets: of all of it, or of
+   one of its stretch points. */
+typedef struct _dynblock_move
+{
+  BITCODE_RLL entity;
+  int point; /* the stretch point, or -1 for the whole entity */
+  BITCODE_3BD delta;
+} Dynblock_Move;
+
+typedef struct _dynblock_plan
+{
+  const Dwg_Data *dwg;
+  dwg_inthash *entities; /* def's own entities */
+  const Dwg_Object **nodes; /* the evaluation graph's elements */
+  BITCODE_BL num_nodes;
+  dwg_inthash *node_handles;
+  Dynblock_Linear *linear;
+  BITCODE_BL num_linear;
+  Dynblock_Action *actions;
+  BITCODE_BL num_actions;
+  Dynblock_Move *moves;
+  BITCODE_BL num_moves;
+  BITCODE_BL size_moves;
+  char *reason;
+  size_t reason_size;
+} Dynblock_Plan;
+
+/* The connections of action obj to the values of its parameters, or NULL
+   when obj is not an action with them. */
+static const Dwg_BLOCKACTION_connectionpts *
+action_connections (const Dwg_Object *obj, BITCODE_BL *countp)
+{
+  *countp = 0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKMOVEACTION:
+      *countp = 2;
+      return obj->tio.object->tio.BLOCKMOVEACTION->conn_pts;
+    case DWG_TYPE_BLOCKSTRETCHACTION:
+      *countp = 2;
+      return obj->tio.object->tio.BLOCKSTRETCHACTION->conn_pts;
+    case DWG_TYPE_BLOCKSCALEACTION:
+      *countp = 5;
+      return obj->tio.object->tio.BLOCKSCALEACTION->conn_pts;
+    case DWG_TYPE_BLOCKROTATEACTION:
+      *countp = 3;
+      return obj->tio.object->tio.BLOCKROTATEACTION->conn_pts;
+    case DWG_TYPE_BLOCKFLIPACTION:
+      *countp = 4;
+      return obj->tio.object->tio.BLOCKFLIPACTION->conn_pts;
+    case DWG_TYPE_BLOCKARRAYACTION:
+      *countp = 4;
+      return obj->tio.object->tio.BLOCKARRAYACTION->conn_pts;
+    case DWG_TYPE_BLOCKPOLARSTRETCHACTION:
+      *countp = 6;
+      return obj->tio.object->tio.BLOCKPOLARSTRETCHACTION->conn_pts;
+    default:
+      return NULL;
+    }
+}
+
+/* Whether action obj takes a value of the parameter with node id nodeid. */
+static int
+is_connected (const Dwg_Object *obj, const BITCODE_BL nodeid)
+{
+  BITCODE_BL n;
+  const Dwg_BLOCKACTION_connectionpts *conn = action_connections (obj, &n);
+  for (BITCODE_BL i = 0; conn && i < n; i++)
+    if (conn[i].code == nodeid)
+      return 1;
+  return 0;
+}
+
+static int
+find_linear (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
+{
+  for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+    if (plan->linear[i].nodeid == nodeid)
+      return (int)i;
+  return -1;
+}
+
+/* The node of the evaluation graph with node id nodeid, or NULL. */
+static const Dwg_Object *
+find_node (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
+{
+  for (BITCODE_BL i = 0; i < plan->num_nodes; i++)
+    {
+      const Dynblock_Element *e
+          = plan->nodes[i] ? (const Dynblock_Element *)plan->nodes[i]
+                                 ->tio.object->tio.BLOCKMOVEACTION
+                           : NULL;
+      if (e && e->evalexpr.nodeid == nodeid)
+        return plan->nodes[i];
+    }
+  return NULL;
+}
+
+static int
+is_parameter (const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARPARAMETER:
+    case DWG_TYPE_BLOCKROTATIONPARAMETER:
+    case DWG_TYPE_BLOCKVISIBILITYPARAMETER:
+    case DWG_TYPE_BLOCKFLIPPARAMETER:
+    case DWG_TYPE_BLOCKXYPARAMETER:
+    case DWG_TYPE_BLOCKPOLARPARAMETER:
+    case DWG_TYPE_BLOCKPOINTPARAMETER:
+    case DWG_TYPE_BLOCKLOOKUPPARAMETER:
+    case DWG_TYPE_BLOCKALIGNMENTPARAMETER:
+    case DWG_TYPE_BLOCKBASEPOINTPARAMETER:
+    case DWG_TYPE_BLOCKUSERPARAMETER:
+    case DWG_TYPE_BLOCKLINEARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKALIGNEDCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* Whether obj is of a type of evaluation graph node whose struct starts
+   as Dynblock_Element does: a parameter, an action, a grip, a grip
+   location component or a proxy node. */
+static int
+is_graph_element (const Dwg_Object *obj)
+{
+  BITCODE_BL n;
+  if (is_parameter (obj) || action_connections (obj, &n))
+    return 1;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLOOKUPACTION:
+    case DWG_TYPE_BLOCKALIGNMENTGRIP:
+    case DWG_TYPE_BLOCKFLIPGRIP:
+    case DWG_TYPE_BLOCKLINEARGRIP:
+    case DWG_TYPE_BLOCKLOOKUPGRIP:
+    case DWG_TYPE_BLOCKPOLARGRIP:
+    case DWG_TYPE_BLOCKROTATIONGRIP:
+    case DWG_TYPE_BLOCKVISIBILITYGRIP:
+    case DWG_TYPE_BLOCKXYGRIP:
+    case DWG_TYPE_BLOCKPROPERTIESTABLEGRIP:
+    case DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT:
+    case DWG_TYPE_DYNAMICBLOCKPROXYNODE:
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* Checks the node with node id nodeid, other than a linear parameter,
+   whose points action a moves: refuses an id the evaluation graph doesn't
+   have, and a parameter that chains its actions, as AutoCAD would run them
+   too. */
+static int
+check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
+                     const BITCODE_BL nodeid)
+{
+  const Dwg_Object *obj = find_node (plan, nodeid);
+  if (!obj)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "action '%s' selects node %u, which the evaluation graph "
+                  "doesn't have",
+                  a->name, (unsigned)nodeid);
+      return DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+    }
+  // every parameter starts with BLOCKPARAMETER_fields
+  if (!is_parameter (obj)
+      || !obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "action '%s' moves %s (node %u), which chains its actions; "
+              "that is not supported",
+              a->name, dwg_type_name (obj->fixedtype), (unsigned)nodeid);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+static int
+add_move (Dynblock_Plan *plan, const BITCODE_RLL entity, const int point,
+          const BITCODE_3BD *delta)
+{
+  Dynblock_Move *m;
+  if (plan->num_moves == plan->size_moves)
+    {
+      const BITCODE_BL size = plan->size_moves ? plan->size_moves * 2 : 32;
+      Dynblock_Move *moves = (Dynblock_Move *)realloc (
+          plan->moves, size * sizeof (Dynblock_Move));
+      if (!moves)
+        return DWG_ERR_OUTOFMEM;
+      plan->moves = moves;
+      plan->size_moves = size;
+    }
+  m = &plan->moves[plan->num_moves++];
+  m->entity = entity;
+  m->point = point;
+  m->delta = *delta;
+  return 0;
+}
+
+/* The number of stretch points AutoCAD gives entity obj, which a stretch
+   action's indexes count: a LINE its start and end, an LWPOLYLINE its
+   vertices, a SPLINE its control points (its fit points when it is defined
+   by them), a TEXT or ATTDEF its position, an INSERT its insertion point;
+   2 for an ARC, 1 for a CIRCLE or a HATCH, 5 for an ELLIPSE or MTEXT, 4
+   for an elliptical arc. 0 for the other types, which the evaluator
+   doesn't stretch, and for a TEXT or ATTDEF aligned or fitted between two
+   points. */
+static BITCODE_BL
+stretch_points (const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+    case DWG_TYPE_ARC:
+      return 2;
+    case DWG_TYPE_LWPOLYLINE:
+      return obj->tio.entity->tio.LWPOLYLINE->points
+                 ? obj->tio.entity->tio.LWPOLYLINE->num_points
+                 : 0;
+    case DWG_TYPE_CIRCLE:
+    case DWG_TYPE_INSERT:
+    case DWG_TYPE_HATCH:
+      return 1;
+    case DWG_TYPE_ELLIPSE:
+      {
+        const Dwg_Entity_ELLIPSE *_obj = obj->tio.entity->tio.ELLIPSE;
+        const double sweep = fabs (_obj->end_angle - _obj->start_angle);
+        return fabs (sweep - 2.0 * M_PI) < DYNBLOCK_VALUE_EPSILON ? 5 : 4;
+      }
+    case DWG_TYPE_SPLINE:
+      {
+        const Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        return _obj->scenario == 2 ? _obj->num_fit_pts : _obj->num_ctrl_pts;
+      }
+    case DWG_TYPE_MTEXT:
+      return 5;
+    case DWG_TYPE_TEXT:
+      {
+        const BITCODE_BS h = obj->tio.entity->tio.TEXT->horiz_alignment;
+        return h == 3 || h == 5 ? 0 : 1;
+      }
+    case DWG_TYPE_ATTDEF:
+      {
+        const BITCODE_BS h = obj->tio.entity->tio.ATTDEF->horiz_alignment;
+        return h == 3 || h == 5 ? 0 : 1;
+      }
+    default:
+      return 0;
+    }
+}
+
+/* Whether the evaluator moves an entity of obj's type whole. */
+static int
+is_movable (const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+    case DWG_TYPE_LWPOLYLINE:
+    case DWG_TYPE_ARC:
+    case DWG_TYPE_CIRCLE:
+    case DWG_TYPE_ELLIPSE:
+    case DWG_TYPE_SPLINE:
+    case DWG_TYPE_TEXT:
+    case DWG_TYPE_ATTDEF:
+    case DWG_TYPE_MTEXT:
+    case DWG_TYPE_INSERT:
+    case DWG_TYPE_HATCH:
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* The extrusion of an entity whose points are in its object coordinate
+   system (OCS), with *planarp set when its points are 2D at an elevation;
+   NULL for an entity with WCS points. */
+static const BITCODE_BE *
+entity_ocs (const Dwg_Object *obj, int *planarp)
+{
+  *planarp = 0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_ARC:
+      return &obj->tio.entity->tio.ARC->extrusion;
+    case DWG_TYPE_CIRCLE:
+      return &obj->tio.entity->tio.CIRCLE->extrusion;
+    case DWG_TYPE_INSERT:
+      return &obj->tio.entity->tio.INSERT->extrusion;
+    case DWG_TYPE_LWPOLYLINE:
+      *planarp = 1;
+      return &obj->tio.entity->tio.LWPOLYLINE->extrusion;
+    case DWG_TYPE_TEXT:
+      *planarp = 1;
+      return &obj->tio.entity->tio.TEXT->extrusion;
+    case DWG_TYPE_ATTDEF:
+      *planarp = 1;
+      return &obj->tio.entity->tio.ATTDEF->extrusion;
+    case DWG_TYPE_ATTRIB:
+      *planarp = 1;
+      return &obj->tio.entity->tio.ATTRIB->extrusion;
+    case DWG_TYPE_HATCH:
+      *planarp = 1;
+      return &obj->tio.entity->tio.HATCH->extrusion;
+    default:
+      return NULL;
+    }
+}
+
+/* delta in the coordinates of entity obj: its OCS, by the arbitrary axis
+   algorithm, for an entity with OCS points. */
+static void
+entity_delta (const Dwg_Object *obj, const BITCODE_3BD *delta,
+              BITCODE_3BD *out)
+{
+  int planar;
+  const BITCODE_BE *ext = entity_ocs (obj, &planar);
+  if (!ext || (ext->x == 0.0 && ext->y == 0.0 && ext->z >= 0.0))
+    *out = *delta;
+  else
+    transform_OCS (out, *delta, *ext);
+}
+
+/* Refuses a move of entity obj, or of an ATTRIB it owns, that would take
+   2D points out of their plane: possible only for an entity whose
+   extrusion is not along Z. */
+static int
+check_planar (Dynblock_Plan *plan, const Dwg_Object *obj,
+              const BITCODE_3BD *delta)
+{
+  int planar;
+  BITCODE_3BD d;
+  if (!entity_ocs (obj, &planar) || !planar)
+    return 0;
+  entity_delta (obj, delta, &d);
+  if (fabs (d.z) <= DYNBLOCK_VALUE_EPSILON)
+    return 0;
+  set_reason (plan->reason, plan->reason_size,
+              "moving %s " FORMAT_HV " out of its plane is not supported",
+              dwg_type_name (obj->fixedtype), obj->handle.value);
+  return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+/* Grows the box lo, hi to hold the point x, y. */
+static void
+box_add (double *lo, double *hi, const double x, const double y)
+{
+  lo[0] = fmin (lo[0], x);
+  lo[1] = fmin (lo[1], y);
+  hi[0] = fmax (hi[0], x);
+  hi[1] = fmax (hi[1], y);
+}
+
+/* A box that holds the boundary of HATCH _obj, in its OCS: arcs and
+   bulges count as their whole circle, an ellipse as the circle of its
+   major axis, and a spline as its control and fit points. Returns 0 when
+   the boundary has no point. */
+static int
+hatch_box (const Dwg_Entity_HATCH *_obj, double *lo, double *hi)
+{
+  lo[0] = lo[1] = HUGE_VAL;
+  hi[0] = hi[1] = -HUGE_VAL;
+  for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+    {
+      const Dwg_HATCH_Path *path = &_obj->paths[i];
+      if (path->flag & 2)
+        {
+          // a polyline path. The arc of a bulged segment, of radius r,
+          // lies within 2 r of its chord's middle, which is inside its
+          // circle.
+          const BITCODE_BL n = path->num_segs_or_paths;
+          for (BITCODE_BL j = 0; path->polyline_paths && j < n; j++)
+            {
+              const Dwg_HATCH_PolylinePath *p = &path->polyline_paths[j];
+              const Dwg_HATCH_PolylinePath *q
+                  = &path->polyline_paths[(j + 1) % n];
+              box_add (lo, hi, p->point.x, p->point.y);
+              if (path->bulges_present && p->bulge != 0.0)
+                {
+                  const double chord = hypot (q->point.x - p->point.x,
+                                              q->point.y - p->point.y);
+                  const double reach = chord * (1.0 + p->bulge * p->bulge)
+                                       / (2.0 * fabs (p->bulge));
+                  const double mx = (p->point.x + q->point.x) / 2.0;
+                  const double my = (p->point.y + q->point.y) / 2.0;
+                  box_add (lo, hi, mx - reach, my - reach);
+                  box_add (lo, hi, mx + reach, my + reach);
+                }
+            }
+          continue;
+        }
+      for (BITCODE_BL j = 0; path->segs && j < path->num_segs_or_paths; j++)
+        {
+          const Dwg_HATCH_PathSeg *s = &path->segs[j];
+          switch (s->curve_type)
+            {
+            case 1:
+              box_add (lo, hi, s->first_endpoint.x, s->first_endpoint.y);
+              box_add (lo, hi, s->second_endpoint.x, s->second_endpoint.y);
+              break;
+            case 2:
+              box_add (lo, hi, s->center.x - s->radius,
+                       s->center.y - s->radius);
+              box_add (lo, hi, s->center.x + s->radius,
+                       s->center.y + s->radius);
+              break;
+            case 3:
+              {
+                // endpoint is the major axis, from the centre
+                const double r = hypot (s->endpoint.x, s->endpoint.y);
+                box_add (lo, hi, s->center.x - r, s->center.y - r);
+                box_add (lo, hi, s->center.x + r, s->center.y + r);
+              }
+              break;
+            case 4:
+              for (BITCODE_BL k = 0;
+                   s->control_points && k < s->num_control_points; k++)
+                box_add (lo, hi, s->control_points[k].point.x,
+                         s->control_points[k].point.y);
+              for (BITCODE_BL k = 0; s->fitpts && k < s->num_fitpts; k++)
+                box_add (lo, hi, s->fitpts[k].x, s->fitpts[k].y);
+              break;
+            default:
+              return 0;
+            }
+        }
+    }
+  return lo[0] <= hi[0] && lo[1] <= hi[1];
+}
+
+/* Refuses a whole move of HATCH obj by stretch action a unless its
+   boundary lies wholly inside the action's frame, which must be a
+   rectangle. A HATCH has a single stretch point, so one that is listed
+   may still cross the frame, and a stretch would then reshape its
+   boundary rather than move it. */
+static int
+check_hatch (Dynblock_Plan *plan, const Dynblock_Action *a,
+             const Dwg_Object *obj)
+{
+  const Dwg_Object_BLOCKSTRETCHACTION *_a
+      = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+  const Dwg_Entity_HATCH *_obj = obj->tio.entity->tio.HATCH;
+  double lo[2], hi[2];
+  if (_a->num_pts != 2 || !_a->pts)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "stretch action '%s' moves HATCH " FORMAT_HV
+                  ": only a rectangular frame is supported",
+                  a->name, obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (_obj->extrusion.x != 0.0 || _obj->extrusion.y != 0.0
+      || _obj->extrusion.z <= 0.0)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "stretch action '%s' moves HATCH " FORMAT_HV
+                  ", which is not in the XY plane",
+                  a->name, obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (!hatch_box (_obj, lo, hi)
+      || lo[0] < fmin (_a->pts[0].x, _a->pts[1].x) - DYNBLOCK_VALUE_EPSILON
+      || hi[0] > fmax (_a->pts[0].x, _a->pts[1].x) + DYNBLOCK_VALUE_EPSILON
+      || lo[1] < fmin (_a->pts[0].y, _a->pts[1].y) - DYNBLOCK_VALUE_EPSILON
+      || hi[1] > fmax (_a->pts[0].y, _a->pts[1].y) + DYNBLOCK_VALUE_EPSILON)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "stretch action '%s': HATCH " FORMAT_HV
+                  " is not wholly inside its frame, which is not supported",
+                  a->name, obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  return 0;
+}
+
+/* The entity of the definition named by handle in the selection of action
+   a, or NULL with the reason when it isn't one. */
+static const Dwg_Object *
+selected_entity (Dynblock_Plan *plan, const Dynblock_Action *a,
+                 const BITCODE_RLL handle, int *errorp)
+{
+  const Dwg_Object *obj = handle_object (plan->dwg, handle);
+  *errorp = 0;
+  if (!obj || obj->supertype != DWG_SUPERTYPE_ENTITY
+      || hash_get (plan->entities, handle) == HASH_NOT_FOUND)
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "action '%s' selects " FORMAT_HV
+                  ", which is not an entity of the definition",
+                  a->name, handle);
+      *errorp = DYNBLOCK_REFUSED | DWG_ERR_INVALIDHANDLE;
+      return NULL;
+    }
+  return obj;
+}
+
+/* Plans a whole move of entity obj by delta, and of the ATTRIBs an INSERT
+   owns. */
+static int
+plan_whole (Dynblock_Plan *plan, const Dynblock_Action *a,
+            const Dwg_Object *obj, const BITCODE_3BD *delta)
+{
+  int error;
+  if (!is_movable (obj))
+    {
+      set_reason (plan->reason, plan->reason_size,
+                  "action '%s': moving %s " FORMAT_HV " is not supported",
+                  a->name, dwg_type_name (obj->fixedtype),
+                  obj->handle.value);
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  error = check_planar (plan, obj, delta);
+  if (!error && obj->fixedtype == DWG_TYPE_INSERT)
+    {
+      const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+      for (BITCODE_BL i = 0; !error && _obj->attribs && i < _obj->num_owned;
+           i++)
+        {
+          const Dwg_Object *attrib = ref_object (plan->dwg, _obj->attribs[i]);
+          if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+            error = check_planar (plan, attrib, delta);
+        }
+    }
+  return error ? error : add_move (plan, obj->handle.value, -1, delta);
+}
+
+/* Refuses an entity that stretch action a selects (deps) with none of its
+   stretch points listed (hdls): one wholly outside the action's frame,
+   which AutoCAD moves whole. The parameters and grips the action selects
+   are nodes of the graph, whose points it lists by node id (codes). */
+static int
+check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
+{
+  const Dwg_Object_BLOCKSTRETCHACTION *_a
+      = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+  dwg_inthash *listed = hash_new ((uint64_t)_a->num_hdls * 2 + 8);
+  int error = 0;
+  if (!listed)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; _a->hdls && i < _a->num_hdls; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->hdls[i].hdl);
+      if (handle && _a->hdls[i].indexes && _a->hdls[i].num_indexes)
+        hash_set (listed, handle, 1);
+    }
+  for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->deps[i]);
+      const Dwg_Object *obj;
+      if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
+        continue;
+      obj = selected_entity (plan, a, handle, &error);
+      if (obj && hash_get (listed, handle) == HASH_NOT_FOUND)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' selects %s " FORMAT_HV
+                      " with none of its stretch points in its frame; "
+                      "moving an entity outside the frame is not supported",
+                      a->name, dwg_type_name (obj->fixedtype), handle);
+          error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+    }
+  free_hash (listed);
+  return error;
+}
+
+/* Plans stretch action a moving the stretch points it lists by delta,
+   and the points of the linear parameters it lists. */
+static int
+plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
+              const BITCODE_3BD *delta)
+{
+  const Dwg_Object_BLOCKSTRETCHACTION *_a
+      = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+  int error = 0;
+  for (BITCODE_BL i = 0; _a->hdls && i < _a->num_hdls && !error; i++)
+    {
+      const Dwg_BLOCKSTRETCHACTION_handles *h = &_a->hdls[i];
+      const Dwg_Object *obj
+          = selected_entity (plan, a, ref_handle (h->hdl), &error);
+      BITCODE_BL count, listed = 0;
+      unsigned char *seen;
+      if (!obj)
+        break;
+      count = stretch_points (obj);
+      if (!count)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s': stretching %s " FORMAT_HV
+                      " is not supported",
+                      a->name, dwg_type_name (obj->fixedtype),
+                      obj->handle.value);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      seen = (unsigned char *)calloc (count, 1);
+      if (!seen)
+        return DWG_ERR_OUTOFMEM;
+      for (BITCODE_BS j = 0; h->indexes && j < h->num_indexes; j++)
+        {
+          if (h->indexes[j] >= count || seen[h->indexes[j]])
+            {
+              set_reason (plan->reason, plan->reason_size,
+                          "stretch action '%s' lists point %u of %s " FORMAT_HV
+                          ", which has %u",
+                          a->name, (unsigned)h->indexes[j],
+                          dwg_type_name (obj->fixedtype), obj->handle.value,
+                          (unsigned)count);
+              free (seen);
+              return DYNBLOCK_REFUSED;
+            }
+          seen[h->indexes[j]] = 1;
+          listed++;
+        }
+      free (seen);
+      if (!listed)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' lists %s " FORMAT_HV
+                      " with none of its stretch points in its frame; "
+                      "moving an entity outside the frame is not supported",
+                      a->name, dwg_type_name (obj->fixedtype),
+                      obj->handle.value);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (listed == count)
+        {
+          if (obj->fixedtype == DWG_TYPE_HATCH)
+            error = check_hatch (plan, a, obj);
+          if (!error)
+            error = plan_whole (plan, a, obj, delta);
+        }
+      else if (obj->fixedtype == DWG_TYPE_LINE
+               || obj->fixedtype == DWG_TYPE_LWPOLYLINE)
+        {
+          error = check_planar (plan, obj, delta);
+          for (BITCODE_BS j = 0; !error && j < h->num_indexes; j++)
+            error = add_move (plan, obj->handle.value, (int)h->indexes[j],
+                              delta);
+        }
+      else
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s': stretching part of %s " FORMAT_HV
+                      " is not supported",
+                      a->name, dwg_type_name (obj->fixedtype),
+                      obj->handle.value);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+    }
+  if (!error)
+    error = check_stretch_selection (plan, a);
+  if (error)
+    return error;
+  for (BITCODE_BL i = 0; _a->codes && i < _a->num_codes; i++)
+    {
+      const Dwg_BLOCKSTRETCHACTION_codes *c = &_a->codes[i];
+      const int k = find_linear (plan, c->bl95);
+      if (k < 0)
+        {
+          error = check_selected_node (plan, a, c->bl95);
+          if (error)
+            return error;
+        }
+      // a parameter wholly outside the frame, which AutoCAD moves whole
+      if (!c->indexes || !c->num_indexes)
+        {
+          const Dwg_Object *node = find_node (plan, c->bl95);
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' selects %s (node %u) with none "
+                      "of its points in its frame; moving a parameter "
+                      "outside the frame is not supported",
+                      a->name,
+                      node ? dwg_type_name (node->fixedtype) : "a node",
+                      (unsigned)c->bl95);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      for (BITCODE_BS j = 0; k >= 0 && j < c->num_indexes; j++)
+        {
+          Dynblock_Linear *q = &plan->linear[k];
+          if (c->indexes[j] > 1)
+            {
+              set_reason (plan->reason, plan->reason_size,
+                          "stretch action '%s' lists point %u of linear "
+                          "property '%s', which has 2",
+                          a->name, (unsigned)c->indexes[j], q->name);
+              return DYNBLOCK_REFUSED;
+            }
+          if (c->indexes[j] == 0)
+            {
+              q->base.x += delta->x;
+              q->base.y += delta->y;
+              q->base.z += delta->z;
+            }
+          else
+            {
+              q->end.x += delta->x;
+              q->end.y += delta->y;
+              q->end.z += delta->z;
+            }
+        }
+    }
+  return 0;
+}
+
+/* Plans move action a moving the entities it selects by delta, and the
+   linear parameters it lists. */
+static int
+plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
+           const BITCODE_3BD *delta)
+{
+  const Dwg_Object_BLOCKMOVEACTION *_a
+      = a->obj->tio.object->tio.BLOCKMOVEACTION;
+  int error = 0;
+  for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->deps[i]);
+      const Dwg_Object *obj;
+      // the parameters and grips it moves are nodes of the graph, which it
+      // lists by id too
+      if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
+        continue;
+      obj = selected_entity (plan, a, handle, &error);
+      if (obj)
+        error = plan_whole (plan, a, obj, delta);
+    }
+  for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
+    {
+      const int k = find_linear (plan, _a->actions[i]);
+      if (k < 0)
+        error = check_selected_node (plan, a, _a->actions[i]);
+      else
+        {
+          Dynblock_Linear *q = &plan->linear[k];
+          q->base.x += delta->x;
+          q->base.y += delta->y;
+          q->base.z += delta->z;
+          q->end.x += delta->x;
+          q->end.y += delta->y;
+          q->end.z += delta->z;
+        }
+    }
+  return error;
+}
+
+/* Whether action a moves points of the linear parameter with node id
+   nodeid. */
+static int
+moves_linear (const Dwg_Object *a, const BITCODE_BL nodeid)
+{
+  if (a->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION)
+    {
+      const Dwg_Object_BLOCKSTRETCHACTION *_a
+          = a->tio.object->tio.BLOCKSTRETCHACTION;
+      for (BITCODE_BL i = 0; _a->codes && i < _a->num_codes; i++)
+        if (_a->codes[i].bl95 == nodeid && _a->codes[i].num_indexes)
+          return 1;
+    }
+  else if (a->fixedtype == DWG_TYPE_BLOCKMOVEACTION)
+    {
+      const Dwg_Object_BLOCKMOVEACTION *_a
+          = a->tio.object->tio.BLOCKMOVEACTION;
+      for (BITCODE_BL i = 0; _a->actions && i < _a->num_actions; i++)
+        if (_a->actions[i] == nodeid)
+          return 1;
+    }
+  return 0;
+}
+
+/* The next linear parameter to evaluate: one that no action of a given
+   parameter not yet evaluated moves; the actions of a parameter that isn't
+   given don't run. -1 when all are evaluated, -2 when the rest wait on
+   given parameters whose actions move each other's. */
+static int
+next_linear (const Dynblock_Plan *plan)
+{
+  int pending = 0;
+  for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+    {
+      int moved = 0;
+      if (plan->linear[i].done)
+        continue;
+      pending = 1;
+      for (BITCODE_BL j = 0; !moved && j < plan->num_actions; j++)
+        {
+          const int k = plan->actions[j].linear;
+          moved = k >= 0 && k != (int)i && plan->linear[k].given
+                  && !plan->linear[k].done
+                  && moves_linear (plan->actions[j].obj,
+                                   plan->linear[i].nodeid);
+        }
+      if (!moved)
+        return (int)i;
+    }
+  return pending ? -2 : -1;
+}
+
+/* The change of the point an action's connection names, from the change
+   of its linear parameter's end point: "EndXDelta" and "EndYDelta" take
+   it, "BaseXDelta" and "BaseYDelta" 0, as a value doesn't move the base
+   point. Returns 0 for another name. */
+static int
+connection_delta (const Dwg_BLOCKACTION_connectionpts *conn, const int y,
+                  const BITCODE_3BD *end_delta, double *deltap)
+{
+  if (!conn->name)
+    return 0;
+  if (strEQ (conn->name, y ? "EndYDelta" : "EndXDelta"))
+    {
+      *deltap = y ? end_delta->y : end_delta->x;
+      return 1;
+    }
+  if (strEQ (conn->name, y ? "BaseYDelta" : "BaseXDelta"))
+    {
+      *deltap = 0.0;
+      return 1;
+    }
+  return 0;
+}
+
+/* Plans the actions connected to linear parameter p, whose end point moved
+   by end_delta. */
+static int
+plan_actions_of (Dynblock_Plan *plan, const Dynblock_Linear *p,
+                 const BITCODE_3BD *end_delta)
+{
+  for (BITCODE_BL i = 0; i < plan->num_actions; i++)
+    {
+      const Dynblock_Action *a = &plan->actions[i];
+      const Dwg_BLOCKACTION_connectionpts *conn;
+      BITCODE_BL n;
+      double dx, dy, multiplier, angle;
+      BITCODE_RC xy_type;
+      BITCODE_3BD delta;
+      int error;
+      if (!is_connected (a->obj, p->nodeid))
+        continue;
+      conn = action_connections (a->obj, &n);
+      if (a->obj->fixedtype != DWG_TYPE_BLOCKSTRETCHACTION
+          && a->obj->fixedtype != DWG_TYPE_BLOCKMOVEACTION)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' drives %s '%s', which is not "
+                      "supported",
+                      p->name, dwg_type_name (a->obj->fixedtype), a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (conn[0].code != p->nodeid || conn[1].code != p->nodeid
+          || !connection_delta (&conn[0], 0, end_delta, &dx)
+          || !connection_delta (&conn[1], 1, end_delta, &dy))
+        {
+          char *name0 = utf8_copy (plan->dwg, conn[0].name);
+          char *name1 = utf8_copy (plan->dwg, conn[1].name);
+          set_reason (plan->reason, plan->reason_size,
+                      "%s '%s' takes '%s' and '%s' of linear property '%s', "
+                      "which is not supported",
+                      dwg_type_name (a->obj->fixedtype), a->name,
+                      name0 ? name0 : "", name1 ? name1 : "", p->name);
+          free (name0);
+          free (name1);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (a->obj->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION)
+        {
+          const Dwg_Object_BLOCKSTRETCHACTION *_a
+              = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+          multiplier = _a->action_offset_x;
+          angle = _a->action_offset_y;
+          xy_type = _a->xy_type;
+        }
+      else
+        {
+          const Dwg_Object_BLOCKMOVEACTION *_a
+              = a->obj->tio.object->tio.BLOCKMOVEACTION;
+          multiplier = _a->action_offset_x;
+          angle = _a->action_offset_y;
+          xy_type = _a->xy_type;
+        }
+      if (xy_type)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "%s '%s' has XY type %u, which is not supported",
+                      dwg_type_name (a->obj->fixedtype), a->name,
+                      (unsigned)xy_type);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      // action_offset_x is the distance multiplier, action_offset_y the
+      // angle offset, counter-clockwise
+      delta.x = multiplier * (dx * cos (angle) - dy * sin (angle));
+      delta.y = multiplier * (dx * sin (angle) + dy * cos (angle));
+      delta.z = 0.0;
+      if (!isfinite (delta.x) || !isfinite (delta.y))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' is given %g, which %s '%s' "
+                      "can't move points by",
+                      p->name, p->value, dwg_type_name (a->obj->fixedtype),
+                      a->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+      if (delta.x == 0.0 && delta.y == 0.0)
+        continue;
+      error = a->obj->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION
+                  ? plan_stretch (plan, a, &delta)
+                  : plan_move (plan, a, &delta);
+      if (error)
+        return error;
+    }
+  return 0;
+}
+
+static void
+free_plan (Dynblock_Plan *plan)
+{
+  free_hash (plan->entities);
+  free_hash (plan->node_handles);
+  free ((void *)plan->nodes);
+  free (plan->linear);
+  for (BITCODE_BL i = 0; plan->actions && i < plan->num_actions; i++)
+    free (plan->actions[i].name);
+  free (plan->actions);
+  free (plan->moves);
+}
+
+static int
+is_at (const BITCODE_3BD *a, const BITCODE_3BD *b)
+{
+  return a->x == b->x && a->y == b->y && a->z == b->z;
+}
+
+#define REACH(m, v) (m) = fmax ((m), fabs (v))
+#define REACH_2D(m, pt)                                                       \
+  do                                                                          \
+    {                                                                         \
+      REACH (m, (pt).x);                                                      \
+      REACH (m, (pt).y);                                                      \
+    }                                                                         \
+  while (0)
+#define REACH_3D(m, pt)                                                       \
+  do                                                                          \
+    {                                                                         \
+      REACH_2D (m, pt);                                                       \
+      REACH (m, (pt).z);                                                      \
+    }                                                                         \
+  while (0)
+
+/* The largest magnitude of a coordinate the evaluator moves of entity obj,
+   with the ATTRIBs an INSERT owns. */
+static double
+entity_reach (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  double m = 0.0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      REACH_3D (m, obj->tio.entity->tio.LINE->start);
+      REACH_3D (m, obj->tio.entity->tio.LINE->end);
+      break;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        for (BITCODE_BL i = 0; _obj->points && i < _obj->num_points; i++)
+          REACH_2D (m, _obj->points[i]);
+      }
+      break;
+    case DWG_TYPE_ARC:
+      REACH_3D (m, obj->tio.entity->tio.ARC->center);
+      break;
+    case DWG_TYPE_CIRCLE:
+      REACH_3D (m, obj->tio.entity->tio.CIRCLE->center);
+      break;
+    case DWG_TYPE_ELLIPSE:
+      REACH_3D (m, obj->tio.entity->tio.ELLIPSE->center);
+      break;
+    case DWG_TYPE_SPLINE:
+      {
+        const Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        for (BITCODE_BL i = 0; _obj->ctrl_pts && i < _obj->num_ctrl_pts; i++)
+          REACH_3D (m, _obj->ctrl_pts[i]);
+        for (BITCODE_BS i = 0; _obj->fit_pts && i < _obj->num_fit_pts; i++)
+          REACH_3D (m, _obj->fit_pts[i]);
+      }
+      break;
+    case DWG_TYPE_TEXT:
+      REACH_2D (m, obj->tio.entity->tio.TEXT->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.TEXT->alignment_pt);
+      break;
+    case DWG_TYPE_ATTDEF:
+      REACH_2D (m, obj->tio.entity->tio.ATTDEF->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.ATTDEF->alignment_pt);
+      break;
+    case DWG_TYPE_ATTRIB:
+      REACH_2D (m, obj->tio.entity->tio.ATTRIB->ins_pt);
+      REACH_2D (m, obj->tio.entity->tio.ATTRIB->alignment_pt);
+      break;
+    case DWG_TYPE_MTEXT:
+      REACH_3D (m, obj->tio.entity->tio.MTEXT->ins_pt);
+      break;
+    case DWG_TYPE_INSERT:
+      {
+        const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+        REACH_3D (m, _obj->ins_pt);
+        for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+          {
+            const Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+            if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+              m = fmax (m, entity_reach (dwg, attrib));
+          }
+      }
+      break;
+    case DWG_TYPE_HATCH:
+      {
+        const Dwg_Entity_HATCH *_obj = obj->tio.entity->tio.HATCH;
+        for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+          {
+            const Dwg_HATCH_Path *path = &_obj->paths[i];
+            const BITCODE_BL n = path->num_segs_or_paths;
+            for (BITCODE_BL j = 0;
+                 (path->flag & 2) && path->polyline_paths && j < n; j++)
+              REACH_2D (m, path->polyline_paths[j].point);
+            for (BITCODE_BL j = 0; !(path->flag & 2) && path->segs && j < n;
+                 j++)
+              {
+                const Dwg_HATCH_PathSeg *s = &path->segs[j];
+                REACH_2D (m, s->first_endpoint);
+                REACH_2D (m, s->second_endpoint);
+                REACH_2D (m, s->center);
+                for (BITCODE_BL k = 0;
+                     s->control_points && k < s->num_control_points; k++)
+                  REACH_2D (m, s->control_points[k].point);
+                for (BITCODE_BL k = 0; s->fitpts && k < s->num_fitpts; k++)
+                  REACH_2D (m, s->fitpts[k]);
+              }
+          }
+        for (BITCODE_BL i = 0; _obj->seeds && i < _obj->num_seeds; i++)
+          REACH_2D (m, _obj->seeds[i]);
+        for (BITCODE_BS i = 0; _obj->deflines && i < _obj->num_deflines; i++)
+          REACH_2D (m, _obj->deflines[i].pt0);
+      }
+      break;
+    default:
+      break;
+    }
+  return m;
+}
+
+static double
+move_size (const Dynblock_Move *m)
+{
+  return fabs (m->delta.x) + fabs (m->delta.y) + fabs (m->delta.z);
+}
+
+/* Orders moves by entity, then by stretch point, the whole moves (-1)
+   first. */
+static int
+compare_moves (const void *pa, const void *pb)
+{
+  const Dynblock_Move *a = (const Dynblock_Move *)pa;
+  const Dynblock_Move *b = (const Dynblock_Move *)pb;
+  if (a->entity != b->entity)
+    return a->entity < b->entity ? -1 : 1;
+  return a->point < b->point ? -1 : a->point > b->point ? 1 : 0;
+}
+
+/* Refuses moves that could take a coordinate beyond what a double holds:
+   an entity's largest coordinate, plus the sum of its whole moves and of
+   the moves of the stretch point moved most, must stay finite. */
+static int
+check_reach (Dynblock_Plan *plan)
+{
+  const BITCODE_BL n = plan->num_moves;
+  Dynblock_Move *sorted;
+  int error = 0;
+  if (!n)
+    return 0;
+  sorted = (Dynblock_Move *)malloc (n * sizeof (Dynblock_Move));
+  if (!sorted)
+    return DWG_ERR_OUTOFMEM;
+  memcpy (sorted, plan->moves, n * sizeof (Dynblock_Move));
+  qsort (sorted, n, sizeof (Dynblock_Move), compare_moves);
+  for (BITCODE_BL i = 0; i < n && !error;)
+    {
+      const BITCODE_RLL entity = sorted[i].entity;
+      const Dwg_Object *obj = handle_object (plan->dwg, entity);
+      double whole = 0.0, most = 0.0, reach;
+      // the entity's whole moves, then those of each of its stretch points
+      while (i < n && sorted[i].entity == entity)
+        {
+          const int point = sorted[i].point;
+          double sum = 0.0;
+          for (; i < n && sorted[i].entity == entity
+                 && sorted[i].point == point;
+               i++)
+            sum += move_size (&sorted[i]);
+          if (point < 0)
+            whole = sum;
+          else
+            most = fmax (most, sum);
+        }
+      reach = (obj ? entity_reach (plan->dwg, obj) : 0.0) + whole + most;
+      if (!isfinite (reach))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "the actions would move %s " FORMAT_HV
+                      " beyond what a double holds",
+                      obj ? dwg_type_name (obj->fixedtype) : "entity",
+                      entity);
+          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+    }
+  free (sorted);
+  return error;
+}
+
+/* Plans the LINEAR values of list, given in linear (a NaN where not given),
+   for definition _def, whose evaluation graph is graph, into
+   plan->moves. */
+static int
+plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
+             const Dwg_Object *graph, const Param_List *list,
+             const double *linear)
+{
+  const Dwg_Object_EVALUATION_GRAPH *_graph
+      = graph->tio.object->tio.EVALUATION_GRAPH;
+  int error = 0, next;
+
+  plan->entities = hash_new (_def->num_owned * 2 + 8);
+  plan->node_handles = hash_new (_graph->num_nodes * 2 + 8);
+  plan->nodes = (const Dwg_Object **)calloc (_graph->num_nodes + 1,
+                                             sizeof (Dwg_Object *));
+  plan->linear
+      = (Dynblock_Linear *)calloc (list->count + 1, sizeof (Dynblock_Linear));
+  plan->actions = (Dynblock_Action *)calloc (_graph->num_nodes + 1,
+                                             sizeof (Dynblock_Action));
+  if (!plan->entities || !plan->node_handles || !plan->nodes || !plan->linear
+      || !plan->actions)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; _def->entities && i < _def->num_owned; i++)
+    if (ref_handle (_def->entities[i]))
+      hash_set (plan->entities, ref_handle (_def->entities[i]), 1);
+  for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj
+          = ref_object (plan->dwg, _graph->nodes[i].evalexpr);
+      if (obj && is_graph_element (obj))
+        {
+          plan->nodes[plan->num_nodes++] = obj;
+          hash_set (plan->node_handles, obj->handle.value, 1);
+        }
+    }
+  for (BITCODE_BL i = 0; i < list->count; i++)
+    {
+      const Dwg_DynParam *p = &list->params[i];
+      const Dwg_Object *obj;
+      const Dwg_Object_BLOCKLINEARPARAMETER *_obj;
+      Dynblock_Linear *l;
+      if (p->kind != DWG_DYNPARAM_LINEAR)
+        continue;
+      obj = handle_object (plan->dwg, p->handle);
+      _obj = obj->tio.object->tio.BLOCKLINEARPARAMETER;
+      l = &plan->linear[plan->num_linear++];
+      l->obj = obj;
+      l->name = p->name;
+      l->nodeid = p->nodeid;
+      l->base = _obj->def_basept;
+      l->end = _obj->def_endpt;
+      l->given = !isnan (linear[i]);
+      l->value = linear[i];
+    }
+  for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj
+          = ref_object (plan->dwg, _graph->nodes[i].evalexpr);
+      BITCODE_BL n;
+      const Dwg_BLOCKACTION_connectionpts *conn;
+      Dynblock_Action *a;
+      if (!obj || !(conn = action_connections (obj, &n)))
+        continue;
+      a = &plan->actions[plan->num_actions++];
+      a->obj = obj;
+      // every action starts with BLOCKACTION_fields, and so with its name
+      a->name
+          = utf8_copy (plan->dwg, obj->tio.object->tio.BLOCKMOVEACTION->name);
+      if (!a->name)
+        return DWG_ERR_OUTOFMEM;
+      a->linear = -1;
+      for (BITCODE_BL j = 0; j < n && a->linear < 0; j++)
+        a->linear = find_linear (plan, conn[j].code);
+    }
+
+  while (!error && (next = next_linear (plan)) >= 0)
+    {
+      Dynblock_Linear *p = &plan->linear[next];
+      const Dwg_Object_BLOCKLINEARPARAMETER *_p
+          = p->obj->tio.object->tio.BLOCKLINEARPARAMETER;
+      const double length = distance_3d (&p->base, &p->end);
+      BITCODE_3BD end, end_delta;
+      p->done = 1;
+      // Moved by another property's action, it would trigger its own
+      // actions too (AutoCAD's chain actions).
+      if (_p->chain_actions
+          && (!is_at (&p->base, &_p->def_basept)
+              || !is_at (&p->end, &_p->def_endpt)))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' chains its actions to another "
+                      "property's, which is not supported",
+                      p->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (!p->given || fabs (p->value - length) <= DYNBLOCK_VALUE_EPSILON)
+        continue;
+      if (length <= DYNBLOCK_VALUE_EPSILON)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' has no length to set", p->name);
+          return DYNBLOCK_REFUSED;
+        }
+      if (!isfinite (length))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' is longer than a double holds",
+                      p->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+      if (_p->parameter_base_location != 0)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "linear property '%s' has its base point in its "
+                      "middle, which is not supported",
+                      p->name);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      // the direction first, as value / length can overflow
+      end.x = p->base.x + (p->end.x - p->base.x) / length * p->value;
+      end.y = p->base.y + (p->end.y - p->base.y) / length * p->value;
+      end.z = p->base.z + (p->end.z - p->base.z) / length * p->value;
+      end_delta.x = end.x - p->end.x;
+      end_delta.y = end.y - p->end.y;
+      end_delta.z = end.z - p->end.z;
+      p->end = end;
+      error = plan_actions_of (plan, p, &end_delta);
+    }
+  if (!error && next == -2)
+    {
+      // which of them AutoCAD evaluates first is not known
+      const Dynblock_Linear *p = NULL;
+      for (BITCODE_BL i = 0; !p && i < plan->num_linear; i++)
+        if (plan->linear[i].given && !plan->linear[i].done)
+          p = &plan->linear[i];
+      set_reason (plan->reason, plan->reason_size,
+                  "linear properties given a value, such as '%s', wait on "
+                  "each other: their actions move each other's parameters "
+                  "in a cycle, which is not supported",
+                  p ? p->name : "");
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  return error ? error : check_reach (plan);
+}
+
+/* Moves pt, a 2D point of any of the 2D point types, by the x and y of
+   delta. */
+#define MOVE_2D(pt, delta)                                                    \
+  do                                                                          \
+    {                                                                         \
+      (pt).x += (delta)->x;                                                   \
+      (pt).y += (delta)->y;                                                   \
+    }                                                                         \
+  while (0)
+
+static void
+move_3d (BITCODE_3BD *pt, const BITCODE_3BD *delta)
+{
+  pt->x += delta->x;
+  pt->y += delta->y;
+  pt->z += delta->z;
+}
+
+/* Moves the boundary, seed points and pattern of HATCH _obj by delta, in
+   its OCS. */
+static void
+move_hatch (Dwg_Entity_HATCH *_obj, const BITCODE_3BD *delta)
+{
+  for (BITCODE_BL i = 0; _obj->paths && i < _obj->num_paths; i++)
+    {
+      Dwg_HATCH_Path *path = &_obj->paths[i];
+      if (path->flag & 2)
+        {
+          for (BITCODE_BL j = 0;
+               path->polyline_paths && j < path->num_segs_or_paths; j++)
+            MOVE_2D (path->polyline_paths[j].point, delta);
+          continue;
+        }
+      for (BITCODE_BL j = 0; path->segs && j < path->num_segs_or_paths; j++)
+        {
+          Dwg_HATCH_PathSeg *s = &path->segs[j];
+          switch (s->curve_type)
+            {
+            case 1:
+              MOVE_2D (s->first_endpoint, delta);
+              MOVE_2D (s->second_endpoint, delta);
+              break;
+            case 2:
+            case 3:
+              // an ellipse's endpoint is its major axis, a vector
+              MOVE_2D (s->center, delta);
+              break;
+            case 4:
+              for (BITCODE_BL k = 0;
+                   s->control_points && k < s->num_control_points; k++)
+                MOVE_2D (s->control_points[k].point, delta);
+              for (BITCODE_BL k = 0; s->fitpts && k < s->num_fitpts; k++)
+                MOVE_2D (s->fitpts[k], delta);
+              break;
+            default:
+              break;
+            }
+        }
+    }
+  for (BITCODE_BL i = 0; _obj->seeds && i < _obj->num_seeds; i++)
+    MOVE_2D (_obj->seeds[i], delta);
+  for (BITCODE_BS i = 0; _obj->deflines && i < _obj->num_deflines; i++)
+    {
+      MOVE_2D (_obj->deflines[i].pt0, delta);
+    }
+}
+
+/* Moves a TEXT, ATTDEF or ATTRIB by delta, in its OCS: its insertion
+   point, and its alignment point when it has one. */
+#define MOVE_TEXT(_obj, delta)                                                \
+  do                                                                          \
+    {                                                                         \
+      MOVE_2D ((_obj)->ins_pt, delta);                                       \
+      if (!((_obj)->dataflags & 0x02))                                        \
+        MOVE_2D ((_obj)->alignment_pt, delta);                               \
+    }                                                                         \
+  while (0)
+
+/* Moves copy obj whole by wcs_delta, and the ATTRIBs an INSERT owns. */
+static void
+move_whole (Dwg_Data *dwg, Dwg_Object *obj, const BITCODE_3BD *wcs_delta)
+{
+  BITCODE_3BD delta;
+  entity_delta (obj, wcs_delta, &delta);
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      move_3d (&obj->tio.entity->tio.LINE->start, &delta);
+      move_3d (&obj->tio.entity->tio.LINE->end, &delta);
+      break;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        for (BITCODE_BL i = 0; _obj->points && i < _obj->num_points; i++)
+          MOVE_2D (_obj->points[i], &delta);
+      }
+      break;
+    case DWG_TYPE_ARC:
+      move_3d (&obj->tio.entity->tio.ARC->center, &delta);
+      break;
+    case DWG_TYPE_CIRCLE:
+      move_3d (&obj->tio.entity->tio.CIRCLE->center, &delta);
+      break;
+    case DWG_TYPE_ELLIPSE:
+      move_3d (&obj->tio.entity->tio.ELLIPSE->center, &delta);
+      break;
+    case DWG_TYPE_SPLINE:
+      {
+        Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        for (BITCODE_BL i = 0; _obj->ctrl_pts && i < _obj->num_ctrl_pts; i++)
+          {
+            _obj->ctrl_pts[i].x += delta.x;
+            _obj->ctrl_pts[i].y += delta.y;
+            _obj->ctrl_pts[i].z += delta.z;
+          }
+        for (BITCODE_BS i = 0; _obj->fit_pts && i < _obj->num_fit_pts; i++)
+          move_3d (&_obj->fit_pts[i], &delta);
+      }
+      break;
+    case DWG_TYPE_TEXT:
+      MOVE_TEXT (obj->tio.entity->tio.TEXT, &delta);
+      break;
+    case DWG_TYPE_ATTDEF:
+      MOVE_TEXT (obj->tio.entity->tio.ATTDEF, &delta);
+      break;
+    case DWG_TYPE_ATTRIB:
+      MOVE_TEXT (obj->tio.entity->tio.ATTRIB, &delta);
+      break;
+    case DWG_TYPE_MTEXT:
+      move_3d (&obj->tio.entity->tio.MTEXT->ins_pt, &delta);
+      break;
+    case DWG_TYPE_INSERT:
+      {
+        Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+        move_3d (&_obj->ins_pt, &delta);
+        for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+          {
+            Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+            if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB)
+              move_whole (dwg, attrib, wcs_delta);
+          }
+      }
+      break;
+    case DWG_TYPE_HATCH:
+      move_hatch (obj->tio.entity->tio.HATCH, &delta);
+      break;
+    default:
+      break;
+    }
+}
+
+/* Moves stretch point point of copy obj, a LINE or LWPOLYLINE, by
+   wcs_delta. */
+static void
+move_point (Dwg_Object *obj, const int point, const BITCODE_3BD *wcs_delta)
+{
+  BITCODE_3BD delta;
+  entity_delta (obj, wcs_delta, &delta);
+  if (obj->fixedtype == DWG_TYPE_LINE)
+    move_3d (point ? &obj->tio.entity->tio.LINE->end
+                   : &obj->tio.entity->tio.LINE->start,
+             &delta);
+  else if (obj->fixedtype == DWG_TYPE_LWPOLYLINE)
+    MOVE_2D (obj->tio.entity->tio.LWPOLYLINE->points[point], &delta);
+}
+
+/* Applies the planned moves to the copies of the definition's entities. */
+static void
+apply_moves (Dwg_Data *dwg, const Dynblock_Plan *plan, const Dwg_Copy_Map *map)
+{
+  for (BITCODE_BL i = 0; i < plan->num_moves; i++)
+    {
+      const Dynblock_Move *m = &plan->moves[i];
+      Dwg_Object *copy
+          = handle_object (dwg, dwg_copy_map_get (map, m->entity));
+      if (!copy)
+        continue;
+      if (m->point < 0)
+        move_whole (dwg, copy, &m->delta);
+      else
+        move_point (copy, m->point, &m->delta);
+    }
+}
+
 /* The evaluation itself, as dwg_dynblock_evaluate (), into *rep_handlep. */
 static int
 evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
@@ -1132,6 +2691,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
 {
   Param_List list;
   BITCODE_BL *state = NULL;
+  double *linear = NULL;
   BITCODE_RLL *handles = NULL;
   BITCODE_BL num_handles = 0;
   Dwg_Object_BLOCK_HEADER *_def, *_rep;
@@ -1139,8 +2699,10 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   Dwg_Copy_Unresolved *unresolved = NULL;
   BITCODE_BL num_unresolved = 0;
   dwg_inthash *copies = NULL;
+  Dynblock_Plan plan;
   int parametric, error, copy_error = 0;
   *rep_handlep = 0;
+  memset (&plan, 0, sizeof (plan));
 
   error = definition_params (dwg, def_handle, &list, &parametric, reason,
                              reason_size);
@@ -1162,13 +2724,17 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DYNBLOCK_REFUSED | DWG_ERR_UNHANDLEDCLASS;
       goto done;
     }
-  // the visibility state chosen for each property, + 1, or 0
+  // the visibility state chosen for each property, + 1, or 0; and the
+  // LINEAR value, or a NaN
   state = (BITCODE_BL *)calloc (list.count + 1, sizeof (BITCODE_BL));
-  if (!state)
+  linear = (double *)malloc ((list.count + 1) * sizeof (double));
+  if (!state || !linear)
     {
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
+  for (BITCODE_BL j = 0; j < list.count; j++)
+    linear[j] = nan ("");
   for (BITCODE_BL i = 0; i < num_values; i++)
     {
       const Dwg_DynValue *v = &values[i];
@@ -1240,15 +2806,15 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
             }
           break;
         case DWG_DYNPARAM_LINEAR:
-          if (fabs (v->value - p->default_value) > DYNBLOCK_VALUE_EPSILON)
+          if (v->value < 0.0)
             {
               set_reason (reason, reason_size,
-                          "linear property '%s': changing it from %g to %g "
-                          "is not supported",
-                          p->name, p->default_value, v->value);
-              error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+                          "linear property '%s' is given %g, below 0",
+                          p->name, v->value);
+              error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
               goto done;
             }
+          linear[j] = v->value;
           break;
         case DWG_DYNPARAM_ROTATION:
           if (angle_difference (v->value, p->default_value)
@@ -1274,6 +2840,14 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   _def = handle_object (dwg, def_handle)->tio.object->tio.BLOCK_HEADER;
   error = definition_entities (dwg, _def, &handles, &num_handles, reason,
                                reason_size);
+  if (error)
+    goto done;
+  plan.dwg = dwg;
+  plan.reason = reason;
+  plan.reason_size = reason_size;
+  error = plan_linear (&plan, _def,
+                       definition_graph (dwg, handle_object (dwg, def_handle)),
+                       &list, linear);
   if (error)
     goto done;
   // The block table's count is 16-bit, and the add API would wrap it. As
@@ -1319,11 +2893,13 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  // the add API doesn't count the entities it adds, as the decoder and the
-  // copy do
-  dwg->num_entities++;
   _rep->anonymous = 1;
   _rep->flag |= 1;
+  // the add API sets these only for an ATTDEF it adds itself, and sets
+  // only hasattrs of the two
+  _rep->hasattrs = _def->hasattrs || (_def->flag & 2);
+  if (_rep->hasattrs)
+    _rep->flag |= 2;
   _rep->base_pt = _def->base_pt;
   *rep_handlep = block_header_object (_rep)->handle.value;
   for (BITCODE_BL i = 0; i < num_handles; i++)
@@ -1351,8 +2927,8 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  dwg->num_entities++;
 
+  apply_moves (dwg, &plan, map);
   for (BITCODE_BL j = 0; j < list.count; j++)
     if (state[j])
       {
@@ -1375,8 +2951,10 @@ done:
     set_reason (reason, reason_size, "error 0x%x", (unsigned)error);
   free_hash (copies);
   dwg_copy_map_free (map);
+  free_plan (&plan);
   free (handles);
   free (state);
+  free (linear);
   dwg_dynblock_free_params (list.params, list.count);
   return error;
 }
@@ -1439,12 +3017,15 @@ static void ATTRIBUTE_FORMAT (2, 3)
 {
   char what[REASON_SIZE / 2];
   va_list ap;
+  int len;
   if (c->differs++ || c->reason[0])
     return;
   va_start (ap, fmt);
-  vsnprintf (what, sizeof (what), fmt, ap);
+  len = vsnprintf (what, sizeof (what), fmt, ap);
   va_end (ap);
-  snprintf (c->reason, sizeof (c->reason), "%s: %s", c->entity, what);
+  if (len >= (int)sizeof (what))
+    utf8_trim (what);
+  set_reason (c->reason, sizeof (c->reason), "%s: %s", c->entity, what);
 }
 
 static void compare_object (Dynblock_Compare *c, const Dwg_Object *a,
@@ -1560,13 +3141,21 @@ compare_doubles (Dynblock_Compare *c, const char *name, const double *a,
       }
 }
 
+/* Strings compare as the drawing keeps them, in its codepage, and are
+   given in the reason in UTF-8. */
 static void
 compare_string (Dynblock_Compare *c, const char *name, const char *a,
                 const char *b)
 {
-  if (strNE (a ? a : "", b ? b : ""))
-    differ (c, "%s is \"%s\", AutoCAD's \"%s\"", name, b ? b : "",
-            a ? a : "");
+  char *ua, *ub;
+  if (strEQ (a ? a : "", b ? b : ""))
+    return;
+  ua = utf8_copy (c->dwg, a);
+  ub = utf8_copy (c->dwg, b);
+  differ (c, "%s is \"%s\", AutoCAD's \"%s\"", name, ub ? ub : "?",
+          ua ? ua : "?");
+  free (ua);
+  free (ub);
 }
 
 static void
@@ -1619,9 +3208,9 @@ count_value (const Dwg_DYNAPI_field *f, const void *base)
    or the counts the specs keep elsewhere.
 
    A proxy entity's data is data_numbits bits long, in whole bytes: the
-   decoder leaves its data_size 0. The bits of a partial last byte that
-   bit_read_bits doesn't fill are 0, so comparing the whole byte compares
-   the bits it holds, whichever end of the byte they are at. */
+   decoder leaves its data_size 0. bit_read_bits puts the bits of a partial
+   last byte at its high end and leaves the low bits 0, so comparing the
+   whole byte compares the bits it holds. */
 static int64_t
 array_length (const char *structname, const Dwg_DYNAPI_field *fields,
               const Dwg_DYNAPI_field *f, const void *base)
@@ -1629,17 +3218,20 @@ array_length (const char *structname, const Dwg_DYNAPI_field *fields,
   static const struct
   {
     const char *structname, *field, *count;
-    int bits; /* count is in bits */
-  } rules[] = { { "INSERT", "attribs", "num_owned", 0 },
-                { "MINSERT", "attribs", "num_owned", 0 },
-                { "POLYLINE_2D", "vertex", "num_owned", 0 },
-                { "POLYLINE_3D", "vertex", "num_owned", 0 },
-                { "POLYLINE_MESH", "vertex", "num_owned", 0 },
-                { "POLYLINE_PFACE", "vertex", "num_owned", 0 },
-                { "HATCH_Path", "segs", "num_segs_or_paths", 0 },
-                { "HATCH_Path", "polyline_paths", "num_segs_or_paths", 0 },
-                { "PROXY_ENTITY", "data", "data_numbits", 1 },
-                { NULL, NULL, NULL, 0 } };
+    int bits;  /* count is in bits */
+    int fixed; /* the length, when there is no count */
+  } rules[] = { { "INSERT", "attribs", "num_owned", 0, 0 },
+                { "MINSERT", "attribs", "num_owned", 0, 0 },
+                { "POLYLINE_2D", "vertex", "num_owned", 0, 0 },
+                { "POLYLINE_3D", "vertex", "num_owned", 0, 0 },
+                { "POLYLINE_MESH", "vertex", "num_owned", 0, 0 },
+                { "POLYLINE_PFACE", "vertex", "num_owned", 0, 0 },
+                { "HATCH_Path", "segs", "num_segs_or_paths", 0, 0 },
+                { "HATCH_Path", "polyline_paths", "num_segs_or_paths", 0, 0 },
+                { "PROXY_ENTITY", "data", "data_numbits", 1, 0 },
+                // a 4x4 matrix
+                { "MLEADER_Content_Block", "transform", NULL, 0, 16 },
+                { NULL, NULL, NULL, 0, 0 } };
   const Dwg_DYNAPI_field *count = NULL;
   int bits = 0;
   char name[96];
@@ -1647,6 +3239,8 @@ array_length (const char *structname, const Dwg_DYNAPI_field *fields,
     if (strEQ (structname, rules[i].structname)
         && strEQ (f->name, rules[i].field))
       {
+        if (rules[i].fixed)
+          return rules[i].fixed;
         count = find_field (fields, rules[i].count);
         bits = count && rules[i].bits;
       }
@@ -1769,6 +3363,38 @@ compare_array (Dynblock_Compare *c, const char *name, const char *structname,
     }
 }
 
+/* The content of a multileader's context, a union, at a and b: compares
+   the member the context ctx, with fields, says it holds. */
+static void
+compare_mleader_content (Dynblock_Compare *c, const char *name,
+                         const Dwg_DYNAPI_field *fields, const void *ctx,
+                         const void *a, const void *b)
+{
+  const Dwg_DYNAPI_field *txt = find_field (fields, "has_content_txt");
+  const Dwg_DYNAPI_field *blk = find_field (fields, "has_content_blk");
+  const Dwg_DYNAPI_field *member_fields;
+  const char *member, *structname;
+  char sub[180];
+  if (txt && count_value (txt, ctx))
+    {
+      member = "txt";
+      structname = "MLEADER_Content_MText";
+    }
+  else if (blk && count_value (blk, ctx))
+    {
+      member = "blk";
+      structname = "MLEADER_Content_Block";
+    }
+  else
+    return;
+  snprintf (sub, sizeof (sub), "%s.%s", name, member);
+  member_fields = dwg_dynapi_subclass_fields (structname);
+  if (member_fields)
+    compare_fields (c, sub, structname, member_fields, a, b);
+  else
+    differ (c, "%s [%s] has no fields to compare", sub, structname);
+}
+
 static void
 compare_fields (Dynblock_Compare *c, const char *prefix,
                 const char *structname, const Dwg_DYNAPI_field *fields,
@@ -1789,6 +3415,11 @@ compare_fields (Dynblock_Compare *c, const char *prefix,
         continue;
       snprintf (name, sizeof (name), "%s%s%s", prefix, *prefix ? "." : "",
                 f->name);
+      if (strEQc (type, "Dwg_MLEADER_Content"))
+        {
+          compare_mleader_content (c, name, fields, a, pa, pb);
+          continue;
+        }
       if (strEQc (type, "TF") || strEQc (type, "RC*")
           || (len && type[len - 1] == '*' && !is_string_type (type)))
         {
@@ -1850,6 +3481,20 @@ is_near_angle (const Dynblock_Compare *c, const double a, const double b)
   return angle_difference (a, b) <= c->tolerance;
 }
 
+/* The sweep of ELLIPSE e from its start to its end parameter, counter-
+   clockwise, in [0, 2 pi), but 2 pi for a whole turn, so that a full
+   ellipse stays distinct from an arc of no length. */
+static double
+ellipse_sweep (const Dynblock_Compare *c, const Dwg_Entity_ELLIPSE *e)
+{
+  const double raw = e->end_angle - e->start_angle;
+  double sweep;
+  if (raw != 0.0 && fabs (fabs (raw) - 2.0 * M_PI) <= c->tolerance)
+    return 2.0 * M_PI;
+  sweep = fmod (raw, 2.0 * M_PI);
+  return sweep < 0.0 ? sweep + 2.0 * M_PI : sweep;
+}
+
 /* Whether ELLIPSE b is ELLIPSE a with its major axis reversed and its
    parameters turned by pi: the same curve, stored another way. AutoCAD
    stores a representation block's ellipse so after some grip edits, and
@@ -1870,8 +3515,7 @@ is_reversed_ellipse (const Dynblock_Compare *c, const Dwg_Entity_ELLIPSE *a,
          && is_near (c, a->sm_axis.y, -b->sm_axis.y)
          && is_near (c, a->sm_axis.z, -b->sm_axis.z)
          && is_near_angle (c, a->start_angle + M_PI, b->start_angle)
-         && is_near (c, a->end_angle - a->start_angle,
-                  b->end_angle - b->start_angle);
+         && is_near (c, ellipse_sweep (c, a), ellipse_sweep (c, b));
 }
 
 static void
@@ -1915,7 +3559,8 @@ compare_object (Dynblock_Compare *c, const Dwg_Object *a, const Dwg_Object *b)
 
 /* Maps each entity of block _blk to its AcDbBlockRepETag index into index,
    and each index + 1 to its entity into byindex. Returns 0, or 1 with the
-   reason in c when an entity has no index or shares one. */
+   reason in c when an entry of the block's entity list doesn't resolve, or
+   an entity has no index or shares one. */
 static int
 index_entities (Dynblock_Compare *c, const Dwg_Object_BLOCK_HEADER *_blk,
                 const char *whose, dwg_inthash *index, dwg_inthash *byindex)
@@ -2071,6 +3716,19 @@ changed_kinds (const Dwg_Data *dwg, const BITCODE_RLL def_handle,
   return kinds;
 }
 
+/* The status of a check whose reading of the values or evaluation returned
+   error, from DWG_ERR_CRITICAL up: a refusal of what the evaluator doesn't
+   support is unsupported, other errors fail. */
+static Dwg_DynBlock_Check_Status
+error_status (const int error)
+{
+  return (error & DYNBLOCK_REFUSED)
+                 && (error
+                     & (DWG_ERR_NOTYETSUPPORTED | DWG_ERR_UNHANDLEDCLASS))
+             ? DWG_DYNBLOCK_CHECK_UNSUPPORTED
+             : DWG_DYNBLOCK_CHECK_FAILED;
+}
+
 /* Checks the placement check names, into check. Returns 0, or
    DWG_ERR_OUTOFMEM. */
 static int
@@ -2085,6 +3743,8 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
   char left_out[REASON_SIZE] = "";
   int error, oom = 0;
 
+  // the definition the block names, unless the values name another
+  check->definition = btag_definition (dwg, handle_object (dwg, check->block));
   if (!block_representation (dwg, insert))
     {
       check->status = DWG_DYNBLOCK_CHECK_NO_VALUES;
@@ -2094,10 +3754,11 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
     }
   error = placement_values (dwg, check->insert, &def_handle, &values, &count,
                             reason, sizeof (reason));
-  check->definition = def_handle;
+  if (def_handle)
+    check->definition = def_handle;
   if (error >= DWG_ERR_CRITICAL)
     {
-      check->status = DWG_DYNBLOCK_CHECK_FAILED;
+      check->status = error_status (error);
       oom = error & DWG_ERR_OUTOFMEM;
       goto done;
     }
@@ -2111,12 +3772,7 @@ check_placement (Dwg_Data *dwg, Dwg_DynBlock_Check *check,
                     reason, sizeof (reason));
   if (error >= DWG_ERR_CRITICAL)
     {
-      check->status
-          = (error & DYNBLOCK_REFUSED)
-                    && (error
-                        & (DWG_ERR_NOTYETSUPPORTED | DWG_ERR_UNHANDLEDCLASS))
-                ? DWG_DYNBLOCK_CHECK_UNSUPPORTED
-                : DWG_DYNBLOCK_CHECK_FAILED;
+      check->status = error_status (error);
       oom = error & DWG_ERR_OUTOFMEM;
       goto done;
     }
@@ -2149,10 +3805,12 @@ done:
   return oom ? DWG_ERR_OUTOFMEM : 0;
 }
 
+/* An anonymous block with AcDbBlockRepBTag EED. */
 static int
 is_representation_block (const Dwg_Data *dwg, const Dwg_Object *obj)
 {
   return obj && obj->fixedtype == DWG_TYPE_BLOCK_HEADER
+         && obj->tio.object->tio.BLOCK_HEADER->anonymous
          && btag_definition (dwg, obj) != 0;
 }
 

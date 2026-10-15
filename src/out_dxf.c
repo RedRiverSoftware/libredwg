@@ -3866,6 +3866,8 @@ dxf_ENDBLK_empty (Bit_Chain *restrict dat, const Dwg_Object *restrict hdr)
   // handle 0"), killing the whole file for the sake of a filler ENDBLK
   obj->handle.value = dwg_next_handle (dwg);
   dwg_setup_ENDBLK (obj);
+  // which counts it in dwg->num_entities, as if it were in dwg->object[]
+  dwg->num_entities--;
   obj->tio.entity->ownerhandle
       = (BITCODE_H)calloc (1, sizeof (Dwg_Object_Ref));
   obj->tio.entity->ownerhandle->obj = (Dwg_Object *)hdr;

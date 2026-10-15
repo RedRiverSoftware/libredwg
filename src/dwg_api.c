@@ -25483,6 +25483,8 @@ dwg_add_class (Dwg_Data *restrict dwg, const char *const restrict dxfname,
     obj = &dwg->object[idx];                                                  \
     dwg->cur_index++;                                                         \
     obj->supertype = DWG_SUPERTYPE_ENTITY;                                    \
+    /* as the decoder's dwg_setup_<token> counts the entities it reads */     \
+    dwg->num_entities++;                                                      \
     obj->tio.entity                                                           \
         = (Dwg_Object_Entity *)calloc (1, sizeof (Dwg_Object_Entity));        \
     obj->tio.entity->objid = obj->index;                                      \
@@ -25666,7 +25668,8 @@ replace_entity_link (Dwg_Object_Ref **restrict refp, Dwg_Object_Ref *ref)
 /* Insert new entity into the block.
    We have two entity chains, one in the BLOCK_HEADER (not relative, obj always
    NULL) and the 2nd in the entities itself, these are always relative, so
-   different ref. _owner may be BLOCK_HEADER or POLYLINE_*
+   different ref. _owner may be BLOCK_HEADER, POLYLINE_*, or the INSERT
+   owning an ATTRIB or SEQEND.
  */
 EXPORT int
 dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
@@ -25747,6 +25750,16 @@ dwg_insert_entity (Dwg_Object_BLOCK_HEADER *restrict _owner,
             {
               prev = &dwg->object[obj->index - 1];
               if (!dwg_obj_is_subentity (prev))
+                prev = NULL;
+              // An ATTRIB comes with its INSERT as owner: link it only to
+              // that INSERT's previous ATTRIB, not to one of another INSERT
+              // whose ATTRIBs are added in turn with this one's. The VERTEX
+              // adders pass the polyline's block, and make the POLYLINE the
+              // owner only afterwards.
+              else if (owner->fixedtype != DWG_TYPE_BLOCK_HEADER
+                       && (!prev->tio.entity->ownerhandle
+                           || prev->tio.entity->ownerhandle->absolute_ref
+                                  != owner->handle.value))
                 prev = NULL;
             }
           else if (owner->fixedtype == DWG_TYPE_BLOCK_HEADER)
@@ -25842,53 +25855,91 @@ dwg_add_TEXT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
   return _obj;
 }
 
+/* Appends ATTRIB attobj, which insert owns, to insert's ATTRIBs, as AutoCAD
+   links them: the INSERT refers to each with a hard owner reference
+   (attribs[]), to the first and last with soft pointers (r13-r2000), and
+   owns their SEQEND, which comes with the first. The ATTRIBs are chained
+   to each other. */
 static Dwg_Entity_INSERT *
-add_attrib_links (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
-                  Dwg_Entity_INSERT *restrict insert,
+add_attrib_links (Dwg_Entity_INSERT *restrict insert,
                   Dwg_Object *restrict insobj, Dwg_Object *restrict attobj)
 {
   Dwg_Object *seqend = dwg_ref_object (insobj->parent, insert->seqend);
   // prev attrib
-  Dwg_Object *lastobj = dwg_ref_object (insobj->parent, insert->last_attrib);
+  Dwg_Object *lastobj
+      = insert->num_owned && insert->attribs
+            ? dwg_ref_object (insobj->parent,
+                              insert->attribs[insert->num_owned - 1])
+            : dwg_ref_object (insobj->parent, insert->last_attrib);
   if (!insert->has_attribs || !seqend || !lastobj) // no ATTRIB and SEQEND yet
     {
+      // owned by the INSERT, as dwg_add_SEQEND's owner
+      Dwg_Entity_INSERT *blkhdr = insert;
+      const BITCODE_BL attidx = attobj->index;
       API_ADD_ENTITY (SEQEND);
+      // adding it may have moved dwg->object; blkobj is the INSERT's again
+      insobj = blkobj;
+      attobj = &dwg->object[attidx];
       if (dwg->header.version <= R_12)
-        obj->type = DWG_TYPE_SEQEND_r11;
+        {
+          obj->type = DWG_TYPE_SEQEND_r11;
+          // in the INSERT's section, as its ATTRIBs (see dwg_add_ATTRIB)
+          obj->tio.entity->entmode = insobj->tio.entity->entmode;
+        }
       insert->has_attribs = 1;
       insert->num_owned = 1;
-      obj->tio.entity->entmode = 0;
       obj->tio.entity->nolinks = 0;
-      obj->tio.entity->ownerhandle
-          = dwg_add_handleref (dwg, 4, insobj->handle.value, insobj);
       insert->first_attrib
           = dwg_add_handleref (dwg, 4, attobj->handle.value, insobj);
       insert->last_attrib = insert->first_attrib;
       insert->seqend = dwg_add_handleref (dwg, 3, obj->handle.value, insobj);
       insert->attribs = (BITCODE_H *)malloc (sizeof (BITCODE_H));
-      insert->attribs[0] = insert->last_attrib;
+      insert->attribs[0]
+          = dwg_add_handleref (dwg, 3, attobj->handle.value, NULL);
+      // the only ATTRIB yet: no link before or after it, where
+      // in_postprocess_handles may have left neighbours by handle
+      replace_entity_link (&attobj->tio.entity->prev_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
+      replace_entity_link (&attobj->tio.entity->next_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
+      attobj->tio.entity->nolinks = 0;
       IN_POSTPROCESS_SEQEND (obj, insert->num_owned, insert->attribs);
+      seqend = obj;
     }
   else
     {
       Dwg_Data *dwg = insobj->parent;
-      insert->last_attrib
-          = dwg_add_handleref (dwg, 4, attobj->handle.value, insobj);
-      attobj->tio.entity->prev_entity = insert->last_attrib;
+      replace_entity_link (
+          &insert->last_attrib,
+          dwg_add_handleref (dwg, 4, attobj->handle.value, insobj));
       insert->num_owned++;
       insert->attribs = (BITCODE_H *)realloc (
           insert->attribs, insert->num_owned * sizeof (BITCODE_H));
-      lastobj->tio.entity->next_entity
-          = dwg_add_handleref (dwg, 3, attobj->handle.value, insobj);
-      insert->attribs[insert->num_owned - 1] = insert->last_attrib;
-      seqend = dwg_ref_object (dwg, insert->seqend);
+      insert->attribs[insert->num_owned - 1]
+          = dwg_add_handleref (dwg, 3, attobj->handle.value, NULL);
+      // r13-r2000 follow this chain from first_attrib to last_attrib
+      replace_entity_link (
+          &lastobj->tio.entity->next_entity,
+          dwg_add_handleref (dwg, 4, attobj->handle.value, lastobj));
+      lastobj->tio.entity->nolinks = 0;
+      replace_entity_link (
+          &attobj->tio.entity->prev_entity,
+          dwg_add_handleref (dwg, 4, lastobj->handle.value, attobj));
+      replace_entity_link (&attobj->tio.entity->next_entity,
+                           dwg_add_handleref (dwg, 4, 0, NULL));
+      attobj->tio.entity->nolinks = 0;
       IN_POSTPROCESS_SEQEND (seqend, insert->num_owned, insert->attribs);
     }
+  // The INSERT's sequence ends here: in_postprocess_handles links the next
+  // entity added to the last one added, which would then be this ATTRIB
+  // (r13-r2000), linking on to an entity outside its INSERT. A SEQEND it
+  // links to nothing.
+  insobj->parent->prev_entity_index = seqend->index;
   return insert;
 }
 
-/* This adds the ATTRIB and SEQEND to the insert,
-   and the ATTDEF and ENDBLK to the block. */
+/* This adds the ATTRIB to the insert, with a SEQEND if it is the first,
+   and the ATTDEF to the insert's block. */
 EXPORT Dwg_Entity_ATTRIB *
 dwg_add_Attribute (Dwg_Entity_INSERT *restrict insert, const double height,
                    const int flags, const char *restrict prompt,
@@ -25917,7 +25968,11 @@ dwg_add_Attribute (Dwg_Entity_INSERT *restrict insert, const double height,
   ADD_CHECK_3DPOINT (ins_pt);
   ADD_CHECK_DOUBLE (height);
   insobj = dwg_obj_generic_to_object (insert, &err);
-  if (!insobj || err)
+  // before its block_header is read, and the ATTDEF added. A copy of an
+  // INSERT's struct resolves to the INSERT's object too, but the links
+  // would go into the copy.
+  if (!insobj || err || insobj->fixedtype != DWG_TYPE_INSERT
+      || insobj->tio.entity->tio.INSERT != insert)
     {
       LOG_ERROR ("add_Attribute: No INSERT found");
       return NULL;
@@ -25944,7 +25999,6 @@ dwg_add_Attribute (Dwg_Entity_INSERT *restrict insert, const double height,
       return NULL;
     }
   // dwg->header_vars.AFLAGS = flags; FIXME
-  add_attrib_links (blkhdr, insert, insobj, attobj);
   return attrib;
 }
 
@@ -25954,46 +26008,56 @@ dwg_add_ATTRIB (Dwg_Entity_INSERT *restrict insert, const double height,
                 const char *restrict tag, const char *restrict text_value)
 {
   int err;
-  Dwg_Object_BLOCK_HEADER *restrict blkhdr = dwg_entity_owner (insert);
-  Dwg_Object *restrict insobj = dwg_obj_generic_to_object (insert, &err);
-  API_ADD_ENTITY (ATTRIB);
-  ADD_CHECK_3DPOINT (ins_pt);
-  ADD_CHECK_DOUBLE (height);
-  if (!insobj || err)
+  const Dwg_Object *insobj = dwg_obj_generic_to_object (insert, &err);
+  // checked before anything is added. A copy of an INSERT's struct
+  // resolves to the INSERT's object too, but the links would go into the
+  // copy.
+  if (!insobj || err || insobj->fixedtype != DWG_TYPE_INSERT
+      || insobj->tio.entity->tio.INSERT != insert)
     {
       LOG_ERROR ("add_ATTRIB: No INSERT found");
-      API_UNADD_ENTITY;
       return NULL;
     }
+  ADD_CHECK_3DPOINT (ins_pt);
+  ADD_CHECK_DOUBLE (height);
   if (!dwg_is_valid_tag (tag))
     {
       LOG_ERROR ("add_ATTRIB: Invalid tag %s", tag);
-      API_UNADD_ENTITY;
       return NULL;
     }
-  _obj->tag = dwg_add_u8_input (dwg, tag);
-  _obj->text_value = dwg_add_u8_input (dwg, text_value);
-  _obj->ins_pt.x = ins_pt->x;
-  _obj->ins_pt.y = ins_pt->y;
-  _obj->elevation = ins_pt->z;
-  _obj->height = height;
-  // block handles
-  if (dwg->header_vars.TEXTSTYLE)
-    _obj->style = dwg_add_handleref (
-        dwg, 5, dwg->header_vars.TEXTSTYLE->absolute_ref, NULL);
-  insert->has_attribs = 1;
-  // TODO: if !blkhdr->hasattrs: error no ATTDEF
-  insert->block_header
-      = dwg_add_handleref (dwg, 3, blkobj->handle.value, insobj);
-  if (dwg->header.version <= R_12)
-    {
-      obj->type = DWG_TYPE_ATTRIB_r11;
-      if (_obj->elevation == 0.0)
-        obj->tio.entity->flag_r11 |= FLAG_R11_HAS_ELEVATION;
-    }
-  // integrate into INSERT.attribs[]
-  add_attrib_links (blkhdr, insert, insobj, obj);
-  return _obj;
+  {
+    // the INSERT owns its ATTRIBs, in model space or in a block
+    Dwg_Entity_INSERT *blkhdr = insert;
+    API_ADD_ENTITY (ATTRIB);
+    _obj->tag = dwg_add_u8_input (dwg, tag);
+    _obj->text_value = dwg_add_u8_input (dwg, text_value);
+    _obj->ins_pt.x = ins_pt->x;
+    _obj->ins_pt.y = ins_pt->y;
+    _obj->elevation = ins_pt->z;
+    _obj->height = height;
+    // block handles
+    if (dwg->header_vars.TEXTSTYLE)
+      _obj->style = dwg_add_handleref (
+          dwg, 5, dwg->header_vars.TEXTSTYLE->absolute_ref, NULL);
+    insert->has_attribs = 1;
+    // TODO: if the INSERT's block has no hasattrs: error no ATTDEF
+    if (dwg->header.version <= R_12)
+      {
+        obj->type = DWG_TYPE_ATTRIB_r11;
+        if (_obj->elevation == 0.0)
+          obj->tio.entity->flag_r11 |= FLAG_R11_HAS_ELEVATION;
+        // written in the INSERT's section, which the encoder takes from
+        // entmode, as the decoder reads them
+        obj->tio.entity->entmode = blkobj->tio.entity->entmode;
+        // attributes follow the INSERT. The encoder derives this flag from
+        // has_attribs only when opts_r11 is 0, and dwg_add_INSERT sets it.
+        blkobj->tio.entity->flag_r11 |= FLAG_R11_HAS_ATTRIBS;
+      }
+    // integrate into INSERT.attribs[]. blkobj is the INSERT's object, found
+    // again if adding the ATTRIB moved dwg->object
+    add_attrib_links (insert, blkobj, obj);
+    return _obj;
+  }
 }
 
 /* internally used only by dwg_add_Attribute only */
