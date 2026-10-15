@@ -326,10 +326,11 @@ sort_items (Dwg_Object_DICTIONARY *dict)
 
 /* A new BLOCKREPRESENTATION, which the add API has no function for, made as
    it makes its objects: the next handle, and its class added to dwg when
-   dwg lacks it. */
+   dwg lacks it. The class table functions come with write support. */
 static Dwg_Object *
 new_blockrepresentation (Dwg_Data *dwg)
 {
+#ifdef USE_WRITE
   static const char dxfname[] = "ACDB_BLOCKREPRESENTATION_DATA";
   const BITCODE_BS num_classes = dwg->num_classes;
   const BITCODE_BL idx = dwg->num_objects;
@@ -361,6 +362,10 @@ new_blockrepresentation (Dwg_Data *dwg)
   dwg_set_next_objhandle (obj);
   obj->tio.object->is_xdic_missing = 1;
   return obj;
+#else
+  (void)dwg;
+  return NULL;
+#endif
 }
 
 /*--------------------------------------------------------------------------------
@@ -988,9 +993,9 @@ complete_representation (Dynblock_Placement *p)
   Dwg_Data *dwg = p->dwg;
   Dwg_Object_BLOCK_HEADER *rep = block_of (dwg, p->block);
   const Dwg_Object_BLOCK_HEADER *def = block_of (dwg, p->def);
-  const Dwg_Object *sortents
-      = xdic_item (dwg, handle_object (dwg, p->def), "ACAD_SORTENTS");
+  // first, as adding the APPID may move dwg->object
   const BITCODE_RLL btag = appid_handle (dwg, "AcDbBlockRepBTag");
+  const Dwg_Object *sortents;
   int error;
 
   if (!btag)
@@ -1014,6 +1019,7 @@ complete_representation (Dynblock_Placement *p)
               || ent->fixedtype == DWG_TYPE_MINSERT))
         error = list_insert (dwg, ent);
     }
+  sortents = xdic_item (dwg, handle_object (dwg, p->def), "ACAD_SORTENTS");
   if (!error && sortents && sortents->fixedtype == DWG_TYPE_SORTENTSTABLE)
     error = copy_sortents (p, sortents);
   if (error < DWG_ERR_CRITICAL)
@@ -1380,7 +1386,10 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                                           dwg, 5, attdef->style->absolute_ref,
                                           NULL)
                                     : NULL;
+#ifdef USE_WRITE
+      // only the DWG encoder, which comes with write support, reads them
       dwg_set_dataflags (attobj);
+#endif
       if (!error && has_etag)
         // AutoCAD's ATTRIBs carry the index, with a 1005 handle of 0
         error = set_tag_eed (&attobj->tio.entity->eed,
@@ -1442,6 +1451,15 @@ place (Dynblock_Placement *p, const Dwg_DynValue *values,
       return error;
     }
   error = check_values (p, values, num_values);
+#ifndef USE_WRITE
+  // the stored values can't be made: see new_blockrepresentation ()
+  if (!error && !p->at_defaults)
+    {
+      set_reason (p, "a placement at other values than the definition's "
+                     "needs LibreDWG built with write support");
+      error = INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+#endif
   if (!error && !p->at_defaults)
     error = check_representation (p);
   if (!error)

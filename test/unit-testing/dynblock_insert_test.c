@@ -1487,10 +1487,45 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
   return failures;
 }
 
+/* Makes entity handle one that Trees' visibility parameter shows in state
+   0, Palm (Plan), only. Returns 0 on success. */
+static int
+show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
+                     const BITCODE_RLL handle)
+{
+  const Dwg_Object *graph = dict_item (dwg, xdic (dwg, object (dwg, def)),
+                                       "ACAD_ENHANCEDBLOCK");
+  const Dwg_Object_EVALUATION_GRAPH *g
+      = graph ? graph->tio.object->tio.EVALUATION_GRAPH : NULL;
+  for (BITCODE_BL i = 0; g && i < g->num_nodes; i++)
+    {
+      const Dwg_Object *node = object (dwg, ref (g->nodes[i].evalexpr));
+      Dwg_Object_BLOCKVISIBILITYPARAMETER *vis;
+      Dwg_BLOCKVISIBILITYPARAMETER_state *state;
+      if (!node || node->fixedtype != DWG_TYPE_BLOCKVISIBILITYPARAMETER)
+        continue;
+      vis = node->tio.object->tio.BLOCKVISIBILITYPARAMETER;
+      state = &vis->states[0];
+      vis->blocks = (BITCODE_H *)realloc (
+          vis->blocks, (vis->num_blocks + 1) * sizeof (BITCODE_H));
+      state->blocks = (BITCODE_H *)realloc (
+          state->blocks, (state->num_blocks + 1) * sizeof (BITCODE_H));
+      if (!vis->blocks || !state->blocks)
+        return 1;
+      vis->blocks[vis->num_blocks++]
+          = dwg_add_handleref (dwg, 4, handle, NULL);
+      state->blocks[state->num_blocks++]
+          = dwg_add_handleref (dwg, 4, handle, NULL);
+      return 0;
+    }
+  return 1;
+}
+
 /* Attributes, on a copy of Trees given attribute definitions: a plain one,
-   a constant one, which gets no ATTRIB, and one centred, rotated and on a
-   layer of its own. Placed at the definition's values and at another
-   state, scaled and rotated, with one value given. */
+   a constant one, which gets no ATTRIB, and one centred, rotated, on a
+   layer of its own and shown in the first visibility state only. Placed at
+   the definition's values and at another state, scaled and rotated, with
+   one value given. */
 static int
 test_attributes (Dwg_Data *src)
 {
@@ -1534,14 +1569,23 @@ test_attributes (Dwg_Data *src)
       free (dst);
       return 1;
     }
-  // the add API leaves the flags 0
+  // the add API leaves the flags and width factor 0
   constant->flags = 2;
+  number->width_factor = constant->width_factor = 1.0;
+  centred->width_factor = 0.8;
   centred->horiz_alignment = 1;
   centred->alignment_pt.x = 4.0;
   centred->alignment_pt.y = -6.0;
   centred->rotation = 0.1;
   centred->parent->layer
       = dwg_add_handleref (dst, 5, handle_of (dst, layer), NULL);
+  if (show_in_first_state (dst, def_h, handle_of (dst, centred)))
+    {
+      FAIL ("attributes: Trees has no visibility parameter");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
 
   loglevel = tracelevel;
   ins1 = dwg_dynblock_insert (model_space (dst), def, &at1, 2.0, 0.5, NULL, 0,
@@ -1583,6 +1627,32 @@ test_attributes (Dwg_Data *src)
                                   handle_of (dst, model_space (dst)));
   failures += check_attrib_links ("attributes at Shrub (Plan)", dst, h2,
                                   block2, handle_of (dst, model_space (dst)));
+  // At Shrub (Plan) the state hides RATING's definition, but not the
+  // ATTRIB: AutoCAD keeps its ATTRIB's invisible flag clear then, as its own
+  // evaluation of such a placement does.
+  {
+    const Dwg_Object_BLOCK_HEADER *rep = block_header (dst, block2);
+    // RATING was added last
+    const Dwg_Object *rating
+        = rep ? object (dst, ref (rep->entities[rep->num_owned - 1])) : NULL;
+    const Dwg_Entity_INSERT *_ins2 = object (dst, h2)->tio.entity->tio.INSERT;
+    const Dwg_Object *attrib
+        = _ins2->num_owned == 2 ? object (dst, ref (_ins2->attribs[1])) : NULL;
+    if (rating && rating->fixedtype == DWG_TYPE_ATTDEF
+        && rating->tio.entity->invisible && attrib
+        && !attrib->tio.entity->invisible)
+      OK ("attributes at Shrub (Plan): RATING's definition is hidden, its "
+          "ATTRIB not");
+    else
+      {
+        FAIL ("attributes at Shrub (Plan): RATING's definition %s, its "
+              "ATTRIB %s",
+              rating && rating->tio.entity->invisible ? "hidden" : "shown",
+              attrib && !attrib->tio.entity->invisible ? "shown"
+                                                        : "hidden or missing");
+        failures++;
+      }
+  }
   if (def->hasattrs && block_header (dst, block2)->hasattrs)
     OK ("attributes: the representation block has the definition's "
         "hasattrs");

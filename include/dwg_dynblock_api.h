@@ -320,7 +320,9 @@ typedef struct _dwg_attvalue
    plane, or with a tag dwg_add_ATTRIB () refuses, such as one with a
    period (DWG_ERR_NOTYETSUPPORTED); an attribute tag that names no
    attribute definition that isn't constant, is given twice, or has no
-   value (DWG_ERR_VALUEOUTOFBOUNDS).
+   value (DWG_ERR_VALUEOUTOFBOUNDS). In a LibreDWG built without write
+   support, a placement at other values than the definition's is refused
+   (DWG_ERR_NOTYETSUPPORTED).
 
    @param errorp If not NULL, receives 0 or DWG_ERR_* bits. From
                  DWG_ERR_CRITICAL up the INSERT was not made: a refusal is
