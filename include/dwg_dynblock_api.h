@@ -251,28 +251,55 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    LINE and the vertices of an LWPOLYLINE. An ARC, CIRCLE, ELLIPSE, SPLINE,
    TEXT, ATTDEF, MTEXT, INSERT (with its ATTRIBs) or HATCH moves whole,
    when its stretch points are all in the frame; a HATCH must then lie
-   wholly inside the frame, which must be a rectangle. The actions also
-   move the points of the parameters they select, so a LINEAR value is
-   the distance after other properties' actions moved its parameter, as
-   AutoCAD's Properties palette shows it; only the actions of the
-   properties given a value run. A LINEAR value is not checked against
-   the parameter's value set. Refused, with DWG_ERR_NOTYETSUPPORTED: a
-   LINEAR value that changes its parameter when the parameter drives an
-   action of another kind (such as scale), or has its base point in its
-   middle; LINEAR values whose actions move each other's parameters in a
-   cycle, as the order AutoCAD evaluates them in is not known; an action
-   moving a parameter, of any kind, that chains its actions, which AutoCAD
-   would then run too; an entity or parameter a stretch action selects
-   with none of its points in the frame, which AutoCAD moves whole; a
-   stretch of part of an entity of another type; a HATCH that crosses the
-   frame; an action moving an entity of another type, taking another
-   point's change than the end or base point's, or with an XY type; a move
-   that would take 2D points out of their plane.
+   wholly inside the frame, which must be a rectangle, and have its
+   extrusion along +Z. The actions also move the points of the parameters
+   they select, so a LINEAR value is the distance after other properties'
+   actions moved its parameter, as AutoCAD's Properties palette shows it.
+   Only the actions of the properties that run run: those given a value
+   that changes their parameter, and the linear ones given a value whose
+   parameters the stretch or move actions of such a property move. A
+   LINEAR value is not checked against the parameter's value set.
+   Refused, with DWG_ERR_NOTYETSUPPORTED: a LINEAR value that changes its
+   parameter when the parameter drives an action of another kind (such as
+   scale), or has its base point in its middle; linear properties that run
+   whose actions move each other's parameters in a cycle, as the order
+   AutoCAD evaluates them in is not known; an action moving a parameter,
+   of any kind, that chains its actions, which AutoCAD would then run too;
+   an entity a stretch action selects with none of its stretch points in
+   the frame, which AutoCAD moves whole, and a parameter it lists with
+   none of its points in the frame; a parameter an action selects but
+   doesn't list among those it moves, other than its own, that chains its
+   actions or is a rotation parameter given a value; a stretch of a TEXT
+   or ATTDEF aligned or fitted between two points, or of part of an entity
+   of another type; a HATCH that crosses the frame; an action moving an
+   entity of another type, taking another point's change than the end or
+   base point's, or with an XY type; a move that would take 2D points out
+   of their plane.
 
-   A ROTATION value is accepted at the definition's value and a FLIP value
-   at 0, and refused otherwise; a value of any other kind (XY, POLAR,
-   POINT, LOOKUP, CONSTRAINT or USER) is refused whatever it is. A
-   definition that is constraint-based (parametric) is refused.
+   A ROTATION value turns its parameter's end point about its base point,
+   and the rotate actions connected to the parameter then turn the
+   entities they select, whole, about that base point, counter-clockwise
+   by the change in angle: a LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE,
+   SPLINE, TEXT, MTEXT, POINT, INSERT (with its ATTRIBs) or a solid HATCH
+   bounded by polylines and lines. Angles the turn changes, such as an
+   ARC's or an INSERT's rotation, are kept in [0, 2 pi). A ROTATION value
+   is not checked against the parameter's value set. Refused, with
+   DWG_ERR_NOTYETSUPPORTED: a ROTATION value that changes its parameter
+   when the parameter drives an action of another kind than rotate; a
+   rotate action taking other points of its parameter than its base point
+   and angle change, with a base point independent of its parameter's, or
+   offset from it; a turn of an entity of another type, such as an
+   ATTDEF, of one whose extrusion is not along Z (either way), or of a
+   HATCH with a pattern, a gradient, or a boundary segment other than a
+   line; an entity that a rotate action turns and another action that
+   runs moves or turns too, as the order AutoCAD runs them in is not
+   known; an action that runs moving a rotation parameter given a value,
+   or a rotate action that runs turning a linear parameter that runs.
+
+   A FLIP value is accepted at 0 and refused otherwise; a value of any
+   other kind (XY, POLAR, POINT, LOOKUP, CONSTRAINT or USER) is refused
+   whatever it is. A definition that is constraint-based (parametric) is
+   refused.
 
    Returns the new block, with *errorp 0, or below DWG_ERR_CRITICAL the
    bits of the copy for data it left out (such as an array, 3DSOLID ACIS
@@ -438,7 +465,7 @@ typedef struct _dwg_dynblock_check
   BITCODE_BL num_equivalent;
   /* UTF-8: what differs first, preceded by the bits of the data the
      evaluation left out, if it left some out; or why the check is
-     unsupported or failed; NULL for a match */
+     unsupported, failed or has no values; NULL for a match */
   char *reason;
 } Dwg_DynBlock_Check;
 
@@ -464,15 +491,19 @@ typedef struct _dwg_dynblock_check_report
    Entities compare by type, by their invisible flag, layer, colour,
    linetype flags, linetype, linetype scale, lineweight, plot style flags
    and plot style, and field by field with the dynapi field lists:
-   numbers within tolerance, strings and binary data, such as a proxy
-   entity's, exactly, and references by the entity they point at, paired
-   by index within the blocks, so the same handle matches, whether or not
-   it resolves. An entry of either block's entity list that doesn't
-   resolve is a difference. An array the comparison has no length for,
-   unless empty in both, counts as a difference. An ELLIPSE also matches
-   the same curve with its major axis reversed, and is counted in
-   num_equivalent. The blocks' base points compare too: a difference there
-   is a mismatch, though not of an entity. EED is not compared.
+   floating-point numbers within tolerance, integers, strings and binary
+   data, such as a proxy entity's, exactly, and references by the entity
+   they point at, paired by index within the blocks, so the same handle
+   matches, whether or not it resolves. The angles a turn changes, an
+   ARC's, the rotation of an INSERT, TEXT or ATTRIB and a POINT's X axis
+   angle, compare around the circle, so that 0 matches 2 pi, and an ARC's
+   sweep from its start to its end angle must match too. An entry of
+   either block's entity list that doesn't resolve is a difference. An
+   array the comparison has no length for, unless empty in both, counts as
+   a difference. An ELLIPSE also matches the same curve with its major
+   axis reversed, and is counted in num_equivalent. The blocks' base
+   points compare too: a difference there is a mismatch, though not of an
+   entity. EED is not compared.
 
    An evaluation that returns bits below DWG_ERR_CRITICAL, for data its
    copy left out (such as an array, 3DSOLID ACIS data or an EED group it
