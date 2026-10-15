@@ -2880,9 +2880,6 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  // the add API doesn't count the entities it adds, as the decoder and the
-  // copy do
-  dwg->num_entities++;
   _rep->anonymous = 1;
   _rep->flag |= 1;
   // the add API sets these only for an ATTDEF it adds itself, and sets
@@ -2917,7 +2914,6 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  dwg->num_entities++;
 
   apply_moves (dwg, &plan, map);
   for (BITCODE_BL j = 0; j < list.count; j++)

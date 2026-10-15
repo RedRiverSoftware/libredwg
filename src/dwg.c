@@ -813,6 +813,23 @@ dwg_get_num_entities (const Dwg_Data *dwg)
   return dwg->num_entities;
 }
 
+/* The number of dwg's objects with the entity supertype, which
+   dwg->num_entities holds: the same test as dwg_get_entities (), so that
+   the count and the list agree. For the importers, which create entities
+   without the decoder's dwg_setup_<token> or the add API, which count
+   them. The DXF importer removes an entity that fails to read; the JSON
+   importer leaves an entity's slot in dwg->object[] on bad input, and that
+   slot counts too. */
+BITCODE_BL
+dwg_count_entities (const Dwg_Data *restrict dwg)
+{
+  BITCODE_BL num_entities = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    if (dwg->object[i].supertype == DWG_SUPERTYPE_ENTITY)
+      num_entities++;
+  return num_entities;
+}
+
 /** Returns a copy of all entities */
 EXPORT Dwg_Object_Entity **
 dwg_get_entities (const Dwg_Data *dwg)

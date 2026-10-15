@@ -114,10 +114,11 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     ../../src/logging.c
     ../../src/classes.c
     tests_common.h)
-  # this does not find test-data, because it is under Release/Debug
-  # TODO: put @abs_top_srcdir@ in test_common.h.in
   if(NOT MSVC)
     add_test(add_test ${TARGET_SYSTEM_EMULATOR} add_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds the drawings in test/test-data
+    set_tests_properties(add_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
   endif()
   add_executable(dynblocks_test
     dynblocks_test.c

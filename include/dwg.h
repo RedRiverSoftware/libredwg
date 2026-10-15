@@ -11449,7 +11449,10 @@ typedef struct _dwg_struct
   BITCODE_H *acis_sab_hdl;
   BITCODE_RLL next_hdl; // for add_document handle holes
 
-  BITCODE_BL prev_entity_index; // for speedup find_prev_entity
+  // the entity added last, which in_postprocess_handles links the next one
+  // to (r13-r2000). After an INSERT's ATTRIBs it is their SEQEND, which it
+  // links to nothing.
+  BITCODE_BL prev_entity_index;
 
   // for speedup dwg_add_handleref
   Dwg_Object_Ref **object_ordered_ref; /*! list of all ordered objects refs */
