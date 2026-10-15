@@ -12,14 +12,19 @@
 /*****************************************************************************/
 
 /* src/copy.c, the deep copy of objects with their handles remapped:
-   - every object of public r2004 and r2000 drawings copied into an empty
-     document, compared field by field with its source, then written and
-     read back and compared again;
+   - every object of public r2004, r2000 and r14 drawings, and of
+     example_r13.dwg, copied into an empty document, compared field by
+     field with its source, then written and read back and compared again;
+     example_2000.dwg also written as r2004;
    - copies within one document;
    - references to objects outside the copy, reported and then resolved;
-   - EED, also a string the decoder left unread;
+   - EED, also a string the decoder left unread: copied in a group made in
+     memory; in a group read from a file, the group is left out;
+   - EED groups the decoder read in part, left out;
+   - each of copy.c's allocations failed in turn: DWG_ERR_OUTOFMEM, and
+     both documents can be freed;
    - linetype dash texts in the linetype's strings_area;
-   - refused copies;
+   - refused copies, r2007 alpha and beta documents among them;
    - block definitions, with their dynamic-block data, copied by
      dwg_dynblock_copy_block () into a new document and into a public
      drawing: compared with their sources, written and read back. */
@@ -38,9 +43,85 @@ static int test_loglevel;
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>
 #endif
+#include <stddef.h>
+#include <stdint.h>
+#include <assert.h>
+/* copy.c's headers, here so that the allocation macros below apply to
+   copy.c's own calls only */
+#define DWG_LOGLEVEL loglevel
+#include "common.h"
+#include "bits.h"
+#include "dwg.h"
+#include "decode.h"
+#include "classes.h"
+#include "hash.h"
+#include "copy.h"
+#include "logging.h"
+#include "dwg_api.h"
+
+/* Allocation failures in copy.c, for test_out_of_memory (): while
+   alloc_counting is set, copy.c's allocations count in alloc_calls, and
+   while alloc_countdown is above 0, the one that brings it to 0 fails, and
+   sets alloc_failed. */
+static int alloc_counting;
+static long alloc_calls;
+static long alloc_countdown;
+static int alloc_failed;
+
+static int
+alloc_fails (void)
+{
+  if (!alloc_counting)
+    return 0;
+  alloc_calls++;
+  if (alloc_countdown > 0 && --alloc_countdown == 0)
+    {
+      alloc_failed = 1;
+      return 1;
+    }
+  return 0;
+}
+
+static void *
+test_malloc (const size_t size)
+{
+  return alloc_fails () ? NULL : malloc (size);
+}
+
+static void *
+test_calloc (const size_t n, const size_t size)
+{
+  return alloc_fails () ? NULL : calloc (n, size);
+}
+
+static void *
+test_realloc (void *ptr, const size_t size)
+{
+  return alloc_fails () ? NULL : realloc (ptr, size);
+}
+
+static char *
+test_strdup (const char *s)
+{
+  const size_t size = strlen (s) + 1;
+  char *copy = (char *)test_malloc (size);
+  if (copy)
+    memcpy (copy, s, size);
+  return copy;
+}
+
+#define malloc(size) test_malloc (size)
+#define calloc(n, size) test_calloc (n, size)
+#define realloc(ptr, size) test_realloc (ptr, size)
+#undef strdup
+#define strdup(s) test_strdup (s)
 /* The copy itself, for its internals and for its spec macros, which copy
    the header variables of the documents the clone test builds. */
 #include "copy.c"
+#undef malloc
+#undef calloc
+#undef realloc
+#undef strdup
 /* The block copy, for the map its copies are made through. */
 #include "dynblock_copy.c"
 #include "tests_common.h"
@@ -136,12 +217,14 @@ is_copyable (const Dwg_Object *obj)
 }
 
 /* An empty document with src's version and header, for copies of all of
-   src's objects. Its handles start at src's next one, so that a handle
-   left pointing into src stands out. */
+   src's objects, or NULL. Its handles start at src's next one, so that a
+   handle left pointing into src stands out. */
 static Dwg_Data *
 new_document_like (const Dwg_Data *src)
 {
   Dwg_Data *dwg = (Dwg_Data *)calloc (1, sizeof (Dwg_Data));
+  if (!dwg)
+    return NULL;
   dwg->opts = src->opts;
   dwg->header = src->header;
   dwg->header.section = NULL;
@@ -151,6 +234,12 @@ new_document_like (const Dwg_Data *src)
   dwg->auxheader = src->auxheader;
   dwg->header_vars.HANDSEED = dwg_add_handleref (
       dwg, 0, src->header_vars.HANDSEED->absolute_ref, NULL);
+  if (!dwg->header_vars.HANDSEED)
+    {
+      free_dwg (dwg);
+      free (dwg);
+      return NULL;
+    }
   return dwg;
 }
 
@@ -247,6 +336,12 @@ typedef struct _compare
      outside ASCII */
   int add_api_readback;
   unsigned non_ascii;
+  /* For copies: the copy's handle, which its references with a relative
+     code (6, 8, 0xA, 0xC) are relative to, and how many such references
+     the comparison met, and how many of them have another target than
+     their code gives. */
+  BITCODE_RLL holder;
+  unsigned relative, wrong_relative;
   const char *what;
   int failed;
 } Compare;
@@ -288,14 +383,51 @@ compare_handle (Compare *c, const char *name, const BITCODE_RLL a,
                   name, b, expected, a);
 }
 
+/* A copy's reference with a relative code has the target its code gives
+   from the copy's handle. */
+static void
+check_relative_ref (Compare *c, const char *name, const Dwg_Object_Ref *b)
+{
+  BITCODE_RLL expected;
+  if (!c->map || !c->holder || !b || b->handleref.code < 6
+      || b->handleref.code > 0xC)
+    return;
+  switch (b->handleref.code)
+    {
+    case 6:
+      expected = c->holder + 1;
+      break;
+    case 8:
+      expected = c->holder - 1;
+      break;
+    case 0xA:
+      expected = c->holder + b->handleref.value;
+      break;
+    case 0xC:
+      expected = c->holder - b->handleref.value;
+      break;
+    default:
+      return;
+    }
+  c->relative++;
+  if (expected == b->absolute_ref)
+    return;
+  if (c->wrong_relative++ < (unsigned)max_reported && test_loglevel >= 2)
+    printf ("  # %s: %s: code %u gives " FORMAT_HV ", the target is " FORMAT_HV
+            "\n",
+            c->what, name, (unsigned)b->handleref.code, expected,
+            b->absolute_ref);
+}
+
 static void
 compare_ref (Compare *c, const char *name, const Dwg_Object_Ref *a,
              const Dwg_Object_Ref *b)
 {
   const BITCODE_RLL ta = a ? a->absolute_ref : 0;
   const BITCODE_RLL tb = b ? b->absolute_ref : 0;
-  // code 0 handles are values, which keep their value unless they name a
-  // copied object
+  check_relative_ref (c, name, b);
+  // code 0 handles are values, which keep their value unless map has an
+  // entry for them, a copy or not
   if (a && !a->handleref.code && c->map && !dwg_copy_map_get (c->map, ta))
     {
       if (ta != tb)
@@ -651,6 +783,16 @@ compare_value (Compare *c, const char *name, const char *type, const void *a,
   else if (is_double_type (type))
     compare_doubles (c, name, (const double *)a, (const double *)b,
                      scalar_size (type) / 8);
+  else if (strEQc (type, "TIMEBLL"))
+    {
+      const BITCODE_TIMEBLL *ta = (const BITCODE_TIMEBLL *)a;
+      const BITCODE_TIMEBLL *tb = (const BITCODE_TIMEBLL *)b;
+      if (ta->days != tb->days || ta->ms != tb->ms
+          || !same_double (ta->value, tb->value, c->dd_tolerance))
+        compare_fail (c, "%s: time %u.%u, expected %u.%u", name,
+                      (unsigned)tb->days, (unsigned)tb->ms,
+                      (unsigned)ta->days, (unsigned)ta->ms);
+    }
   else if (scalar_size (type))
     {
       if (memcmp (a, b, scalar_size (type)))
@@ -755,6 +897,7 @@ static const Array_Length array_lengths[] = {
   { "BLOCKLOOKUPACTION", "lut", LENGTH_FIELD, "numelems", 0 },
   { "BLOCKLOOKUPACTION", "exprs", LENGTH_FIELD, "numelems", 0 },
   { "BLOCKPOLARSTRETCHACTION", "shorts", LENGTH_FIELD, "num_hdls", 0 },
+  { "TABLE_value", "data_date", LENGTH_FIELD, "data_size", 0 },
   /* one or the other, as the path's flag says */
   { "HATCH_Path", "segs", LENGTH_FIELD, "num_segs_or_paths", 0 },
   { "HATCH_Path", "polyline_paths", LENGTH_FIELD, "num_segs_or_paths", 0 },
@@ -1213,7 +1356,12 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
           || b->num_unknown_rest))
     compare_fail (c, "raw bits kept");
   if (!a->tio.object || !b->tio.object)
-    return;
+    {
+      if (a->tio.object || b->tio.object)
+        compare_fail (c, "%s common data", a->tio.object ? "no" : "unexpected");
+      return;
+    }
+  c->holder = b->handle.value;
   if (a->supertype == DWG_SUPERTYPE_ENTITY)
     {
       const Dwg_Object_Entity *ea = a->tio.entity, *eb = b->tio.entity;
@@ -1221,7 +1369,12 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
                       eb, NULL);
       compare_eed (c, ea->eed, ea->num_eed, eb->eed, eb->num_eed);
       if (!ea->tio.UNUSED || !eb->tio.UNUSED)
-        return;
+        {
+          if (ea->tio.UNUSED || eb->tio.UNUSED)
+            compare_fail (c, "%s %s struct", ea->tio.UNUSED ? "no" : "unexpected",
+                          a->name);
+          return;
+        }
       fields = dwg_dynapi_entity_fields (a->name);
       if (fields)
         compare_fields (c, "", a->name, fields, ea->tio.UNUSED,
@@ -1236,7 +1389,12 @@ compare_object (Compare *c, const Dwg_Data *adwg, const Dwg_Object *a,
                       ob, NULL);
       compare_eed (c, oa->eed, oa->num_eed, ob->eed, ob->num_eed);
       if (!oa->tio.APPID || !ob->tio.APPID)
-        return;
+        {
+          if (oa->tio.APPID || ob->tio.APPID)
+            compare_fail (c, "%s %s struct", oa->tio.APPID ? "no" : "unexpected",
+                          a->name);
+          return;
+        }
       fields = dwg_dynapi_entity_fields (a->name);
       if (fields)
         compare_fields (c, "", a->name, fields, oa->tio.APPID,
@@ -1303,82 +1461,26 @@ field_of (const Dwg_Object *obj, const void *slot)
 }
 
 /* Objects LibreDWG reads wrongly from the test drawings, so that their
-   copies, encoded from the fields read, don't read back the same. The
-   reader fails on the nodes of the ASSOC2DCONSTRAINTGROUP in
-   2004/Constraints.dwg and 2000/Constraints.dwg (a node with 1866687297
-   connections); a rewrite of the drawing keeps its raw bits instead. */
+   copies, encoded from the fields read, don't read back the same: an
+   ASSOC2DCONSTRAINTGROUP whose nodes the reader couldn't read, as in
+   2004/Constraints.dwg, 2000/Constraints.dwg and r14/Constraints.dwg (a
+   node with 1866687297 connections) and two of 2004/Dynblocks.dwg's. A
+   rewrite of the drawing keeps its raw bits instead. */
 static int
-misread_class (const Dwg_Object *obj)
+misread_object (const Dwg_Object *obj)
 {
-  return obj->fixedtype == DWG_TYPE_ASSOC2DCONSTRAINTGROUP;
-}
-
-/* Every reference with a relative code (6, 8, 0xA, 0xC) in the fields of
-   the objects from first_index on has the target its code gives from its
-   holder's handle. Returns how many there are. */
-static unsigned
-check_relative (Dwg_Data *dwg, const BITCODE_BL first_index,
-                unsigned *wrong)
-{
-  unsigned relative = 0;
-  *wrong = 0;
-  for (BITCODE_BL i = first_index; i < dwg->num_objects; i++)
-    {
-      const Dwg_Object *obj = &dwg->object[i];
-      const Dwg_DYNAPI_field *lists[2];
-      const void *bases[2];
-      if (!obj->tio.object)
-        continue;
-      if (obj->supertype == DWG_SUPERTYPE_ENTITY)
-        {
-          lists[0] = dwg_dynapi_common_entity_fields ();
-          bases[0] = obj->tio.entity;
-          bases[1] = obj->tio.entity->tio.UNUSED;
-        }
-      else
-        {
-          lists[0] = dwg_dynapi_common_object_fields ();
-          bases[0] = obj->tio.object;
-          bases[1] = obj->tio.object->tio.APPID;
-        }
-      lists[1] = dwg_dynapi_entity_fields (obj->name);
-      for (int l = 0; l < 2; l++)
-        {
-          if (!lists[l] || !bases[l])
-            continue;
-          for (const Dwg_DYNAPI_field *f = lists[l]; f->name; f++)
-            {
-              const Dwg_Object_Ref *ref;
-              BITCODE_RLL expected;
-              if (strNE (f->type, "H"))
-                continue;
-              ref = *(const BITCODE_H *)((const char *)bases[l] + f->offset);
-              if (!ref || ref->handleref.code < 6 || ref->handleref.code > 0xC)
-                continue;
-              relative++;
-              switch (ref->handleref.code)
-                {
-                case 6:
-                  expected = obj->handle.value + 1;
-                  break;
-                case 8:
-                  expected = obj->handle.value - 1;
-                  break;
-                case 0xA:
-                  expected = obj->handle.value + ref->handleref.value;
-                  break;
-                case 0xC:
-                  expected = obj->handle.value - ref->handleref.value;
-                  break;
-                default:
-                  continue;
-                }
-              if (expected != ref->absolute_ref)
-                (*wrong)++;
-            }
-        }
-    }
-  return relative;
+  const Dwg_Object_ASSOC2DCONSTRAINTGROUP *group;
+  if (obj->fixedtype != DWG_TYPE_ASSOC2DCONSTRAINTGROUP || !obj->tio.object)
+    return 0;
+  group = obj->tio.object->tio.ASSOC2DCONSTRAINTGROUP;
+  if (!group)
+    return 0;
+  if (group->num_nodes && !group->nodes)
+    return 1;
+  for (BITCODE_BL i = 0; i < group->num_nodes; i++)
+    if (group->nodes[i].num_connections && !group->nodes[i].connections)
+      return 1;
+  return 0;
 }
 
 /* Copies every object of the drawing into an empty document, compares the
@@ -1397,7 +1499,7 @@ test_clone (const char *name, Dwg_Version_Type version)
   Dwg_Copy_Unresolved *unresolved = NULL;
   BITCODE_BL num_unresolved = 0, num_handles = 0, header_unresolved;
   BITCODE_RLL *handles, first;
-  unsigned skipped = 0, to_skipped = 0, dangling = 0, relative, wrong;
+  unsigned skipped = 0, to_skipped = 0, dangling = 0;
   BITCODE_BL num_entities = 0;
   Compare c;
   int error;
@@ -1420,8 +1522,15 @@ test_clone (const char *name, Dwg_Version_Type version)
             dwg_version_type (version));
   first = src.header_vars.HANDSEED->absolute_ref;
   dst = new_document_like (&src);
-
   handles = (BITCODE_RLL *)calloc (src.num_objects, sizeof (BITCODE_RLL));
+  map = dwg_copy_map_new ();
+  if (!dst || !handles || !map)
+    {
+      FAIL ("%s: out of memory", what);
+      free_dwg (&src);
+      goto cleanup;
+    }
+
   for (BITCODE_BL i = 0; i < src.num_objects; i++)
     {
       const Dwg_Object *obj = &src.object[i];
@@ -1434,7 +1543,6 @@ test_clone (const char *name, Dwg_Version_Type version)
       else
         skipped++;
     }
-  map = dwg_copy_map_new ();
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &src, handles, num_handles, map, &unresolved,
                             &num_unresolved);
@@ -1516,11 +1624,11 @@ test_clone (const char *name, Dwg_Version_Type version)
     FAIL ("%s: %d field differences between copies and sources", what,
           c.failed);
   check_refs (what, dst, first);
-  relative = check_relative (dst, 0, &wrong);
-  if (!wrong)
-    OK ("%s: %u relative references recomputed", what, relative);
+  if (!c.wrong_relative)
+    OK ("%s: %u relative references recomputed", what, c.relative);
   else
-    FAIL ("%s: %u of %u relative references wrong", what, wrong, relative);
+    FAIL ("%s: %u of %u relative references wrong", what, c.wrong_relative,
+          c.relative);
 
   // no copy may need the source from here on
   free_dwg (&src);
@@ -1566,7 +1674,7 @@ test_clone (const char *name, Dwg_Version_Type version)
           const Dwg_Object *b
               = dwg_resolve_handle (&readback, a->handle.value);
           char obj_what[64];
-          if (misread_class (a))
+          if (misread_object (a))
             {
               misread++;
               continue;
@@ -1648,7 +1756,7 @@ test_same_document (const char *name)
   Dwg_Copy_Unresolved *unresolved = NULL;
   BITCODE_BL num_unresolved = 0, num_handles, num_objects, num_entities;
   BITCODE_RLL *handles;
-  unsigned relative, wrong, owners = 0;
+  unsigned owners = 0;
   Compare c;
   int error;
 
@@ -1709,11 +1817,11 @@ test_same_document (const char *name)
   else
     FAIL ("%s: %d field differences between copies and sources", what,
           c.failed);
-  relative = check_relative (&dwg, num_objects, &wrong);
-  if (!wrong)
-    OK ("%s: %u relative references recomputed", what, relative);
+  if (!c.wrong_relative)
+    OK ("%s: %u relative references recomputed", what, c.relative);
   else
-    FAIL ("%s: %u of %u relative references wrong", what, wrong, relative);
+    FAIL ("%s: %u of %u relative references wrong", what, c.wrong_relative,
+          c.relative);
 
   snprintf (file, sizeof (file), "copy_within_%s",
             strrchr (name, '/') ? strrchr (name, '/') + 1 : name);
@@ -1764,7 +1872,8 @@ test_same_document (const char *name)
 
 /* The destination handle of the record in dst that matches source object
    target by type and name, as the caller of a copy might find it: a layer
-   dst lacks is added. */
+   dst lacks is added. Model and paper space match dst's, and other blocks
+   dst's block of the same name. */
 static BITCODE_RLL
 match_by_name (Dwg_Data *dst, Dwg_Data *src, const BITCODE_RLL target)
 {
@@ -1776,8 +1885,17 @@ match_by_name (Dwg_Data *dst, Dwg_Data *src, const BITCODE_RLL target)
   if (!obj)
     return 0;
   if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
-    return dwg_model_space_object (dst)->handle.value;
-  if (obj->fixedtype == DWG_TYPE_LAYER)
+    {
+      const Dwg_Object *space = NULL;
+      if (obj == dwg_model_space_object (src))
+        space = dwg_model_space_object (dst);
+      else if (obj == dwg_paper_space_object (src))
+        space = dwg_paper_space_object (dst);
+      if (space)
+        return space->handle.value;
+      table = "BLOCK";
+    }
+  else if (obj->fixedtype == DWG_TYPE_LAYER)
     table = "LAYER";
   else if (obj->fixedtype == DWG_TYPE_LTYPE)
     table = "LTYPE";
@@ -1811,8 +1929,9 @@ test_unresolved (void)
   Dwg_Copy_Map *map;
   Dwg_Copy_Unresolved *unresolved = NULL;
   BITCODE_BL num_unresolved = 0;
-  BITCODE_RLL handle, layer;
-  const char *layer_name;
+  BITCODE_RLL handle, layer = 0;
+  BITCODE_H layer_ref;
+  const char *layer_name = NULL;
   unsigned unmatched = 0;
   int layer_reported = 0, error;
 
@@ -1827,28 +1946,42 @@ test_unresolved (void)
     if (src.object[i].fixedtype == DWG_TYPE_LINE
         && src.object[i].tio.entity->entmode == 2)
       line = &src.object[i];
+  if (line && line->tio.entity->layer)
+    layer = line->tio.entity->layer->absolute_ref;
+  if (layer)
+    layer_name = dwg_obj_table_get_name (dwg_resolve_handle (&src, layer),
+                                         &error);
   dst = dwg_new_Document (R_2004, 0, tracelevel);
-  handle = line->handle.value;
-  layer = line->tio.entity->layer->absolute_ref;
-  layer_name = dwg_obj_table_get_name (dwg_resolve_handle (&src, layer),
-                                       &error);
   map = dwg_copy_map_new ();
+  if (!layer_name || !dst || !map)
+    {
+      FAIL ("%s: no model space LINE with a named layer in example_2004.dwg, "
+            "or no new document",
+            what);
+      goto cleanup;
+    }
+  handle = line->handle.value;
   loglevel = tracelevel;
   error = dwg_copy_objects (dst, &src, &handle, 1, map, &unresolved,
                             &num_unresolved);
   copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
-  for (BITCODE_BL i = 0; i < num_unresolved; i++)
+  for (BITCODE_BL i = 0; copy && i < num_unresolved; i++)
     if (unresolved[i].target == layer
         && unresolved[i].kind == DWG_COPY_SLOT_REF
         && unresolved[i].holder == copy->handle.value)
       layer_reported = 1;
-  if (error < DWG_ERR_CRITICAL && copy && layer_reported
-      && copy->tio.entity->layer && !copy->tio.entity->layer->absolute_ref)
+  if (!error && copy && layer_reported && copy->tio.entity->layer
+      && !copy->tio.entity->layer->absolute_ref)
     OK ("%s: %u reported, the layer among them, NULL in the copy", what,
         (unsigned)num_unresolved);
   else
-    FAIL ("%s: error 0x%x, %u reported, layer reported %d", what,
-          (unsigned)error, (unsigned)num_unresolved, layer_reported);
+    {
+      FAIL ("%s: error 0x%x, %s, %u reported, layer reported %d", what,
+            (unsigned)error, copy ? "copied" : "no copy",
+            (unsigned)num_unresolved, layer_reported);
+      if (!copy)
+        goto cleanup;
+    }
 
   // what a caller can't match by name, it would copy, or leave NULL
   for (BITCODE_BL i = 0; i < num_unresolved; i++)
@@ -1869,31 +2002,54 @@ test_unresolved (void)
       printf ("  # left unresolved: %s " FORMAT_HV "\n",
               target ? target->name : "?", unresolved[i].target);
     }
-  if (!error && num_unresolved == unmatched
-      && copy->tio.entity->layer->absolute_ref
-             == dwg_find_tablehandle (dst, layer_name, "LAYER")->absolute_ref)
+  layer_ref = dwg_find_tablehandle (dst, layer_name, "LAYER");
+  if (!error && num_unresolved == unmatched && layer_ref
+      && copy->tio.entity->layer
+      && copy->tio.entity->layer->absolute_ref == layer_ref->absolute_ref)
     OK ("%s: those matched by name resolved, the layer to the new "
         "document's layer %s; %u left",
         what, layer_name, (unsigned)num_unresolved);
   else
-    FAIL ("%s: error 0x%x, %u left unresolved, %u unmatched", what,
-          (unsigned)error, (unsigned)num_unresolved, unmatched);
+    FAIL ("%s: error 0x%x, %u left unresolved, %u unmatched, layer %s in "
+          "the new document",
+          what, (unsigned)error, (unsigned)num_unresolved, unmatched,
+          layer_ref ? "found" : "not found");
 
+cleanup:
   free_dwg (&src);
-  free_dwg (dst);
-  free (dst);
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
   dwg_copy_map_free (map);
   free (unresolved);
   return numfailed ();
 }
 
-/* A new EED item of the given code, with room for a string of len. */
+/* A new EED item of the given code, with room for a string of len, or
+   NULL. */
 static Dwg_Eed_Data *
 new_eed_data (const BITCODE_RC code, const size_t len)
 {
   Dwg_Eed_Data *data
       = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data) + len + 1);
-  data->code = code;
+  if (data)
+    data->code = code;
+  return data;
+}
+
+/* A new EED string item. */
+static Dwg_Eed_Data *
+new_eed_string (const char *text, const BITCODE_RS codepage)
+{
+  Dwg_Eed_Data *data = new_eed_data (0, strlen (text));
+  if (data)
+    {
+      data->u.eed_0.length = (BITCODE_RS)strlen (text);
+      data->u.eed_0.codepage = codepage;
+      memcpy (data->u.eed_0.string, text, strlen (text) + 1);
+    }
   return data;
 }
 
@@ -1911,18 +2067,13 @@ test_eed (void)
   Dwg_Data *src = dwg_new_Document (R_2004, 0, tracelevel);
   Dwg_Data *dst = dwg_new_Document (R_2004, 0, tracelevel);
   Dwg_Data readback;
-  Dwg_Object_BLOCK_HEADER *mspace
-      = dwg_model_space_object (src)->tio.object->tio.BLOCK_HEADER;
-  Dwg_Object_APPID *appid = dwg_add_APPID (src, "COPY_TEST");
-  Dwg_Entity_LINE *line1 = dwg_add_LINE (mspace, &p0, &p1);
-  Dwg_Entity_LINE *line2 = dwg_add_LINE (mspace, &p0, &p2);
-  const Dwg_Object *o1 = &src->object[line1->parent->objid];
-  const Dwg_Object *o2 = &src->object[line2->parent->objid];
-  const BITCODE_RLL appid_handle
-      = src->object[appid->parent->objid].handle.value;
-  const BITCODE_RLL layer0
-      = dwg_find_tablehandle (src, "0", "LAYER")->absolute_ref;
-  Dwg_Object_Entity *ent = o1->tio.entity;
+  const Dwg_Object *mspace = src ? dwg_model_space_object (src) : NULL;
+  Dwg_Object_APPID *appid = src ? dwg_add_APPID (src, "COPY_TEST") : NULL;
+  Dwg_Entity_LINE *line1 = NULL, *line2 = NULL;
+  const Dwg_Object *o1, *o2;
+  BITCODE_RLL appid_handle, layer0;
+  BITCODE_H ref, dst_appid, dst_layer0;
+  Dwg_Object_Entity *ent;
   BITCODE_RLL handles[2];
   const Dwg_Object *copy1, *copy2;
   const Dwg_Eed *eed;
@@ -1933,9 +2084,34 @@ test_eed (void)
   int error;
 
   failed = 0;
+  memset (&readback, 0, sizeof (readback));
+  if (mspace)
+    {
+      line1 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p1);
+      line2 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p2);
+    }
+  ref = src ? dwg_find_tablehandle (src, "0", "LAYER") : NULL;
+  if (!dst || !appid || !line1 || !line2 || !ref || !map)
+    {
+      FAIL ("%s: no source with an APPID, two LINEs and layer 0, or no "
+            "destination",
+            what);
+      goto cleanup;
+    }
+  o1 = &src->object[line1->parent->objid];
+  o2 = &src->object[line2->parent->objid];
+  appid_handle = src->object[appid->parent->objid].handle.value;
+  layer0 = ref->absolute_ref;
+  ent = o1->tio.entity;
+
   // one group: a string, the other line, layer 0 and a real
-  ent->num_eed = 4;
   ent->eed = (Dwg_Eed *)calloc (4, sizeof (Dwg_Eed));
+  if (!ent->eed)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
+  ent->num_eed = 4;
   ent->eed[0].size = 1; // starts the group; the encoder sizes it
   for (int i = 0; i < 4; i++)
     {
@@ -1943,15 +2119,18 @@ test_eed (void)
       ent->eed[i].handle.value = appid_handle;
       dwg_set_handle_size (&ent->eed[i].handle);
     }
-  ent->eed[0].data = new_eed_data (0, strlen (text));
-  ent->eed[0].data->u.eed_0.length = (BITCODE_RS)strlen (text);
-  ent->eed[0].data->u.eed_0.codepage = src->header.codepage;
-  memcpy (ent->eed[0].data->u.eed_0.string, text, strlen (text) + 1);
+  ent->eed[0].data = new_eed_string (text, src->header.codepage);
   ent->eed[1].data = new_eed_data (5, 0);
-  ent->eed[1].data->u.eed_5.entity = o2->handle.value;
   ent->eed[2].data = new_eed_data (3, 0);
-  ent->eed[2].data->u.eed_3.layer = layer0;
   ent->eed[3].data = new_eed_data (40, 0);
+  if (!ent->eed[0].data || !ent->eed[1].data || !ent->eed[2].data
+      || !ent->eed[3].data)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
+  ent->eed[1].data->u.eed_5.entity = o2->handle.value;
+  ent->eed[2].data->u.eed_3.layer = layer0;
   ent->eed[3].data->u.eed_40.real = 1.5;
 
   handles[0] = o1->handle.value;
@@ -1967,11 +2146,17 @@ test_eed (void)
         || (unresolved[i].kind == DWG_COPY_SLOT_HANDLE
             && unresolved[i].target == layer0))
       eed_reported++;
-  eed = copy1 ? copy1->tio.entity->eed : NULL;
-  if (error < DWG_ERR_CRITICAL && copy1 && copy2 && eed
-      && copy1->tio.entity->num_eed == 4 && eed != ent->eed
-      && eed[0].data != ent->eed[0].data && !eed[0].raw
-      && !strcmp (eed[0].data->u.eed_0.string, text)
+  eed = copy1 && copy1->tio.entity->num_eed == 4 ? copy1->tio.entity->eed
+                                                 : NULL;
+  if (!copy2 || !eed)
+    {
+      FAIL ("%s: error 0x%x, %s, %u EED items copied", what, (unsigned)error,
+            copy1 && copy2 ? "copied" : "not copied",
+            copy1 ? (unsigned)copy1->tio.entity->num_eed : 0);
+      goto cleanup;
+    }
+  if (!error && eed != ent->eed && eed[0].data != ent->eed[0].data
+      && !eed[0].raw && !strcmp (eed[0].data->u.eed_0.string, text)
       && eed[1].data->u.eed_5.entity == copy2->handle.value
       && !eed[0].handle.value && !eed[2].data->u.eed_3.layer
       && eed[3].data->u.eed_40.real == 1.5 && eed_reported == 5)
@@ -1988,22 +2173,21 @@ test_eed (void)
         dwg_copy_map_set (map, unresolved[i].target, mapped);
     }
   error = dwg_copy_resolve (dst, map, unresolved, &num_unresolved);
-  copy1 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[0]));
-  eed = copy1->tio.entity->eed;
-  if (!error && !num_unresolved
+  dst_appid = dwg_find_tablehandle (dst, "COPY_TEST", "APPID");
+  dst_layer0 = dwg_find_tablehandle (dst, "0", "LAYER");
+  if (!error && !num_unresolved && dst_appid && dst_layer0
       && eed[0].handle.value == eed[3].handle.value
-      && eed[0].handle.value
-             == dwg_find_tablehandle (dst, "COPY_TEST", "APPID")->absolute_ref
-      && eed[2].data->u.eed_3.layer
-             == dwg_find_tablehandle (dst, "0", "LAYER")->absolute_ref)
+      && eed[0].handle.value == dst_appid->absolute_ref
+      && eed[2].data->u.eed_3.layer == dst_layer0->absolute_ref)
     OK ("%s: APPID and layer resolved to the new document's", what);
   else
     FAIL ("%s: error 0x%x, %u left unresolved", what, (unsigned)error,
           (unsigned)num_unresolved);
 
+  // the copy can't need the source from here on
   free_dwg (src);
   free (src);
-  memset (&readback, 0, sizeof (readback));
+  src = NULL;
   error = write_dwg (file, dst);
   if (error < DWG_ERR_CRITICAL)
     error = read_dwg (file, &readback);
@@ -2012,7 +2196,8 @@ test_eed (void)
   else
     {
       Compare c;
-      const Dwg_Object *read1 = dwg_resolve_handle (&readback, copy1->handle.value);
+      const Dwg_Object *read1
+          = dwg_resolve_handle (&readback, copy1->handle.value);
       memset (&c, 0, sizeof (c));
       c.what = "read back EED";
       if (read1)
@@ -2024,11 +2209,21 @@ test_eed (void)
         FAIL ("%s: %s, %d differences", what, read1 ? "read" : "not read",
               c.failed);
     }
-  free_dwg (&readback);
   if (!numfailed ())
     unlink (file);
-  free_dwg (dst);
-  free (dst);
+
+cleanup:
+  free_dwg (&readback);
+  if (src)
+    {
+      free_dwg (src);
+      free (src);
+    }
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
   dwg_copy_map_free (map);
   free (unresolved);
   return numfailed ();
@@ -2064,9 +2259,70 @@ set_byte_at_bit (unsigned char *data, const size_t bit,
                                    | (value << (8 - shift)));
 }
 
+/* The bytes of the file at path, or NULL. */
+static unsigned char *
+read_file_bytes (const char *path, size_t *sizep)
+{
+  unsigned char *data = NULL;
+  long end;
+  FILE *fp = fopen (path, "rb");
+  *sizep = 0;
+  if (!fp)
+    return NULL;
+  end = fseek (fp, 0, SEEK_END) ? -1 : ftell (fp);
+  if (end > 0 && !fseek (fp, 0, SEEK_SET))
+    data = (unsigned char *)malloc ((size_t)end);
+  if (data && fread (data, 1, (size_t)end, fp) != (size_t)end)
+    {
+      free (data);
+      data = NULL;
+    }
+  fclose (fp);
+  if (data)
+    *sizep = (size_t)end;
+  return data;
+}
+
+/* Sets the byte at offset of the first run of bytes in data that matches
+   pattern, starting at any bit: an object's EED can, as a bit chain reads
+   it. Returns 0 when there is none. */
+static int
+patch_at_bit (unsigned char *data, const size_t size,
+              const unsigned char *pattern, const size_t len,
+              const size_t offset, const unsigned char value)
+{
+  for (size_t bit = 0; bit / 8 + len < size; bit++)
+    {
+      size_t k = 0;
+      while (k < len && byte_at_bit (data, bit + k * 8) == pattern[k])
+        k++;
+      if (k == len)
+        {
+          set_byte_at_bit (data, bit + offset * 8, value);
+          return 1;
+        }
+    }
+  return 0;
+}
+
+static int
+write_file_bytes (const char *file, const unsigned char *data,
+                  const size_t size)
+{
+  int written;
+  FILE *fp = fopen (file, "wb");
+  if (!fp)
+    return 0;
+  written = fwrite (data, 1, size, fp) == size;
+  written &= !fclose (fp);
+  return written;
+}
+
 /* Writes example_2000.dwg to file with the length of its first "DesignCenter
-   Data" EED string set to 255, more than its group holds. Returns 0 when
-   the drawing or the string isn't found. */
+   Data" EED string set to 255, more than its group holds. The object's CRC
+   is left as it was, so reading the file reports DWG_ERR_WRONGCRC, which
+   isn't critical. Returns 0 when the drawing or the string isn't found, or
+   a file can't be read or written. */
 static int
 write_unread_eed_drawing (const char *file)
 {
@@ -2075,52 +2331,15 @@ write_unread_eed_drawing (const char *file)
                                  'g',  'n',  'C',  'e',  'n', 't', 'e', 'r',
                                  ' ',  'D',  'a',  't',  'a' };
   char path[256];
-  unsigned char *data = NULL;
-  size_t size = 0, bit;
-  long end;
-  FILE *fp;
-  int found = 0, written = 0;
+  unsigned char *data;
+  size_t size;
+  int written = 0;
 
   if (!test_file ("example_2000.dwg", path, sizeof (path)))
     return 0;
-  fp = fopen (path, "rb");
-  if (!fp)
-    return 0;
-  end = fseek (fp, 0, SEEK_END) ? -1 : ftell (fp);
-  if (end > (long)sizeof (item) && !fseek (fp, 0, SEEK_SET))
-    {
-      size = (size_t)end;
-      data = (unsigned char *)malloc (size);
-    }
-  if (!data || fread (data, 1, size, fp) != size)
-    {
-      fclose (fp);
-      free (data);
-      return 0;
-    }
-  fclose (fp);
-  // an object's EED can start at any bit of the file
-  for (bit = 0; bit / 8 + sizeof (item) < size; bit++)
-    {
-      size_t k = 0;
-      while (k < sizeof (item) && byte_at_bit (data, bit + k * 8) == item[k])
-        k++;
-      if (k == sizeof (item))
-        {
-          found = 1;
-          break;
-        }
-    }
-  if (found)
-    {
-      set_byte_at_bit (data, bit + 8, 0xFF);
-      fp = fopen (file, "wb");
-      if (fp)
-        {
-          written = fwrite (data, 1, size, fp) == size;
-          written &= !fclose (fp);
-        }
-    }
+  data = read_file_bytes (path, &size);
+  if (data && patch_at_bit (data, size, item, sizeof (item), 1, 0xFF))
+    written = write_file_bytes (file, data, size);
   free (data);
   return written;
 }
@@ -2142,6 +2361,17 @@ object_eed (const Dwg_Object *obj, BITCODE_BL *num_eedp)
   return NULL;
 }
 
+/* The number of items of the EED group that starts at eed[first]. */
+static BITCODE_BL
+eed_group_items (const Dwg_Eed *eed, const BITCODE_BL num_eed,
+                 const BITCODE_BL first)
+{
+  BITCODE_BL i = first + 1;
+  while (i < num_eed && !eed[i].size)
+    i++;
+  return i - first;
+}
+
 /* The index of the EED string in obj that write_unread_eed_drawing ()
    changed, as the decoder left it: unread, with zero bytes and the length
    255. -1 if obj has none. */
@@ -2160,13 +2390,31 @@ unread_eed_string (const Dwg_Object *obj)
   return -1;
 }
 
-/* An EED string that claims more bytes than its group holds. For r13 to
-   r2004 the decoder keeps it unread: the item has the claimed length,
-   zero bytes, and only the room its group's size gives it. The encoder
-   writes a string that starts with NUL as the empty string, and the copy
-   copies it as that, reading only the item's first string byte. First an
-   item built as the decoder leaves it, then the one the decoder leaves in
-   example_2000.dwg with one length byte changed. */
+/* Points unresolved's targets that dst has a record of the same name for
+   at those records. */
+static void
+resolve_by_name (Dwg_Data *dst, Dwg_Data *src, Dwg_Copy_Map *map,
+                 Dwg_Copy_Unresolved *unresolved, BITCODE_BL *num_unresolvedp)
+{
+  for (BITCODE_BL i = 0; i < *num_unresolvedp; i++)
+    {
+      const BITCODE_RLL mapped
+          = match_by_name (dst, src, unresolved[i].target);
+      if (mapped)
+        dwg_copy_map_set (map, unresolved[i].target, mapped);
+    }
+  dwg_copy_resolve (dst, map, unresolved, num_unresolvedp);
+}
+
+/* An EED string that claims more bytes than are left in its group. For
+   r13 to r2004 the decoder leaves it unread: the item has the claimed
+   length, zero bytes, and only the room the rest of its group gives it.
+   First such an item in a group without raw bytes, as an application could
+   build one: the encoder writes a string that starts with NUL as the empty
+   string, and the copy copies it as that, reading only the item's first
+   string byte. Then the one the decoder leaves in example_2000.dwg with
+   one length byte changed: its group's raw bytes hold the string that the
+   item doesn't, so the copy leaves the group out. */
 static int
 test_eed_unread_string (void)
 {
@@ -2178,29 +2426,47 @@ test_eed_unread_string (void)
   Dwg_Data *src = dwg_new_Document (R_2000, 0, tracelevel);
   Dwg_Data *dst = dwg_new_Document (R_2000, 0, tracelevel);
   Dwg_Data readback, drawn;
-  Dwg_Object_BLOCK_HEADER *mspace
-      = dwg_model_space_object (src)->tio.object->tio.BLOCK_HEADER;
-  Dwg_Object_APPID *appid = dwg_add_APPID (src, "COPY_TEST");
-  Dwg_Entity_LINE *line = dwg_add_LINE (mspace, &p0, &p1);
-  const Dwg_Object *obj = &src->object[line->parent->objid];
-  const Dwg_Object *copy;
+  const Dwg_Object *mspace = src ? dwg_model_space_object (src) : NULL;
+  Dwg_Object_APPID *appid = src ? dwg_add_APPID (src, "COPY_TEST") : NULL;
+  Dwg_Entity_LINE *line = NULL;
+  const Dwg_Object *obj, *copy;
   const Dwg_Eed_Data *data;
-  Dwg_Object_Entity *ent = obj->tio.entity;
-  BITCODE_RLL handle = obj->handle.value;
+  Dwg_Object_Entity *ent;
+  BITCODE_RLL handle;
   Dwg_Copy_Map *map = dwg_copy_map_new ();
   Dwg_Copy_Unresolved *unresolved = NULL;
-  BITCODE_BL num_unresolved = 0;
+  BITCODE_BL num_unresolved = 0, num_eed, num_copied = 0, group_items;
+  const Dwg_Eed *eed;
   int error, index = -1;
 
   failed = 0;
-  ent->num_eed = 1;
+  memset (&readback, 0, sizeof (readback));
+  memset (&drawn, 0, sizeof (drawn));
+  if (mspace)
+    line = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p1);
+  if (!dst || !appid || !line || !map)
+    {
+      FAIL ("%s: no source with an APPID and a LINE, or no destination",
+            what);
+      goto cleanup;
+    }
+  obj = &src->object[line->parent->objid];
+  ent = obj->tio.entity;
+  handle = obj->handle.value;
   ent->eed = (Dwg_Eed *)calloc (1, sizeof (Dwg_Eed));
+  // allocated as the decoder allocates an item of its group
+  if (ent->eed)
+    ent->eed[0].data = (Dwg_Eed_Data *)calloc (group_size + 8, 1);
+  if (!ent->eed || !ent->eed[0].data)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
+  ent->num_eed = 1;
   ent->eed[0].size = group_size;
   ent->eed[0].handle.code = 5;
   ent->eed[0].handle.value = src->object[appid->parent->objid].handle.value;
   dwg_set_handle_size (&ent->eed[0].handle);
-  // allocated as the decoder allocates an item of its group
-  ent->eed[0].data = (Dwg_Eed_Data *)calloc (group_size + 8, 1);
   ent->eed[0].data->code = 0;
   ent->eed[0].data->u.eed_0.length = 255;
   ent->eed[0].data->u.eed_0.codepage = src->header.codepage;
@@ -2221,41 +2487,41 @@ test_eed_unread_string (void)
     FAIL ("%s: error 0x%x, copied with length %d", what, (unsigned)error,
           data ? (int)data->u.eed_0.length : -1);
 
-  dwg_add_APPID (dst, "COPY_TEST");
-  for (BITCODE_BL i = 0; i < num_unresolved; i++)
+  // what the encoder writes of the copy: the empty string
+  if (copy)
     {
-      const BITCODE_RLL mapped
-          = match_by_name (dst, src, unresolved[i].target);
-      if (mapped)
-        dwg_copy_map_set (map, unresolved[i].target, mapped);
-    }
-  dwg_copy_resolve (dst, map, unresolved, &num_unresolved);
-  memset (&readback, 0, sizeof (readback));
-  error = write_dwg (file, dst);
-  if (error < DWG_ERR_CRITICAL)
-    error = read_dwg (file, &readback);
-  if (error >= DWG_ERR_CRITICAL || !copy)
-    FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
-  else
-    {
-      const Dwg_Object *read
-          = dwg_resolve_handle (&readback, copy->handle.value);
-      data = read && read->tio.entity->num_eed == 1
-                 ? read->tio.entity->eed[0].data
-                 : NULL;
-      if (data && data->code == 0 && data->u.eed_0.length == 0
-          && !data->u.eed_0.string[0])
-        OK ("%s: read back as the empty string", what);
+      dwg_add_APPID (dst, "COPY_TEST");
+      resolve_by_name (dst, src, map, unresolved, &num_unresolved);
+      error = write_dwg (file, dst);
+      if (error < DWG_ERR_CRITICAL)
+        error = read_dwg (file, &readback);
+      if (error >= DWG_ERR_CRITICAL)
+        FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
       else
-        FAIL ("%s: %s, length %d", what, read ? "read" : "not read",
-              data ? (int)data->u.eed_0.length : -1);
+        {
+          const Dwg_Object *read
+              = dwg_resolve_handle (&readback, copy->handle.value);
+          data = read && read->tio.entity->num_eed == 1
+                     ? read->tio.entity->eed[0].data
+                     : NULL;
+          if (data && data->code == 0 && data->u.eed_0.length == 0
+              && !data->u.eed_0.string[0])
+            OK ("%s: read back as the empty string", what);
+          else
+            FAIL ("%s: %s, length %d", what, read ? "read" : "not read",
+                  data ? (int)data->u.eed_0.length : -1);
+        }
     }
   free_dwg (&readback);
+  memset (&readback, 0, sizeof (readback));
   free_dwg (src);
   free (src);
+  src = NULL;
   free_dwg (dst);
   free (dst);
+  dst = NULL;
   dwg_copy_map_free (map);
+  map = NULL;
   free (unresolved);
   unresolved = NULL;
   num_unresolved = 0;
@@ -2266,9 +2532,7 @@ test_eed_unread_string (void)
       FAIL ("%s: no drawing made from example_2000.dwg's \"DesignCenter "
             "Data\" string",
             what);
-      unlink (drawing);
-      unlink (file);
-      return numfailed ();
+      goto cleanup;
     }
   obj = NULL;
   for (BITCODE_BL i = 0; i < drawn.num_objects && index < 0; i++)
@@ -2276,39 +2540,54 @@ test_eed_unread_string (void)
       obj = &drawn.object[i];
       index = unread_eed_string (obj);
     }
+  eed = index >= 0 ? object_eed (obj, &num_eed) : NULL;
+  if (!eed || !eed[index].size)
+    {
+      FAIL ("%s: no group starting with an unread EED string in the changed "
+            "drawing",
+            what);
+      goto cleanup;
+    }
   dst = new_document_like (&drawn);
   map = dwg_copy_map_new ();
-  copy = NULL;
-  data = NULL;
-  if (index >= 0)
+  if (!dst || !map)
     {
-      BITCODE_BL num_eed, num_copied;
-      const Dwg_Eed *copied;
-      handle = obj->handle.value;
-      loglevel = tracelevel;
-      error = dwg_copy_objects (dst, &drawn, &handle, 1, map, &unresolved,
-                                &num_unresolved);
-      copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
-      object_eed (obj, &num_eed);
-      copied = copy ? object_eed (copy, &num_copied) : NULL;
-      if (copied && num_copied == num_eed)
-        data = copied[index].data;
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
     }
-  if (index < 0)
-    FAIL ("%s: no EED string left unread in the changed drawing", what);
-  else if (!error && data && data->code == 0 && data->u.eed_0.length == 0
-           && !data->u.eed_0.string[0])
-    OK ("%s: %s " FORMAT_HV " EED[%d] in example_2000.dwg copied as the "
-        "empty string",
-        what, obj->name, obj->handle.value, index);
+  group_items = eed_group_items (eed, num_eed, (BITCODE_BL)index);
+  handle = obj->handle.value;
+  loglevel = tracelevel;
+  error = dwg_copy_objects (dst, &drawn, &handle, 1, map, &unresolved,
+                            &num_unresolved);
+  copy = dwg_resolve_handle (dst, dwg_copy_map_get (map, handle));
+  if (copy)
+    object_eed (copy, &num_copied);
+  if (error == DWG_ERR_INVALIDEED && copy
+      && num_copied == num_eed - group_items)
+    OK ("%s: %s " FORMAT_HV " EED[%d] in example_2000.dwg: its group of %u "
+        "left out (error 0x%x)",
+        what, obj->name, obj->handle.value, index, (unsigned)group_items,
+        (unsigned)error);
   else
-    FAIL ("%s: %s " FORMAT_HV " EED[%d]: error 0x%x, copied with length %d",
+    FAIL ("%s: %s " FORMAT_HV " EED[%d]: error 0x%x, %s, %u of %u EED items "
+          "copied, expected %u",
           what, obj->name, obj->handle.value, index, (unsigned)error,
-          data ? (int)data->u.eed_0.length : -1);
+          copy ? "copied" : "not copied", (unsigned)num_copied,
+          (unsigned)num_eed, (unsigned)(num_eed - group_items));
 
+cleanup:
   free_dwg (&drawn);
-  free_dwg (dst);
-  free (dst);
+  if (src)
+    {
+      free_dwg (src);
+      free (src);
+    }
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
   dwg_copy_map_free (map);
   free (unresolved);
   if (!numfailed ())
@@ -2316,6 +2595,381 @@ test_eed_unread_string (void)
       unlink (file);
       unlink (drawing);
     }
+  return numfailed ();
+}
+
+/* EED items to add to an entity, in the order of its groups. */
+static Dwg_Eed_Data *
+new_eed_real (const double value)
+{
+  Dwg_Eed_Data *data = new_eed_data (40, 0);
+  if (data)
+    data->u.eed_40.real = value;
+  return data;
+}
+
+static Dwg_Eed_Data *
+new_eed_long (const BITCODE_RL value)
+{
+  Dwg_Eed_Data *data = new_eed_data (71, 0);
+  if (data)
+    data->u.eed_71.rl = value;
+  return data;
+}
+
+/* Appends EED item data to ent, as a group of APPID appid's first item when
+   starts is set. Takes data, which it frees when it can't. */
+static int
+append_eed (Dwg_Object_Entity *ent, const BITCODE_RLL appid, const int starts,
+            Dwg_Eed_Data *data)
+{
+  Dwg_Eed *eed;
+  if (!data)
+    return 0;
+  eed = (Dwg_Eed *)realloc (ent->eed, (ent->num_eed + 1) * sizeof (Dwg_Eed));
+  if (!eed)
+    {
+      free (data);
+      return 0;
+    }
+  ent->eed = eed;
+  eed = &ent->eed[ent->num_eed++];
+  memset (eed, 0, sizeof (Dwg_Eed));
+  eed->size = starts ? 1 : 0; // the encoder sizes the group
+  eed->handle.code = 5;
+  eed->handle.value = appid;
+  dwg_set_handle_size (&eed->handle);
+  eed->data = data;
+  return 1;
+}
+
+/* The bytes of an EED string item in an r13 to r2004 file: its code, the
+   length, the codepage (big-endian), then the string. */
+static size_t
+eed_string_item (unsigned char *item, const size_t size, const char *text,
+                 const BITCODE_RS codepage)
+{
+  const size_t len = strlen (text);
+  if (4 + len > size)
+    return 0;
+  item[0] = 0;
+  item[1] = (unsigned char)len;
+  item[2] = (unsigned char)(codepage >> 8);
+  item[3] = (unsigned char)(codepage & 0xFF);
+  memcpy (&item[4], text, len);
+  return 4 + len;
+}
+
+/* Whether EED item data is the string text. */
+static int
+is_eed_string (const Dwg_Eed_Data *data, const char *text)
+{
+  return data && data->code == 0 && !data->u.eed_0.is_tu
+         && data->u.eed_0.length == strlen (text)
+         && !strcmp (data->u.eed_0.string, text);
+}
+
+/* EED groups that the decoder reads only in part, made by changing a byte
+   of a drawing written with them:
+   - a group whose later item has a code the decoder doesn't know: it
+     leaves that item without data and skips the rest of the group;
+   - a group whose later item is a string that claims more bytes than are
+     left in the group: it leaves the string unread, and skips the items
+     after it.
+   What the items don't hold is only in the groups' raw bytes, so the copy
+   leaves both groups out, with DWG_ERR_INVALIDEED. The group before them,
+   which the decoder read whole, is copied. */
+static int
+test_eed_partly_decoded (void)
+{
+  const char *what = "EED group read in part";
+  const char *written = "copy_eed_partial_source.dwg";
+  const char *changed = "copy_eed_partial.dwg";
+  // code 71, then the long, little-endian
+  const BITCODE_RL long_value = 0x5A17C0DE;
+  const unsigned char long_item[] = { 71, 0xDE, 0xC0, 0x17, 0x5A };
+  const unsigned char unknown_code = 99;
+  unsigned char string_item[32];
+  size_t string_item_len = 0, size = 0;
+  unsigned char *bytes = NULL;
+  const dwg_point_3d p0 = { 0.0, 0.0, 0.0 }, p1 = { 10.0, 0.0, 0.0 },
+                     p2 = { 0.0, 10.0, 0.0 };
+  Dwg_Data *src = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Data *dst = NULL;
+  Dwg_Data drawn;
+  const Dwg_Object *mspace = src ? dwg_model_space_object (src) : NULL;
+  Dwg_Object_APPID *appid1 = src ? dwg_add_APPID (src, "COPY_TEST") : NULL;
+  Dwg_Object_APPID *appid2 = src ? dwg_add_APPID (src, "COPY_TEST_2") : NULL;
+  Dwg_Entity_LINE *line1 = NULL, *line2 = NULL;
+  Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0, num_eed1, num_eed2;
+  BITCODE_RLL handles[2];
+  const Dwg_Object *o1, *o2, *copy1, *copy2;
+  const Dwg_Eed *eed1, *eed2;
+  int error, made = 0;
+
+  failed = 0;
+  memset (&drawn, 0, sizeof (drawn));
+  if (mspace)
+    {
+      line1 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p1);
+      line2 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p2);
+    }
+  if (appid1 && appid2 && line1 && line2 && map)
+    {
+      const BITCODE_RLL a1 = src->object[appid1->parent->objid].handle.value;
+      const BITCODE_RLL a2 = src->object[appid2->parent->objid].handle.value;
+      const BITCODE_RS cp = src->header.codepage;
+      Dwg_Object_Entity *ent1 = src->object[line1->parent->objid].tio.entity;
+      Dwg_Object_Entity *ent2 = src->object[line2->parent->objid].tio.entity;
+      handles[0] = src->object[line1->parent->objid].handle.value;
+      handles[1] = src->object[line2->parent->objid].handle.value;
+      made = append_eed (ent1, a1, 1, new_eed_string ("kept group", cp))
+             && append_eed (ent1, a1, 0, new_eed_real (1.5))
+             && append_eed (ent1, a2, 1, new_eed_string ("read in part", cp))
+             && append_eed (ent1, a2, 0, new_eed_long (long_value))
+             && append_eed (ent1, a2, 0, new_eed_real (2.5))
+             && append_eed (ent2, a1, 1, new_eed_string ("first string", cp))
+             && append_eed (ent2, a1, 0, new_eed_string ("unread string", cp))
+             && append_eed (ent2, a1, 0, new_eed_real (4.25));
+      string_item_len = eed_string_item (string_item, sizeof (string_item),
+                                         "unread string", cp);
+    }
+  if (made && write_dwg (written, src) < DWG_ERR_CRITICAL)
+    bytes = read_file_bytes (written, &size);
+  // the long's code becomes one the decoder doesn't know, and the second
+  // string's length 255
+  made = bytes && string_item_len
+         && patch_at_bit (bytes, size, long_item, sizeof (long_item), 0,
+                          unknown_code)
+         && patch_at_bit (bytes, size, string_item, string_item_len, 1, 0xFF)
+         && write_file_bytes (changed, bytes, size);
+  free (bytes);
+  if (made)
+    made = read_dwg (changed, &drawn) < DWG_ERR_CRITICAL;
+  if (!made)
+    {
+      FAIL ("%s: no drawing made with the changed EED", what);
+      goto cleanup;
+    }
+
+  // the decoder reads them as the test expects
+  o1 = dwg_resolve_handle (&drawn, handles[0]);
+  o2 = dwg_resolve_handle (&drawn, handles[1]);
+  eed1 = o1 ? object_eed (o1, &num_eed1) : NULL;
+  eed2 = o2 ? object_eed (o2, &num_eed2) : NULL;
+  if (!eed1 || num_eed1 != 4 || !is_eed_string (eed1[0].data, "kept group")
+      || !eed1[2].size || !is_eed_string (eed1[2].data, "read in part")
+      || eed1[3].size || eed1[3].data || !eed2 || num_eed2 != 2
+      || !is_eed_string (eed2[0].data, "first string") || eed2[1].size
+      || !eed2[1].data || eed2[1].data->code != 0
+      || eed2[1].data->u.eed_0.length != 255
+      || eed2[1].data->u.eed_0.string[0])
+    {
+      FAIL ("%s: the changed EED isn't read as the test expects: %u and %u "
+            "items",
+            what, eed1 ? (unsigned)num_eed1 : 0,
+            eed2 ? (unsigned)num_eed2 : 0);
+      goto cleanup;
+    }
+
+  dst = new_document_like (&drawn);
+  if (!dst)
+    {
+      FAIL ("%s: out of memory", what);
+      goto cleanup;
+    }
+  loglevel = tracelevel;
+  error = dwg_copy_objects (dst, &drawn, handles, 2, map, &unresolved,
+                            &num_unresolved);
+  copy1 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[0]));
+  copy2 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[1]));
+  eed1 = copy1 ? object_eed (copy1, &num_eed1) : NULL;
+  eed2 = copy2 ? object_eed (copy2, &num_eed2) : NULL;
+  if (error == DWG_ERR_INVALIDEED && eed1 && num_eed1 == 2 && eed1[0].size
+      && is_eed_string (eed1[0].data, "kept group") && !eed1[1].size
+      && eed1[1].data && eed1[1].data->code == 40
+      && eed1[1].data->u.eed_40.real == 1.5 && copy2 && !eed2 && !num_eed2)
+    OK ("%s: both groups left out, the one read whole copied (error 0x%x)",
+        what, (unsigned)error);
+  else
+    FAIL ("%s: error 0x%x, %u and %u EED items copied, expected 2 and 0", what,
+          (unsigned)error, eed1 ? (unsigned)num_eed1 : 0,
+          eed2 ? (unsigned)num_eed2 : 0);
+
+cleanup:
+  free_dwg (&drawn);
+  if (src)
+    {
+      free_dwg (src);
+      free (src);
+    }
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  dwg_copy_map_free (map);
+  free (unresolved);
+  if (!numfailed ())
+    {
+      unlink (written);
+      unlink (changed);
+    }
+  return numfailed ();
+}
+
+/* Objects of many classes, with EED, and classes the copy adds to an empty
+   document: about 19000 allocations to fail, each in a copy of its own. */
+#define OUT_OF_MEMORY_DWG "example_2000.dwg"
+
+/* Copies objects of src into a new document, then frees it: an empty
+   document like src, or one the add API makes, whose names the copy
+   duplicates. Only copy.c's allocations during the copy count, from
+   alloc_calls 0 on. Returns the copy's error. */
+static int
+copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
+               const BITCODE_BL num_handles, const int add_api)
+{
+  Dwg_Data *dst = add_api ? dwg_new_Document (src->header.from_version, 0, 0)
+                          : new_document_like (src);
+  Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0;
+  int error;
+
+  if (!dst || !map)
+    error = DWG_ERR_INTERNALERROR;
+  else
+    {
+      alloc_calls = 0;
+      alloc_counting = 1;
+      error = dwg_copy_objects (dst, src, handles, num_handles, map,
+                                &unresolved, &num_unresolved);
+      alloc_counting = 0;
+    }
+  free (unresolved);
+  dwg_copy_map_free (map);
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  return error;
+}
+
+/* Each allocation copy.c makes, failed in turn, as it copies the objects
+   of the drawing into a new document: the copy returns DWG_ERR_OUTOFMEM,
+   and leaves the new document with nothing of the source's, so that
+   freeing it leaves the source as it was read. Under ASan a double free or
+   a use after free shows here too. The allocations of the functions copy.c
+   calls in other files (dwg_add_object, dwg_add_handleref, the hash's)
+   aren't failed. add_api: into a document made with the add API, with the
+   model space entities only; else into an empty one, with every object. */
+static int
+test_out_of_memory (const char *name, const int add_api)
+{
+  char path[256], what[200];
+  Dwg_Data src, fresh;
+  BITCODE_RLL *handles = NULL;
+  BITCODE_BL num_handles = 0;
+  long allocations = 0, first_wrong = 0;
+  unsigned not_made = 0, wrong = 0;
+  int error, first_error = 0;
+  Compare c;
+
+  failed = 0;
+  snprintf (what, sizeof (what), "out of memory copying %s into %s", name,
+            add_api ? "a document made with the add API" : "an empty document");
+  if (!test_file (name, path, sizeof (path)))
+    {
+      FAIL ("%s: %s not found", what, name);
+      return 1;
+    }
+  if (read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: read failed", what);
+      free_dwg (&src);
+      return 1;
+    }
+  if (add_api)
+    handles = model_space_entities (&src, &num_handles);
+  else
+    {
+      handles = (BITCODE_RLL *)calloc (src.num_objects, sizeof (BITCODE_RLL));
+      for (BITCODE_BL i = 0; handles && i < src.num_objects; i++)
+        if (is_copyable (&src.object[i]))
+          handles[num_handles++] = src.object[i].handle.value;
+    }
+  if (!handles || !num_handles)
+    {
+      FAIL ("%s: nothing to copy", what);
+      free_dwg (&src);
+      free (handles);
+      return 1;
+    }
+
+  // a copy that fails no allocation counts them
+  alloc_countdown = 0;
+  error = copy_and_free (&src, handles, num_handles, add_api);
+  allocations = alloc_calls;
+  if (error >= DWG_ERR_CRITICAL || allocations <= 0)
+    {
+      FAIL ("%s: error 0x%x without a failed allocation, %ld made", what,
+            (unsigned)error, allocations);
+      free_dwg (&src);
+      free (handles);
+      return 1;
+    }
+  for (long n = 1; n <= allocations; n++)
+    {
+      alloc_countdown = n;
+      alloc_failed = 0;
+      error = copy_and_free (&src, handles, num_handles, add_api);
+      alloc_countdown = 0;
+      if (!alloc_failed)
+        not_made++;
+      else if (!(error & DWG_ERR_OUTOFMEM) && !wrong++)
+        {
+          first_wrong = n;
+          first_error = error;
+        }
+    }
+  if (!not_made && !wrong)
+    OK ("%s: each of copy.c's %ld allocations failed in turn, "
+        "DWG_ERR_OUTOFMEM",
+        what,
+        allocations);
+  else
+    FAIL ("%s: of %ld allocations, %u not made, %u failed without "
+          "DWG_ERR_OUTOFMEM (allocation %ld first: error 0x%x)",
+          what, allocations, not_made, wrong, first_wrong,
+          (unsigned)first_error);
+
+  // the source as read
+  if (read_dwg (path, &fresh) >= DWG_ERR_CRITICAL)
+    FAIL ("%s: read again failed", what);
+  else
+    {
+      memset (&c, 0, sizeof (c));
+      c.what = what;
+      c.version = src.header.from_version;
+      if (fresh.num_objects != src.num_objects)
+        compare_fail (&c, "%u objects, expected %u",
+                      (unsigned)src.num_objects, (unsigned)fresh.num_objects);
+      for (BITCODE_BL i = 0; i < src.num_objects && i < fresh.num_objects;
+           i++)
+        compare_object (&c, &fresh, &fresh.object[i], &src, &src.object[i]);
+      if (!c.failed)
+        OK ("%s: the source reads the same after the copies", what);
+      else
+        FAIL ("%s: %d differences in the source after the copies", what,
+              c.failed);
+    }
+  free_dwg (&fresh);
+  free_dwg (&src);
+  free (handles);
   return numfailed ();
 }
 
@@ -2444,12 +3098,12 @@ test_ltype_text (void)
   return numfailed ();
 }
 
-/* A refused copy returns an error from DWG_ERR_CRITICAL up and adds
-   nothing to dst. */
+/* A refused copy returns COPY_REFUSED with the bit for its reason, and
+   adds nothing to dst. */
 static void
-check_refused (const char *what, Dwg_Data *dst, Dwg_Data *src,
-               const BITCODE_RLL *handles, const BITCODE_BL num_handles,
-               Dwg_Copy_Map *map)
+check_refused (const char *what, const int reason, Dwg_Data *dst,
+               Dwg_Data *src, const BITCODE_RLL *handles,
+               const BITCODE_BL num_handles, Dwg_Copy_Map *map)
 {
   const BITCODE_BL num_objects = dst->num_objects;
   const BITCODE_BL num_classes = dst->num_classes;
@@ -2459,11 +3113,12 @@ check_refused (const char *what, Dwg_Data *dst, Dwg_Data *src,
   loglevel = 0; // the refusal logs an error
   error = dwg_copy_objects (dst, src, handles, num_handles, map, &unresolved,
                             &num_unresolved);
-  if (error >= DWG_ERR_CRITICAL && dst->num_objects == num_objects
+  if (error == (COPY_REFUSED | reason) && dst->num_objects == num_objects
       && dst->num_classes == num_classes && !num_unresolved)
     OK ("refused: %s (error 0x%x)", what, (unsigned)error);
   else
-    FAIL ("refused: %s: error 0x%x, %u objects added", what, (unsigned)error,
+    FAIL ("refused: %s: error 0x%x, expected 0x%x, %u objects added", what,
+          (unsigned)error, (unsigned)(COPY_REFUSED | reason),
           (unsigned)(dst->num_objects - num_objects));
   free (unresolved);
 }
@@ -2473,12 +3128,15 @@ test_refused (void)
 {
   char path2004[256], path2000[256], path2007[256];
   Dwg_Data src2004, src2000, src2007;
-  Dwg_Data *dst;
+  Dwg_Data *dst, *beta;
   Dwg_Copy_Map *map = dwg_copy_map_new ();
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0;
   BITCODE_RLL handles[2], unknown = 0, line = 0;
+  int error;
 
   failed = 0;
-  if (!test_file ("example_2004.dwg", path2004, sizeof (path2004))
+  if (!map || !test_file ("example_2004.dwg", path2004, sizeof (path2004))
       || !test_file ("example_2000.dwg", path2000, sizeof (path2000))
       || !test_file ("example_2007.dwg", path2007, sizeof (path2007))
       || read_dwg (path2004, &src2004) >= DWG_ERR_CRITICAL
@@ -2496,32 +3154,90 @@ test_refused (void)
       if (!line && obj->fixedtype == DWG_TYPE_LINE)
         line = obj->handle.value;
     }
+  if (!unknown || !line)
+    {
+      FAIL ("refused: example_2004.dwg has no %s",
+            unknown ? "LINE" : "object of a class LibreDWG can't decode");
+      free_dwg (&src2004);
+      free_dwg (&src2000);
+      free_dwg (&src2007);
+      dwg_copy_map_free (map);
+      return 1;
+    }
   dst = new_document_like (&src2004);
+  beta = new_document_like (&src2004);
+  if (!dst || !beta)
+    {
+      FAIL ("refused: out of memory");
+      if (dst)
+        {
+          free_dwg (dst);
+          free (dst);
+        }
+      if (beta)
+        {
+          free_dwg (beta);
+          free (beta);
+        }
+      free_dwg (&src2004);
+      free_dwg (&src2000);
+      free_dwg (&src2007);
+      dwg_copy_map_free (map);
+      return 1;
+    }
+  beta->header.from_version = R_2007b;
 
   handles[0] = src2000.object[src2000.num_objects - 1].handle.value;
-  check_refused ("an r2000 object into an r2004 document", dst, &src2000,
-                 handles, 1, map);
+  check_refused ("an r2000 object into an r2004 document",
+                 DWG_ERR_NOTYETSUPPORTED, dst, &src2000, handles, 1, map);
   handles[0] = src2007.object[src2007.num_objects - 1].handle.value;
-  check_refused ("an r2007 document, even within itself", &src2007, &src2007,
-                 handles, 1, map);
+  check_refused ("an r2007 document, even within itself",
+                 DWG_ERR_NOTYETSUPPORTED, &src2007, &src2007, handles, 1, map);
+  // the r2007 alpha and beta versions, which sort below R_2007: a document
+  // of one, within itself and into another of the same version
+  handles[0] = line;
+  src2004.header.from_version = R_2007a;
+  check_refused ("an r2007 alpha document, within itself",
+                 DWG_ERR_NOTYETSUPPORTED, &src2004, &src2004, handles, 1, map);
+  src2004.header.from_version = R_2007b;
+  check_refused ("an r2007 beta document, into another",
+                 DWG_ERR_NOTYETSUPPORTED, beta, &src2004, handles, 1, map);
+  src2004.header.from_version = R_2004;
   handles[0] = unknown;
-  check_refused ("an object of a class LibreDWG can't decode", dst, &src2004,
-                 handles, 1, map);
+  check_refused ("an object of a class LibreDWG can't decode",
+                 DWG_ERR_UNHANDLEDCLASS, dst, &src2004, handles, 1, map);
   handles[0] = handles[1] = line;
-  check_refused ("an object twice", dst, &src2004, handles, 2, map);
+  check_refused ("an object twice", DWG_ERR_INVALIDHANDLE, dst, &src2004,
+                 handles, 2, map);
   handles[0] = 0x7FFFFFF0;
-  check_refused ("a handle not in the document", dst, &src2004, handles, 1,
-                 map);
+  check_refused ("a handle not in the document", DWG_ERR_INVALIDHANDLE, dst,
+                 &src2004, handles, 1, map);
+  check_refused ("no handles, but a count", DWG_ERR_INTERNALERROR, dst,
+                 &src2004, NULL, 1, map);
+
+  // no handles and no count: nothing to copy, and nothing refused
+  loglevel = tracelevel;
+  error = dwg_copy_objects (dst, &src2004, NULL, 0, map, &unresolved,
+                            &num_unresolved);
+  if (!error && !dst->num_objects && !num_unresolved && !unresolved)
+    OK ("no handles and a count of 0: nothing copied, nothing refused");
+  else
+    FAIL ("no handles and a count of 0: error 0x%x, %u objects added",
+          (unsigned)error, (unsigned)dst->num_objects);
+  free (unresolved);
+
   dwg_copy_map_set (map, line, 0x10);
   handles[0] = line;
-  check_refused ("an object already in the map", dst, &src2004, handles, 1,
-                 map);
+  check_refused ("an object already in the map", DWG_ERR_INVALIDHANDLE, dst,
+                 &src2004, handles, 1, map);
 
   free_dwg (&src2004);
   free_dwg (&src2000);
   free_dwg (&src2007);
   free_dwg (dst);
   free (dst);
+  free_dwg (beta);
+  free (beta);
   dwg_copy_map_free (map);
   return numfailed ();
 }
@@ -3759,6 +4475,8 @@ main (int argc, char *argv[])
           "2000/Polygon.dwg",     "2000/Polyline.dwg",  "2000/RAY.dwg",
           "2000/Spline.dwg",      "2000/Text.dwg",      "2000/TS1.dwg",
           NULL };
+  const char *const r14[] = { "example_r14.dwg", "r14/Constraints.dwg",
+                              "r14/Leader.dwg", "r14/v.dwg", NULL };
   int error = 0;
   char *trace = getenv ("LIBREDWG_TRACE");
   char *reported = getenv ("COPY_TEST_REPORTED");
@@ -3780,6 +4498,8 @@ main (int argc, char *argv[])
     error += test_clone (*f, 0);
   for (const char *const *f = r2000; *f; f++)
     error += test_clone (*f, 0);
+  for (const char *const *f = r14; *f; f++)
+    error += test_clone (*f, 0);
   // its PROXY_OBJECTs hold data ending in a partial last byte, which has to
   // read back as written
   error += test_clone ("example_r13.dwg", 0);
@@ -3789,6 +4509,9 @@ main (int argc, char *argv[])
   error += test_unresolved ();
   error += test_eed ();
   error += test_eed_unread_string ();
+  error += test_eed_partly_decoded ();
+  error += test_out_of_memory (OUT_OF_MEMORY_DWG, 0);
+  error += test_out_of_memory (OUT_OF_MEMORY_DWG, 1);
   error += test_ltype_text ();
   error += test_refused ();
   error += test_copy_dynblocks (NULL);
