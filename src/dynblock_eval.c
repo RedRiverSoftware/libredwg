@@ -3360,15 +3360,19 @@ turn_vector (double *x, double *y, const Dynblock_Frame *f)
 #define TURN_2D(pt, f) turn_xy (&(pt).x, &(pt).y, f)
 #define TURN_VECTOR(v, f) turn_vector (&(v).x, &(v).y, f)
 
-/* Turns a TEXT or ATTRIB by frame f, in its OCS: its insertion point, its
-   alignment point when it has one, and its rotation, which the encoder of
-   an r2004 drawing stores only when dataflags says so. */
+/* Turns a TEXT or ATTRIB by frame f, in its OCS: its insertion point, the
+   alignment point of text that isn't left-aligned on the baseline, as
+   MOVE_TEXT moves it, and its rotation, which the encoder of an r2004
+   drawing stores only when dataflags says so. */
 #define TURN_TEXT(_obj, f)                                                    \
   do                                                                          \
     {                                                                         \
       TURN_2D ((_obj)->ins_pt, f);                                            \
-      if (!((_obj)->dataflags & 0x02))                                        \
-        TURN_2D ((_obj)->alignment_pt, f);                                    \
+      if ((_obj)->horiz_alignment || (_obj)->vert_alignment)                  \
+        {                                                                     \
+          TURN_2D ((_obj)->alignment_pt, f);                                  \
+          SET_ALIGNMENT_FLAG (_obj);                                          \
+        }                                                                     \
       (_obj)->rotation = normal_angle ((_obj)->rotation + (f)->angle);        \
       if ((_obj)->rotation != 0.0)                                            \
         (_obj)->dataflags &= ~0x08;                                           \
