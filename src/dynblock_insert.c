@@ -743,10 +743,10 @@ place_point (const Dynblock_Placement *p, const BITCODE_3BD *base,
 }
 
 /* The insertion and alignment points of attdef's ATTRIB, placed by p in
-   the block with base point base. Text left-aligned on the baseline has
-   no alignment point, and an attribute definition whose dataflags have
-   0x02 doesn't store it, which leaves it 0 when read: both take the
-   insertion point, as AutoCAD's ATTRIBs do. */
+   the block with base point base. Text left-aligned on the baseline has no
+   alignment point, and AutoCAD stores none for it (dataflags 0x02): it
+   gets the insertion point, which dwg_set_dataflags () leaves out as it
+   leaves out an alignment point equal to the insertion point. */
 static void
 place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
               const Dwg_Entity_ATTDEF *attdef, BITCODE_3BD *pt,
@@ -754,8 +754,7 @@ place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
 {
   place_point (p, base, attdef->ins_pt.x, attdef->ins_pt.y, attdef->elevation,
                pt);
-  if ((attdef->dataflags & 0x02)
-      || (!attdef->horiz_alignment && !attdef->vert_alignment))
+  if (!attdef->horiz_alignment && !attdef->vert_alignment)
     *align = *pt;
   else
     place_point (p, base, attdef->alignment_pt.x, attdef->alignment_pt.y,

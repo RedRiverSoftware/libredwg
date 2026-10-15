@@ -1264,30 +1264,31 @@ test_add_insert_block (void)
 }
 
 /* dwg_add_INSERT_block () before r13, whose INSERTs flag the optional
-   fields they store: the scales and the rotation are written, and read
-   back as given, drawing the block given. */
+   fields they store and keep Z as the entity's elevation: an INSERT at an
+   elevation of 0 and one above it are written, and read back with their
+   points, scales and rotations as given, drawing the block given. */
 static int
 test_add_insert_block_r11 (void)
 {
   Dwg_Data *dwg = dwg_new_Document (R_11, 0, tracelevel);
-  const dwg_point_3d start = { 0.0, 0.0, 0.0 }, end = { 5.0, 5.0, 0.0 },
-                     pt = { 1.0, 2.0, 0.0 };
+  const dwg_point_3d start = { 0.0, 0.0, 0.0 }, end = { 5.0, 5.0, 0.0 };
+  const dwg_point_3d pts[2] = { { 1.0, 2.0, 0.0 }, { 4.0, 5.0, 3.0 } };
   Dwg_Object_BLOCK_HEADER *blk = NULL;
-  Dwg_Entity_INSERT *ins = NULL;
   Dwg_Data readback;
   unsigned found = 0;
-  int failures = 0, error;
+  int failures = 0, error, added = 0;
 
   if (dwg)
     blk = dwg_add_BLOCK_HEADER (dwg, "B");
   if (blk && dwg_add_BLOCK (blk, "B") && dwg_add_LINE (blk, &start, &end)
       && dwg_add_ENDBLK (blk))
-    ins = dwg_add_INSERT_block (model_space (dwg), &pt, blk, 2.0, 3.0, 4.0,
-                                0.5);
+    for (int k = 0; k < 2; k++)
+      added += !!dwg_add_INSERT_block (model_space (dwg), &pts[k], blk, 2.0,
+                                       3.0, 4.0, 0.5);
   loglevel = test_loglevel;
-  if (!ins)
+  if (added != 2)
     {
-      FAIL ("add_INSERT_block r11: adding the block or INSERT failed");
+      FAIL ("add_INSERT_block r11: adding the block or INSERTs failed");
       if (dwg)
         {
           free_dwg (dwg);
@@ -1309,32 +1310,41 @@ test_add_insert_block_r11 (void)
         {
           const Dwg_Object *obj = &readback.object[i];
           const Dwg_Entity_INSERT *_ins;
+          const dwg_point_3d *pt;
+          double z;
           char *drawn;
-          if (obj->fixedtype != DWG_TYPE_INSERT)
+          if (obj->fixedtype != DWG_TYPE_INSERT || found++ >= 2)
             continue;
-          found++;
+          pt = &pts[found - 1];
           _ins = obj->tio.entity->tio.INSERT;
+          // the decoder leaves an r11 INSERT's Z in the entity's elevation
+          z = obj->tio.entity->flag_r11 & FLAG_R11_HAS_ELEVATION
+                  ? obj->tio.entity->elevation_r11
+                  : _ins->ins_pt.z;
           // before r13 the INSERT names its block by its place in the table
           drawn = dwg_handle_name (&readback, "BLOCK", _ins->block_header);
           loglevel = test_loglevel;
-          if (_ins->ins_pt.x == pt.x && _ins->ins_pt.y == pt.y
-              && _ins->ins_pt.z == pt.z && _ins->scale.x == 2.0
-              && _ins->scale.y == 3.0 && _ins->scale.z == 4.0
-              && _ins->rotation == 0.5 && drawn && !strcmp (drawn, "B"))
-            OK ("add_INSERT_block r11: reads back with its scales and "
-                "rotation, drawing the block given");
+          if (_ins->ins_pt.x == pt->x && _ins->ins_pt.y == pt->y
+              && z == pt->z && _ins->scale.x == 2.0 && _ins->scale.y == 3.0
+              && _ins->scale.z == 4.0 && _ins->rotation == 0.5 && drawn
+              && !strcmp (drawn, "B"))
+            OK ("add_INSERT_block r11: the INSERT at elevation %g reads back "
+                "with its point, scales and rotation, drawing the block "
+                "given",
+                pt->z);
           else
             {
               FAIL ("add_INSERT_block r11: reads back at (%g, %g, %g), "
-                    "scales (%g, %g, %g), rotation %g, drawing %s",
-                    _ins->ins_pt.x, _ins->ins_pt.y, _ins->ins_pt.z,
-                    _ins->scale.x, _ins->scale.y, _ins->scale.z,
-                    _ins->rotation, drawn ? drawn : "no block");
+                    "scales (%g, %g, %g), rotation %g, drawing %s, placed at "
+                    "(%g, %g, %g)",
+                    _ins->ins_pt.x, _ins->ins_pt.y, z, _ins->scale.x,
+                    _ins->scale.y, _ins->scale.z, _ins->rotation,
+                    drawn ? drawn : "no block", pt->x, pt->y, pt->z);
               failures++;
             }
           free (drawn);
         }
-      if (found != 1)
+      if (found != 2)
         {
           FAIL ("add_INSERT_block r11: %u INSERTs read back", found);
           failures++;
@@ -1484,23 +1494,22 @@ typedef struct
   const char *value;
 } Expected_Attrib;
 
-/* The ATTRIBs of placement insert in dwg, placed at ins_pt, scale and
-   rotation in block (base point 0) of defs, which is dwg or the document
-   dwg was written from: one per attribute definition that isn't constant,
+/* The ATTRIBs of placement insert, placed at ins_pt, scale and rotation in
+   block (base point 0): one per attribute definition that isn't constant,
    in order, each with its definition's properties placed by the INSERT.
-   Text that is left-aligned on the baseline, and a definition that doesn't
-   store its alignment point (dataflags 0x02, which the decoder leaves 0),
-   take the insertion point as the alignment point, and the ATTRIB then
-   doesn't store it either. */
+   Text left-aligned on the baseline has no alignment point, and its
+   ATTRIB stores none (dataflags 0x02), as AutoCAD's don't. Other ATTRIBs
+   are aligned at their definition's alignment point, placed; dataflags
+   0x02 stands for an alignment point of (0, 0), as AutoCAD reads it. */
 static int
-check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
-               const BITCODE_RLL insert, const BITCODE_RLL block,
-               const BITCODE_3BD *ins_pt, const double scale,
-               const double rotation, const Expected_Attrib *expected,
-               const unsigned num_expected, const int etags)
+check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
+               const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
+               const double scale, const double rotation,
+               const Expected_Attrib *expected, const unsigned num_expected,
+               const int etags)
 {
   const Dwg_Entity_INSERT *_ins = object (dwg, insert)->tio.entity->tio.INSERT;
-  const Dwg_Object_BLOCK_HEADER *blk = block_header (defs, block);
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
   const BITCODE_3BD *base = &blk->base_pt;
   unsigned k = 0;
   int failures = 0;
@@ -1513,12 +1522,12 @@ check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
     }
   for (BITCODE_BL i = 0; i < blk->num_owned; i++)
     {
-      const Dwg_Object *defobj = object (defs, ref (blk->entities[i]));
+      const Dwg_Object *defobj = object (dwg, ref (blk->entities[i]));
       const Dwg_Entity_ATTDEF *d;
       const Dwg_Object *attobj;
       const Dwg_Entity_ATTRIB *a;
-      const BITCODE_2DPOINT *dalign, *aalign;
-      double x, y, ax, ay;
+      double x, y, ax, ay, aax, aay;
+      int left;
       BITCODE_RLL etag_handle = 1, def_etag = 0;
       BITCODE_RL etag_index = 0, def_index = 1;
       int has_etag, def_has_etag;
@@ -1533,11 +1542,9 @@ check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
           return failures + 1;
         }
       a = attobj->tio.entity->tio.ATTRIB;
-      dalign = (d->dataflags & 0x02)
-                       || (!d->horiz_alignment && !d->vert_alignment)
-                   ? &d->ins_pt
-                   : &d->alignment_pt;
-      aalign = (a->dataflags & 0x02) ? &a->ins_pt : &a->alignment_pt;
+      left = !d->horiz_alignment && !d->vert_alignment;
+      aax = (a->dataflags & 0x02) ? 0.0 : a->alignment_pt.x;
+      aay = (a->dataflags & 0x02) ? 0.0 : a->alignment_pt.y;
       x = ins_pt->x
           + scale
                 * ((d->ins_pt.x - base->x) * c - (d->ins_pt.y - base->y) * s);
@@ -1546,21 +1553,23 @@ check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
                 * ((d->ins_pt.x - base->x) * s + (d->ins_pt.y - base->y) * c);
       ax = ins_pt->x
            + scale
-                 * ((dalign->x - base->x) * c - (dalign->y - base->y) * s);
+                 * ((d->alignment_pt.x - base->x) * c
+                    - (d->alignment_pt.y - base->y) * s);
       ay = ins_pt->y
            + scale
-                 * ((dalign->x - base->x) * s + (dalign->y - base->y) * c);
+                 * ((d->alignment_pt.x - base->x) * s
+                    + (d->alignment_pt.y - base->y) * c);
       has_etag = eed_tag (dwg, attobj, "AcDbBlockRepETag", &etag_handle,
                           &etag_index);
       // at the definition's values, an ATTRIB of a definition with one
-      def_has_etag = eed_tag (defs, defobj, "AcDbBlockRepETag", &def_etag,
+      def_has_etag = eed_tag (dwg, defobj, "AcDbBlockRepETag", &def_etag,
                               &def_index);
       if (strcmp (a->tag, d->tag) || strcmp (a->tag, expected[k].tag)
           || strcmp (a->text_value, expected[k].value)
           || fabs (a->ins_pt.x - x) > 1e-9 || fabs (a->ins_pt.y - y) > 1e-9
           || fabs (a->elevation - ins_pt->z - scale * d->elevation) > 1e-9
-          || fabs (aalign->x - ax) > 1e-9 || fabs (aalign->y - ay) > 1e-9
-          || !(a->dataflags & 0x02) != (ax != x || ay != y)
+          || (left ? !(a->dataflags & 0x02)
+                   : fabs (aax - ax) > 1e-9 || fabs (aay - ay) > 1e-9)
           || fabs (a->height - d->height * scale) > 1e-9
           || fabs (a->rotation - fmod (d->rotation + rotation, 2.0 * M_PI))
                  > 1e-9
@@ -1575,12 +1584,13 @@ check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
         {
           FAIL ("%s: ATTRIB %s '%s' at (%g, %g) aligned at (%g, %g), "
                 "dataflags 0x%x, h %g r %g, layer " FORMAT_HV
-                ", ETag %d, expected '%s' at (%g, %g) aligned at (%g, %g), h "
-                "%g r %g, ETag %d",
-                what, a->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
-                aalign->x, aalign->y, (unsigned)a->dataflags, a->height,
-                a->rotation, ref (attobj->tio.entity->layer), has_etag,
-                expected[k].value, x, y, ax, ay, d->height * scale,
+                ", ETag %d, expected '%s' at (%g, %g) %s (%g, %g), h %g r "
+                "%g, ETag %d",
+                what, a->tag, a->text_value, a->ins_pt.x, a->ins_pt.y, aax,
+                aay, (unsigned)a->dataflags, a->height, a->rotation,
+                ref (attobj->tio.entity->layer), has_etag, expected[k].value,
+                x, y, left ? "with no alignment point, not" : "aligned at",
+                ax, ay, d->height * scale,
                 fmod (d->rotation + rotation, 2.0 * M_PI), etags);
           failures++;
         }
@@ -1625,14 +1635,14 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
   return 1;
 }
 
-/* Attributes, on a copy of Trees given attribute definitions: a plain one
-   that doesn't store its alignment point, as a decoded one with dataflags
-   0x02; a constant one, which gets no ATTRIB; one centred, rotated, on a
-   layer of its own and shown in the first visibility state only; one
-   left-aligned, as dwg_add_ATTDEF () makes it, with an alignment point of
-   0; and one centred that doesn't store its alignment point. Placed at the
-   definition's values and at another state, scaled and rotated, with one
-   value given. */
+/* Attributes, on a copy of Trees given attribute definitions: a plain one,
+   left-aligned with no alignment point stored (dataflags 0x02), as AutoCAD
+   stores one; a constant one, which gets no ATTRIB; one centred, rotated,
+   on a layer of its own and shown in the first visibility state only; one
+   left-aligned as dwg_add_ATTDEF () makes it, with an alignment point of
+   0 and dataflags 0; and one centred at (0, 0), which it doesn't store
+   (dataflags 0x02). Placed at the definition's values and at another
+   state, scaled and rotated, with one value given. */
 static int
 test_attributes (Dwg_Data *src)
 {
@@ -1695,7 +1705,7 @@ test_attributes (Dwg_Data *src)
   centred->parent->layer
       = dwg_add_handleref (dst, 5, handle_of (dst, layer), NULL);
   label->width_factor = mark->width_factor = 1.0;
-  // the alignment point is the insertion point, so not stored
+  // no alignment point stored: (0, 0), as the decoder leaves it
   number->dataflags = 0x02;
   mark->dataflags = 0x02;
   mark->horiz_alignment = 1;
@@ -1744,11 +1754,10 @@ test_attributes (Dwg_Data *src)
   failures
       += check_values ("attributes at the definition's values", dst, &pl1);
   failures += check_values ("attributes at Shrub (Plan)", dst, &pl2);
-  failures += check_attribs ("attributes at the definition's values", dst, dst,
-                             h1, def_h, &at1, 2.0, 0.5, expected1, 4, 1);
-  failures += check_attribs ("attributes at Shrub (Plan)", dst, dst, h2,
-                             block2, &at2, 1.5, 2.0 * M_PI - 0.25, expected2,
-                             4, 0);
+  failures += check_attribs ("attributes at the definition's values", dst, h1,
+                             def_h, &at1, 2.0, 0.5, expected1, 4, 1);
+  failures += check_attribs ("attributes at Shrub (Plan)", dst, h2, block2,
+                             &at2, 1.5, 2.0 * M_PI - 0.25, expected2, 4, 0);
   failures += check_attrib_links ("attributes at the definition's values",
                                   dst, h1, def_h);
   failures
@@ -1795,23 +1804,7 @@ test_attributes (Dwg_Data *src)
       failures++;
     }
 
-  // The encoder works out the dataflags of a document built with the add
-  // API again, so NUMBER and MARK, and their copies in the representation
-  // block, are written with their alignment points of 0 stored. The
-  // ATTRIBs read back are checked against the definitions as they were
-  // placed.
-  {
-    const BITCODE_BL n = dst->num_objects;
-    BITCODE_RC *flags = (BITCODE_RC *)calloc (n, 1);
-    for (BITCODE_BL i = 0; flags && i < n; i++)
-      if (dst->object[i].fixedtype == DWG_TYPE_ATTDEF)
-        flags[i] = dst->object[i].tio.entity->tio.ATTDEF->dataflags;
-    error = flags ? write_dwg (WRITTEN_ATTRIBS, dst) : DWG_ERR_OUTOFMEM;
-    for (BITCODE_BL i = 0; flags && i < n; i++)
-      if (dst->object[i].fixedtype == DWG_TYPE_ATTDEF)
-        dst->object[i].tio.entity->tio.ATTDEF->dataflags = flags[i];
-    free (flags);
-  }
+  error = write_dwg (WRITTEN_ATTRIBS, dst);
   if (error < DWG_ERR_CRITICAL)
     error = read_dwg (WRITTEN_ATTRIBS, &readback);
   if (error >= DWG_ERR_CRITICAL)
@@ -1833,10 +1826,10 @@ test_attributes (Dwg_Data *src)
                                 &readback, &pl2);
       failures += check_attribs ("read back attributes at the definition's "
                                  "values",
-                                 &readback, dst, h1, def_h, &at1, 2.0, 0.5,
+                                 &readback, h1, def_h, &at1, 2.0, 0.5,
                                  expected1, 4, 1);
       failures += check_attribs ("read back attributes at Shrub (Plan)",
-                                 &readback, dst, h2, block2, &at2, 1.5,
+                                 &readback, h2, block2, &at2, 1.5,
                                  2.0 * M_PI - 0.25, expected2, 4, 0);
       failures += check_attrib_links ("read back attributes at the "
                                       "definition's values",

@@ -345,9 +345,9 @@ typedef struct _dwg_attvalue
    definition's tag, flags, text style, height, width factor, oblique
    angle, alignment, layer, colour, linetype, lineweight and plot style;
    its position, alignment point, height, thickness and rotation placed by
-   the INSERT (text left-aligned on the baseline, and a definition that
-   doesn't store its alignment point, take the position as the alignment
-   point); and its value from atts, by tag, or else the definition's
+   the INSERT (text left-aligned on the baseline has no alignment point,
+   and the ATTRIB stores none, as AutoCAD's don't); and its value from
+   atts, by tag, or else the definition's
    default value. A preset attribute takes its value from atts too: preset
    only means AutoCAD doesn't prompt for it. At the definition's values
    each ATTRIB gets the AcDbBlockRepETag index of its definition, as
