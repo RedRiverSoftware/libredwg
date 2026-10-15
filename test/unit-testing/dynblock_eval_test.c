@@ -694,6 +694,20 @@ test_refusals (Dwg_Data *dwg)
                               "an entry that isn't an entity");
     window->entities[1] = second;
   }
+  // a full block table, whose 16-bit count the new block would wrap
+  {
+    Dwg_Object_BLOCK_CONTROL *ctrl
+        = dwg_get_first_object (dwg, DWG_TYPE_BLOCK_CONTROL)
+              ->tio.object->tio.BLOCK_CONTROL;
+    const BITCODE_BS num_entries = ctrl->num_entries;
+    ctrl->num_entries = 0xFFFF;
+    v[0].name = (char *)"Type (view)";
+    v[0].state = (char *)"Shrub (Plan)";
+    failures += test_refusal (dwg, TREES, v, 1,
+                              REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a full block table");
+    ctrl->num_entries = num_entries;
+  }
   // a node of the evaluation graph that doesn't resolve
   {
     BITCODE_H node = graph->nodes[0].evalexpr;
