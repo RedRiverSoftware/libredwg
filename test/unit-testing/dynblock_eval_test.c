@@ -2862,7 +2862,9 @@ check_toilet (Dwg_Data *dwg, const Dwg_Object_BLOCK_HEADER *rep,
    a whole turn away gives the same block, as AutoCAD keeps the angles a
    turn changes in [0, 2 pi); one at the definition's value, 0 or 2 pi,
    turns nothing; a huge one, 1e20, turns by its remainder, the points and
-   the angles alike. */
+   the angles alike. A huge value whose remainder is 0, 2 pi times 2^60,
+   with the definition's angle made 1, turns by -1: subtracting 1 from the
+   value itself would round it away. */
 static int
 test_rotation (Dwg_Data *dwg)
 {
@@ -2888,6 +2890,33 @@ test_rotation (Dwg_Data *dwg)
   failures += check_toilet (
       dwg, evaluate (dwg, TOILET, &v, 1, "rotation Angle 1e20"),
       fmod (1e20, 2.0 * M_PI), "rotation Angle 1e20");
+  {
+    Dwg_Object *obj = dwg_resolve_handle (dwg, TOILET_ANGLE);
+    Dwg_Object_BLOCKROTATIONPARAMETER *rotation
+        = obj && obj->fixedtype == DWG_TYPE_BLOCKROTATIONPARAMETER
+              ? obj->tio.object->tio.BLOCKROTATIONPARAMETER
+              : NULL;
+    BITCODE_3BD endpt;
+    double dx, dy;
+    if (!rotation)
+      {
+        fail ("rotation: the Toilet's Angle not found");
+        return failures + 1;
+      }
+    // the end point turned 1 from the base angle point, about the base
+    endpt = rotation->def_endpt;
+    dx = rotation->def_base_angle_pt.x - rotation->def_basept.x;
+    dy = rotation->def_base_angle_pt.y - rotation->def_basept.y;
+    rotation->def_endpt.x = rotation->def_basept.x + dx * cos (1.0)
+                            - dy * sin (1.0);
+    rotation->def_endpt.y = rotation->def_basept.y + dx * sin (1.0)
+                            + dy * cos (1.0);
+    v.value = ldexp (2.0 * M_PI, 60);
+    failures += check_toilet (
+        dwg, evaluate (dwg, TOILET, &v, 1, "rotation Angle 2 pi 2^60"), -1.0,
+        "rotation Angle 2 pi 2^60, from 1");
+    rotation->def_endpt = endpt;
+  }
   return failures;
 }
 

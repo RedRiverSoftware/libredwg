@@ -1246,7 +1246,8 @@ typedef struct _dynblock_linear
 } Dynblock_Linear;
 
 /* A rotation parameter during the evaluation, and the value it is set
-   to. */
+   to, reduced to [0, 2 pi), so that a huge one runs and turns the points
+   and the angles alike, and the angles keep their sweeps. */
 typedef struct _dynblock_rotation
 {
   const Dwg_Object *obj;
@@ -3018,7 +3019,7 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
           r->name = p->name;
           r->nodeid = p->nodeid;
           r->given = !isnan (value[i]);
-          r->value = value[i];
+          r->value = r->given ? normal_angle (value[i]) : value[i];
         }
     }
   for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
@@ -3111,9 +3112,7 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   // No action that ran moved a rotation parameter given a value, so each
-  // turns from the definition's angle. The value is reduced to [0, 2 pi)
-  // first, so that a huge one turns the points and the angles alike, and
-  // the angles keep their sweeps.
+  // turns from the definition's angle.
   for (BITCODE_BL i = 0; !error && i < plan->num_rotations; i++)
     {
       const Dynblock_Rotation *r = &plan->rotations[i];
@@ -3122,7 +3121,7 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       if (r->running)
         error = plan_rotation_actions (
             plan, r,
-            normal_angle (r->value)
+            r->value
                 - rotation_angle (&_r->def_basept, &_r->def_endpt,
                                   &_r->def_base_angle_pt));
     }
