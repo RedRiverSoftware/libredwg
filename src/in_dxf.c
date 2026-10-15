@@ -5901,7 +5901,8 @@ add_DIMASSOC (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
   Dwg_Data *dwg = obj->parent;
   int i = -1, j = -1;
   int have_rotated_type = 0;
-  o->ref = (Dwg_DIMASSOC_Ref *)xcalloc (4, sizeof (Dwg_DIMASSOC_Ref));
+  // as many as the spec's REPEAT_CN (6, ref), though DXF fills only 4
+  o->ref = (Dwg_DIMASSOC_Ref *)xcalloc (6, sizeof (Dwg_DIMASSOC_Ref));
   if (!o->ref)
     {
       return NULL;

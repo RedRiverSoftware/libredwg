@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "common.h"
+#include "bits.h"
 #include "dwg.h"
 #include "hash.h"
 #include "copy.h"
@@ -117,8 +118,8 @@ owner_of (const Dwg_Object *obj)
   return ref_target (obj->tio.object->ownerhandle);
 }
 
-/* Table and dictionary names compare without case. Both documents have the
-   same codepage, so their bytes can be compared; only ASCII letters fold. */
+/* Table and dictionary names compare without case, byte by byte, as held in
+   the same codepage or both in UTF-8; only ASCII letters fold. */
 static int
 same_name (const char *a, const size_t alen, const char *b, const size_t blen)
 {
@@ -142,6 +143,56 @@ static int
 same_cstr (const char *a, const char *b)
 {
   return a && b && same_name (a, strlen (a), b, strlen (b));
+}
+
+/* A name to match, and whether its bytes are UTF-8: a string field of a
+   document imported from JSON or built with the add API holds UTF-8, one
+   of any other document holds its codepage, and so does an EED string in
+   every document, as the object copy leaves them. */
+typedef struct _match_name
+{
+  const char *str;
+  size_t len;
+  int utf8;
+} Match_Name;
+
+static Match_Name
+field_name (const Dwg_Data *dwg, const char *str)
+{
+  Match_Name name;
+  name.str = str;
+  name.len = str ? strlen (str) : 0;
+  name.utf8 = (dwg->opts & DWG_OPTS_INJSON) != 0;
+  return name;
+}
+
+/* Whether names a and b, of documents of the same codepage, are the same:
+   one in UTF-8 and one in the codepage are compared as UTF-8. */
+static int
+same_match_name (const Match_Name *a, const Match_Name *b,
+                 const BITCODE_RS codepage)
+{
+  const Match_Name *cp, *utf8;
+  char *str, *conv;
+  int same;
+  if (!a->str || !b->str)
+    return 0;
+  if (a->utf8 == b->utf8)
+    return same_name (a->str, a->len, b->str, b->len);
+  cp = a->utf8 ? b : a;
+  utf8 = a->utf8 ? a : b;
+  // a true name in EED needn't end in NUL
+  str = (char *)malloc (cp->len + 1);
+  if (!str)
+    return 0;
+  memcpy (str, cp->str, cp->len);
+  str[cp->len] = '\0';
+  conv = bit_TV_to_utf8 (str, codepage);
+  same = conv && same_name (conv, strlen (conv), utf8->str, utf8->len);
+  if (conv != str)
+    free (conv);
+  free (str);
+  return same;
 }
 
 static int
@@ -188,19 +239,20 @@ true_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp)
 }
 
 /* A block's name for matching: a dynamic definition's true name, or the
-   name of a block that isn't anonymous. NULL for anonymous blocks, which
+   name of a block that isn't anonymous. No name for anonymous blocks, which
    are all stored as "*U", "*D" and the like. */
-static const char *
-block_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp)
+static Match_Name
+block_name (const Dwg_Data *dwg, const Dwg_Object *obj)
 {
   const Dwg_Object_BLOCK_HEADER *blk = obj->tio.object->tio.BLOCK_HEADER;
-  const char *name = true_name (dwg, obj, lenp);
-  if (name)
+  Match_Name name;
+  name.utf8 = 0;
+  name.str = true_name (dwg, obj, &name.len);
+  if (name.str)
     return name;
   if (!blk || blk->anonymous || !blk->name || !*blk->name || *blk->name == '*')
-    return NULL;
-  *lenp = strlen (blk->name);
-  return blk->name;
+    return field_name (dwg, NULL);
+  return field_name (dwg, blk->name);
 }
 
 static Dwg_Object_Type
@@ -265,10 +317,9 @@ find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj)
 {
   const Dwg_Object_APPID_CONTROL *ctrl
       = control_of (dwg_get_first_object (dst, DWG_TYPE_BLOCK_CONTROL));
-  size_t len, dst_len;
-  const char *name = block_name (src, srcobj, &len);
+  const Match_Name name = block_name (src, srcobj);
   BITCODE_BL i;
-  if (!name || !ctrl || !ctrl->entries)
+  if (!name.str || !ctrl || !ctrl->entries)
     return 0;
   for (i = 0; i < ctrl->num_entries; i++)
     {
@@ -276,32 +327,40 @@ find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj)
           = ctrl->entries[i]
                 ? dwg_resolve_handle (dst, ctrl->entries[i]->absolute_ref)
                 : NULL;
-      const char *dst_name;
+      Match_Name dst_name;
       if (!obj || obj->fixedtype != DWG_TYPE_BLOCK_HEADER || !obj->tio.object
           || !obj->tio.object->tio.BLOCK_HEADER)
         continue;
-      dst_name = block_name (dst, obj, &dst_len);
-      if (dst_name && same_name (name, len, dst_name, dst_len))
+      dst_name = block_name (dst, obj);
+      if (same_match_name (&name, &dst_name, src->header.codepage))
         return obj->handle.value;
     }
   return 0;
 }
 
-/* Whether table records a and b, of one type, are the same record by name.
-   The text styles of shape files have no name, and are the same when their
-   files are. */
+/* Whether table records a and b, of one type and of their documents, are
+   the same record by name. The text styles of shape files have no name, and
+   are the same when their files are. */
 static int
 same_record (const Dwg_Object *a, const Dwg_Object *b)
 {
   const char *name = a->tio.object->tio.APPID->name;
+  Match_Name na, nb;
   if (a->fixedtype == DWG_TYPE_STYLE && (!name || !*name))
     {
       const Dwg_Object_STYLE *sa = a->tio.object->tio.STYLE;
       const Dwg_Object_STYLE *sb = b->tio.object->tio.STYLE;
-      return (!sb->name || !*sb->name) && sa->is_shape == sb->is_shape
-             && same_cstr (sa->font_file, sb->font_file);
+      if ((sb->name && *sb->name) || sa->is_shape != sb->is_shape)
+        return 0;
+      na = field_name (a->parent, sa->font_file);
+      nb = field_name (b->parent, sb->font_file);
     }
-  return same_cstr (name, b->tio.object->tio.APPID->name);
+  else
+    {
+      na = field_name (a->parent, name);
+      nb = field_name (b->parent, b->tio.object->tio.APPID->name);
+    }
+  return same_match_name (&na, &nb, a->parent->header.codepage);
 }
 
 /* The record of dst's table named as table record srcobj is in src, or 0.
@@ -363,16 +422,20 @@ dictionary_key (const Dwg_Object_DICTIONARY *dict, const BITCODE_RLL handle)
   return NULL;
 }
 
-/* The entry of dict with the key, or 0. */
+/* The entry of dict, a dictionary of dwg, with the key, or 0. */
 static BITCODE_RLL
-dictionary_entry (const Dwg_Object_DICTIONARY *dict, const char *key)
+dictionary_entry (const Dwg_Data *dwg, const Dwg_Object_DICTIONARY *dict,
+                  const Match_Name *key)
 {
   BITCODE_BL i;
-  if (!dict || !dict->texts || !dict->itemhandles || !key)
+  if (!dict || !dict->texts || !dict->itemhandles || !key->str)
     return 0;
   for (i = 0; i < dict->numitems; i++)
-    if (same_cstr (dict->texts[i], key))
-      return ref_target (dict->itemhandles[i]);
+    {
+      const Match_Name text = field_name (dwg, dict->texts[i]);
+      if (same_match_name (&text, key, dwg->header.codepage))
+        return ref_target (dict->itemhandles[i]);
+    }
   return 0;
 }
 
@@ -421,18 +484,20 @@ find_dictionary_entry (const Dwg_Data *dst, const Dwg_Data *src,
   const Dwg_Object *nod = named_object_dictionary (src);
   const Dwg_Object *dst_nod = named_object_dictionary (dst);
   const Dwg_Object *dst_dictobj;
-  const char *key, *dict_name;
+  Match_Name key, dict_name;
   BITCODE_RLL found;
   if (!is_named_style (srcobj->fixedtype) || !dictobj || !nod || !dst_nod
       || owner_of (dictobj) != nod->handle.value)
     return 0;
-  key = dictionary_key (dictionary_of (dictobj), srcobj->handle.value);
-  dict_name = dictionary_key (dictionary_of (nod), dictobj->handle.value);
-  if (!key || !dict_name)
+  key = field_name (
+      src, dictionary_key (dictionary_of (dictobj), srcobj->handle.value));
+  dict_name = field_name (
+      src, dictionary_key (dictionary_of (nod), dictobj->handle.value));
+  if (!key.str || !dict_name.str)
     return 0;
   dst_dictobj = dwg_resolve_handle (
-      dst, dictionary_entry (dictionary_of (dst_nod), dict_name));
-  found = dictionary_entry (dictionary_of (dst_dictobj), key);
+      dst, dictionary_entry (dst, dictionary_of (dst_nod), &dict_name));
+  found = dictionary_entry (dst, dictionary_of (dst_dictobj), &key);
   if (!found && srcobj->fixedtype == DWG_TYPE_PLACEHOLDER && dst_dictobj
       && dst_dictobj->fixedtype == DWG_TYPE_DICTIONARYWDFLT)
     found

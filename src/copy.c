@@ -106,6 +106,8 @@ typedef struct _copy_chain
   BITCODE_BL max_unresolved;
   Copy_Kind src_kind, dst_kind;
   Copy_Tv tv;
+  /* the copy's XRECORD strings converted to other lengths */
+  int xdata_resized;
   int error;
 } Copy_Chain;
 
@@ -1201,9 +1203,53 @@ copy_eed (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
   return error;
 }
 
+/* The bytes XRECORD data takes in an r13 to r2004 DWG file, as the decoder
+   reads it: each item's type [RS], then its value. */
+static BITCODE_BL
+copy_xdata_size (const Dwg_Resbuf *restrict rbuf)
+{
+  size_t size = 0;
+  for (; rbuf; rbuf = rbuf->nextrb)
+    {
+      size += 2;
+      switch (dwg_resbuf_value_type (rbuf->type))
+        {
+        case DWG_VT_STRING: // length [RS], codepage [RC]
+          size += 3 + (size_t)rbuf->value.str.size;
+          break;
+        case DWG_VT_BINARY: // length [RC]
+          size += 1 + (size_t)rbuf->value.str.size;
+          break;
+        case DWG_VT_BOOL:
+        case DWG_VT_INT8:
+          size += 1;
+          break;
+        case DWG_VT_INT16:
+          size += 2;
+          break;
+        case DWG_VT_INT32:
+          size += 4;
+          break;
+        case DWG_VT_REAL:
+        case DWG_VT_INT64:
+        case DWG_VT_HANDLE:
+        case DWG_VT_OBJECTID:
+          size += 8;
+          break;
+        case DWG_VT_POINT3D:
+          size += 24;
+          break;
+        default:
+          break;
+        }
+    }
+  return (BITCODE_BL)size;
+}
+
 /* Copies an XRECORD's data, remapping its object handles: 330-369 and
    390-399. 320-329 are arbitrary handles, which AutoCAD doesn't translate
-   when it copies objects either. */
+   when it copies objects either. Its strings are converted as the others
+   are. */
 static void
 copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
             Dwg_Resbuf **restrict slot)
@@ -1230,8 +1276,7 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
       switch (dwg_resbuf_value_type (rbuf->type))
         {
         case DWG_VT_STRING:
-          /* converted as the other strings are, with its own codepage, as
-             the encoder converts it */
+          // with its own codepage, as the encoder converts it
           if (rbuf->value.str.u.data && !rbuf->value.str.is_tu
               && cdat->tv != COPY_TV_AS_IS)
             {
@@ -1260,6 +1305,8 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
                 }
               else
                 copy->value.str.size = (BITCODE_RS)strlen (conv);
+              if (copy->value.str.size != rbuf->value.str.size)
+                cdat->xdata_resized = 1;
               break;
             }
           // fall through
@@ -1475,15 +1522,35 @@ copy_is_value_type (const char *type)
   return 0;
 }
 
+/* An unsigned count of 1 to 8 bytes. */
+static uint64_t
+copy_count (const void *p, const size_t size)
+{
+  switch (size)
+    {
+    case 1:
+      return *(const uint8_t *)p;
+    case 2:
+      return *(const uint16_t *)p;
+    case 4:
+      return *(const uint32_t *)p;
+    case 8:
+      return *(const uint64_t *)p;
+    default:
+      return UINT64_MAX;
+    }
+}
+
 /* The walk runs the specs' statements that set fields from other fields, as
    the decoder needs them: LAYER's frozen, off, locked, plotflag and linewt
    from flag0, a table record's DXF flag from its bits, PROXY_ENTITY's
    versions. For a source read from a DWG file they change nothing, but a
    source built with the add API or imported from DXF or JSON can hold
    values they don't derive. So the copy's value fields take their
-   source's values again, but for counts, num_* and *_size, which the walk
-   may have set to the number of elements it copied (TABLESTYLE's three
-   row styles, IMAGE's two clip vertices of a rectangle). */
+   source's values again. A count (num_*, *_size) does so only when it is
+   no more than the walk's, which may have copied that many elements
+   (TABLESTYLE's three row styles, IMAGE's two clip vertices of a
+   rectangle). */
 static void
 copy_restore_values (const Dwg_DYNAPI_field *fields, void *restrict _obj,
                      const void *restrict src)
@@ -1494,12 +1561,15 @@ copy_restore_values (const Dwg_DYNAPI_field *fields, void *restrict _obj,
   for (f = fields; f->name; f++)
     {
       const size_t len = strlen (f->name);
-      if (f->is_malloc || !copy_is_value_type (f->type)
-          || memBEGINc (f->name, "num_")
-          || (len > 5 && strEQc (&f->name[len - 5], "_size")))
+      char *slot = (char *)_obj + f->offset;
+      const char *from = (const char *)src + f->offset;
+      if (f->is_malloc || !copy_is_value_type (f->type))
         continue;
-      memcpy ((char *)_obj + f->offset, (const char *)src + f->offset,
-              f->size);
+      if ((memBEGINc (f->name, "num_")
+           || (len > 5 && strEQc (&f->name[len - 5], "_size")))
+          && copy_count (from, f->size) > copy_count (slot, f->size))
+        continue;
+      memcpy (slot, from, f->size);
     }
 }
 
@@ -1534,9 +1604,9 @@ copy_layer_flag0 (const Dwg_Object_LAYER *restrict src, const Copy_Kind kind)
       off = src->off;
       plotflag = src->plotflag;
     }
-  return (BITCODE_BS)((frozen ? 1 : 0) | (off ? 2 : 0) | (frozen_in_new ? 4 : 0)
-                      | (locked ? 8 : 0) | (plotflag ? 16 : 0)
-                      | ((src->linewt & 0x1F) << 5));
+  return (BITCODE_BS)((frozen ? 1 : 0) | (off ? 2 : 0)
+                      | (frozen_in_new ? 4 : 0) | (locked ? 8 : 0)
+                      | (plotflag ? 16 : 0) | ((src->linewt & 0x1F) << 5));
 }
 
 /* A copy of a LAYER into a document of another kind holds its flags the
@@ -1649,6 +1719,48 @@ copy_fixup_after (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
     case DWG_TYPE_LAYER:
       copy_layer_flags (cdat, obj->tio.object->tio.LAYER,
                         srcobj->tio.object->tio.LAYER);
+      break;
+    /* The encoder of a document read from a DWG file writes xdata_size as
+       it is, so it follows strings converted to other lengths. */
+    case DWG_TYPE_XRECORD:
+      if (cdat->xdata_resized)
+        {
+          Dwg_Object_XRECORD *_obj = obj->tio.object->tio.XRECORD;
+          _obj->xdata_size = copy_xdata_size (_obj->xdata);
+          cdat->xdata_resized = 0;
+        }
+      break;
+    /* The walk sets each vertex's num_lines to the MLINE's, as the decoder
+       needs it, where a DXF import leaves 0, and copies the MLINE's
+       num_lines lines of each. The vertices' counts take their sources'
+       values again as copy_restore_values () gives counts theirs. */
+    case DWG_TYPE_MLINE:
+      {
+        Dwg_Entity_MLINE *_obj = obj->tio.entity->tio.MLINE;
+        const Dwg_Entity_MLINE *src = srcobj->tio.entity->tio.MLINE;
+        BITCODE_BS i;
+        for (i = 0; _obj->verts && src->verts && i < _obj->num_verts; i++)
+          if (src->verts[i].num_lines <= _obj->verts[i].num_lines)
+            _obj->verts[i].num_lines = src->verts[i].num_lines;
+      }
+      break;
+    /* A DWG file has no control points or knots for a fit-point spline
+       (scenario 2), but the DXF importer sets them, and the spec walk
+       leaves them out there. */
+    case DWG_TYPE_SPLINE:
+      {
+        Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
+        BITCODE_BL i;
+        if (_obj->scenario & 1)
+          break;
+        (void)copy_vector (cdat, (void **)&_obj->knots, _obj->num_knots,
+                           sizeof (BITCODE_BD));
+        (void)copy_vector (cdat, (void **)&_obj->ctrl_pts,
+                           _obj->num_ctrl_pts,
+                           sizeof (Dwg_SPLINE_control_point));
+        for (i = 0; _obj->ctrl_pts && i < _obj->num_ctrl_pts; i++)
+          _obj->ctrl_pts[i].parent = _obj;
+      }
       break;
     default:
       break;

@@ -118,14 +118,19 @@ ref_handle (const Dwg_Object_Ref *ref)
   return ref ? ref->absolute_ref : 0;
 }
 
-/* A UTF-8 copy of a string of dwg, which r2004 keeps in its codepage. */
+/* A UTF-8 copy of a string of dwg, with \U+XXXX as the character. r2004
+   keeps strings in its codepage, but for documents imported from JSON or
+   built with the add API, which keep UTF-8 (bit_write_TV () converts
+   those). */
 static char *
 utf8_copy (const Dwg_Data *dwg, const char *str)
 {
   char *utf8;
   if (!str)
     return strdup ("");
-  utf8 = bit_TV_to_utf8 (str, dwg->header.codepage);
+  utf8 = bit_TV_to_utf8 (str, (dwg->opts & DWG_OPTS_INJSON)
+                                  ? (BITCODE_RS)CP_UTF8
+                                  : dwg->header.codepage);
   if (!utf8)
     return NULL;
   return utf8 == str ? strdup (str) : utf8;
