@@ -152,6 +152,14 @@ block_handle (const Dwg_Object_BLOCK_HEADER *blk)
   return dwg->object[blk->parent->objid].handle.value;
 }
 
+/* The handle of model space's block, or 0. */
+static BITCODE_RLL
+model_space (Dwg_Data *dwg)
+{
+  const Dwg_Object_Ref *ref = dwg_model_space_ref (dwg);
+  return ref ? ref->absolute_ref : 0;
+}
+
 /* The items of entity obj's EED group with the APPID named appname: the
    index of its 71 item and the value of its 1005 item. Returns 0 when it
    has no such group. */
@@ -407,9 +415,8 @@ test_params (Dwg_Data *dwg)
   n = 0;
 
   // a block that isn't a dynamic block definition
-  error = dwg_dynblock_get_params (
-      block_header (dwg, dwg_model_space_ref (dwg)->absolute_ref), &params,
-      &n);
+  error = dwg_dynblock_get_params (block_header (dwg, model_space (dwg)),
+                                   &params, &n);
   loglevel = test_loglevel;
   if (error == REFUSED (DWG_ERR_INVALIDTYPE) && !params && !n)
     OK ("get_params model space: refused, 0x%x", error);
@@ -419,6 +426,65 @@ test_params (Dwg_Data *dwg)
       failures++;
     }
   dwg_dynblock_free_params (params, n);
+  return failures;
+}
+
+/* A rotation parameter whose end point is turned a hair clockwise from its
+   base angle has the angle 0, not 2 pi: here the Toilet's Angle, its end
+   point turned by -1e-17 radians, which plus 2 pi rounds to 2 pi. */
+static int
+test_rotation_default (Dwg_Data *dwg)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = definition_graph (dwg, TOILET);
+  Dwg_Object_BLOCKROTATIONPARAMETER *rotation = NULL;
+  BITCODE_3BD basept, endpt, base_angle_pt;
+  Dwg_DynParam *params = NULL;
+  const Dwg_DynParam *angle;
+  BITCODE_BL n = 0;
+  volatile double tiny = -1e-17;
+  int error, failures = 0;
+  for (BITCODE_BL i = 0; graph && graph->nodes && i < graph->num_nodes; i++)
+    {
+      Dwg_Object *obj = dwg_ref_object (dwg, graph->nodes[i].evalexpr);
+      if (obj && obj->fixedtype == DWG_TYPE_BLOCKROTATIONPARAMETER)
+        rotation = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+    }
+  loglevel = test_loglevel;
+  if (!rotation)
+    {
+      fail ("rotation default: the Toilet's rotation parameter not found");
+      return 1;
+    }
+  if (tiny + 2.0 * M_PI < 2.0 * M_PI)
+    {
+      fail ("rotation default: %g plus 2 pi doesn't round to 2 pi",
+            (double)tiny);
+      return 1;
+    }
+  basept = rotation->def_basept;
+  endpt = rotation->def_endpt;
+  base_angle_pt = rotation->def_base_angle_pt;
+  memset (&rotation->def_basept, 0, sizeof (BITCODE_3BD));
+  memset (&rotation->def_base_angle_pt, 0, sizeof (BITCODE_3BD));
+  rotation->def_base_angle_pt.x = 1.0;
+  rotation->def_endpt = rotation->def_base_angle_pt;
+  rotation->def_endpt.y = tiny;
+  error = dwg_dynblock_get_params (block_header (dwg, TOILET), &params, &n);
+  loglevel = test_loglevel;
+  angle = error ? NULL : find_param (params, n, "Angle");
+  if (angle && angle->kind == DWG_DYNPARAM_ROTATION
+      && angle->default_value == 0.0)
+    OK ("get_params: a rotation a hair below 0 is 0, not 2 pi");
+  else
+    {
+      fail ("get_params Toilet: 0x%x, Angle %.17g, expected 0", error,
+            angle ? angle->default_value : -1.0);
+      failures++;
+    }
+  dwg_dynblock_free_params (params, n);
+  rotation->def_basept = basept;
+  rotation->def_endpt = endpt;
+  rotation->def_base_angle_pt = base_angle_pt;
   return failures;
 }
 
@@ -608,8 +674,8 @@ test_refusals (Dwg_Data *dwg)
   failures += test_refusal (dwg, TREES, v, 2,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a property given twice");
-  failures += test_refusal (dwg, dwg_model_space_ref (dwg)->absolute_ref,
-                            NULL, 0, REFUSED (DWG_ERR_INVALIDTYPE),
+  failures += test_refusal (dwg, model_space (dwg), NULL, 0,
+                            REFUSED (DWG_ERR_INVALIDTYPE),
                             "a block that isn't dynamic");
   {
     BITCODE_H second = window->entities[1];
@@ -654,6 +720,27 @@ test_refusals (Dwg_Data *dwg)
         failures++;
       }
     dwg_dynblock_free_params (params, n);
+    // W4's values, which name the Window
+    {
+      Dwg_Object_BLOCK_HEADER *defp = NULL;
+      Dwg_DynValue *values = NULL;
+      BITCODE_BL count = 0;
+      error = dwg_dynblock_get_values (insert_entity (dwg, 0xC8D3), &defp,
+                                       &values, &count);
+      loglevel = test_loglevel;
+      if (error == REFUSED (DWG_ERR_INVALIDHANDLE) && !defp && !values
+          && !count)
+        OK ("get_values refuses a graph node that doesn't resolve: 0x%x",
+            error);
+      else
+        {
+          fail ("get_values of a graph node that doesn't resolve: 0x%x, %u "
+                "values",
+                error, (unsigned)count);
+          failures++;
+        }
+      dwg_dynblock_free_values (values, count);
+    }
     graph->nodes[0].evalexpr = node;
   }
   // an INSERT of a definition owning an object that isn't an entity
@@ -701,6 +788,11 @@ check_evaluated (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, def_handle);
   const Dwg_Object_BLOCK_HEADER *rep = block_header (dwg, rep_handle);
   BITCODE_BL shown = 0;
+  if (!def)
+    {
+      fail ("%s: definition " FORMAT_HV " not found", what, def_handle);
+      return 1;
+    }
   if (!rep || !rep->anonymous || !rep->name || strcmp (rep->name, "*U")
       || rep->num_owned != def->num_owned || !rep->block_entity
       || !rep->endblk_entity
@@ -1097,7 +1189,7 @@ static Dwg_Object *rep_entity (Dwg_Data *dwg, const BITCODE_RLL blk_handle,
                                const BITCODE_RL idx);
 
 /* Appends an entity to the list of stretch action a, with the given stretch
-   points. Returns 0 when memory runs out. */
+   points, or none. Returns 0 when memory runs out. */
 static int
 add_stretch_entity (Dwg_Data *dwg, Dwg_Object_BLOCKSTRETCHACTION *a,
                     const BITCODE_RLL handle, const BITCODE_BL *indexes,
@@ -1113,11 +1205,14 @@ add_stretch_entity (Dwg_Data *dwg, Dwg_Object_BLOCKSTRETCHACTION *a,
   memset (h, 0, sizeof (*h));
   h->parent = a;
   h->hdl = dwg_add_handleref (dwg, 4, handle, NULL);
-  h->indexes = (BITCODE_BL *)malloc (num_indexes * sizeof (BITCODE_BL));
-  if (!h->indexes)
-    return 0;
-  memcpy (h->indexes, indexes, num_indexes * sizeof (BITCODE_BL));
-  h->num_indexes = num_indexes;
+  if (num_indexes)
+    {
+      h->indexes = (BITCODE_BL *)malloc (num_indexes * sizeof (BITCODE_BL));
+      if (!h->indexes)
+        return 0;
+      memcpy (h->indexes, indexes, num_indexes * sizeof (BITCODE_BL));
+      h->num_indexes = num_indexes;
+    }
   a->num_hdls++;
   return 1;
 }
@@ -1130,8 +1225,12 @@ pop_stretch_entity (Dwg_Object_BLOCKSTRETCHACTION *a)
   free (a->hdls[a->num_hdls].indexes);
 }
 
-/* Appends to stretch action a a stretch point (0 its base, 1 its end) of
-   the parameter with node id nodeid. Returns 0 when memory runs out. */
+/* The index add_stretch_code () takes for no stretch point. */
+#define NO_POINT 0xFFFFFFFF
+
+/* Appends to stretch action a the parameter with node id nodeid, with one
+   stretch point (0 its base, 1 its end), or with none when index is
+   NO_POINT. Returns 0 when memory runs out. */
 static int
 add_stretch_code (Dwg_Object_BLOCKSTRETCHACTION *a, const BITCODE_BL nodeid,
                   const BITCODE_BL index)
@@ -1146,11 +1245,14 @@ add_stretch_code (Dwg_Object_BLOCKSTRETCHACTION *a, const BITCODE_BL nodeid,
   memset (c, 0, sizeof (*c));
   c->parent = a;
   c->bl95 = nodeid;
-  c->indexes = (BITCODE_BL *)malloc (sizeof (BITCODE_BL));
-  if (!c->indexes)
-    return 0;
-  c->indexes[0] = index;
-  c->num_indexes = 1;
+  if (index != NO_POINT)
+    {
+      c->indexes = (BITCODE_BL *)malloc (sizeof (BITCODE_BL));
+      if (!c->indexes)
+        return 0;
+      c->indexes[0] = index;
+      c->num_indexes = 1;
+    }
   a->num_codes++;
   return 1;
 }
@@ -1162,18 +1264,27 @@ pop_stretch_code (Dwg_Object_BLOCKSTRETCHACTION *a)
   free (a->codes[a->num_codes].indexes);
 }
 
+/* Appends an object to the selection *deps of *num_deps objects of an
+   action. */
+static int
+add_dep (Dwg_Data *dwg, BITCODE_H **deps, BITCODE_BL *num_deps,
+         const BITCODE_RLL handle)
+{
+  BITCODE_H *more
+      = (BITCODE_H *)realloc (*deps, (*num_deps + 1) * sizeof (BITCODE_H));
+  if (!more)
+    return 0;
+  *deps = more;
+  more[(*num_deps)++] = dwg_add_handleref (dwg, 4, handle, NULL);
+  return 1;
+}
+
 /* Appends an entity to the selection of move action a. */
 static int
 add_move_entity (Dwg_Data *dwg, Dwg_Object_BLOCKMOVEACTION *a,
                  const BITCODE_RLL handle)
 {
-  BITCODE_H *deps
-      = (BITCODE_H *)realloc (a->deps, (a->num_deps + 1) * sizeof (BITCODE_H));
-  if (!deps)
-    return 0;
-  a->deps = deps;
-  deps[a->num_deps++] = dwg_add_handleref (dwg, 4, handle, NULL);
-  return 1;
+  return add_dep (dwg, &a->deps, &a->num_deps, handle);
 }
 
 static int
@@ -1332,6 +1443,95 @@ test_linear_order (Dwg_Data *dwg)
       failures++;
     }
   pop_stretch_code (height);
+  return failures;
+}
+
+/* Actions that move each other's parameters: 'Stretch Width' made to move
+   the end point of Window Height, and 'Stretch Height' that of Window
+   Width. Only the actions of the properties given a value run, so the
+   Window evaluates with no values, and with Width alone, whose stretch
+   then moves Height's end point; with both changed, the order AutoCAD
+   evaluates them in isn't known, and the evaluator refuses them. */
+static int
+test_linear_cycle (Dwg_Data *dwg)
+{
+  const Dwg_Object_BLOCK_HEADER *def = block_header (dwg, WINDOW);
+  Dwg_Object_BLOCKSTRETCHACTION *width_stretch
+      = stretch_action (dwg, WINDOW, "Stretch Width");
+  Dwg_Object_BLOCKSTRETCHACTION *height_stretch
+      = stretch_action (dwg, WINDOW, "Stretch Height");
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  Dwg_Object_BLOCKLINEARPARAMETER *height
+      = linear_param (dwg, WINDOW, "Window Height");
+  const Dwg_Object_BLOCK_HEADER *rep;
+  const Dwg_Object *frame;
+  Dwg_DynValue v[2];
+  int failures = 0;
+  memset (v, 0, sizeof (v));
+  if (!def || !width_stretch || !height_stretch || !width || !height)
+    {
+      fail ("linear cycle: fixture objects not found");
+      return 1;
+    }
+  if (!add_stretch_code (width_stretch, height->evalexpr.nodeid, 1))
+    {
+      fail ("linear cycle: out of memory");
+      return 1;
+    }
+  if (!add_stretch_code (height_stretch, width->evalexpr.nodeid, 1))
+    {
+      fail ("linear cycle: out of memory");
+      pop_stretch_code (width_stretch);
+      return 1;
+    }
+  v[0].name = (char *)"Window Width";
+  v[0].value = 24.0;
+  v[1].name = (char *)"Window Height";
+  v[1].value = 54.0;
+
+  rep = evaluate (dwg, WINDOW, NULL, 0, "linear cycle, no values");
+  frame = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+  if (frame && frame->fixedtype == DWG_TYPE_LWPOLYLINE
+      && frame->tio.entity->tio.LWPOLYLINE->num_points == 4
+      && is_point (frame->tio.entity->tio.LWPOLYLINE->points[2].x,
+                   frame->tio.entity->tio.LWPOLYLINE->points[2].y, 36.0, 36.0))
+    OK ("linear cycle: the Window evaluates with no values");
+  else if (rep)
+    {
+      fail ("linear cycle: no values moved the frame");
+      failures++;
+    }
+  else
+    failures++;
+
+  // as in test_linear: the frame's vertices 2 and 3 move to x 24
+  rep = evaluate (dwg, WINDOW, v, 1, "linear cycle, Width alone");
+  frame = rep ? copy_of (dwg, def, rep, 0xBBD3) : NULL;
+  if (frame && frame->fixedtype == DWG_TYPE_LWPOLYLINE
+      && frame->tio.entity->tio.LWPOLYLINE->num_points == 4
+      && is_point (frame->tio.entity->tio.LWPOLYLINE->points[1].x,
+                   frame->tio.entity->tio.LWPOLYLINE->points[1].y, 0.0, 36.0)
+      && is_point (frame->tio.entity->tio.LWPOLYLINE->points[2].x,
+                   frame->tio.entity->tio.LWPOLYLINE->points[2].y, 24.0, 36.0)
+      && is_point (frame->tio.entity->tio.LWPOLYLINE->points[3].x,
+                   frame->tio.entity->tio.LWPOLYLINE->points[3].y, 24.0, 0.0))
+    OK ("linear cycle: Width alone runs only Width's stretch");
+  else if (rep)
+    {
+      fail ("linear cycle: Width alone doesn't stretch the frame as "
+            "expected");
+      failures++;
+    }
+  else
+    failures++;
+
+  failures += test_refusal (dwg, WINDOW, v, 2,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "linear values whose actions move each other's "
+                            "parameters");
+  pop_stretch_code (height_stretch);
+  pop_stretch_code (width_stretch);
   return failures;
 }
 
@@ -1520,13 +1720,6 @@ test_linear_refusals (Dwg_Data *dwg)
                                 REFUSED (DWG_ERR_NOTYETSUPPORTED),
                                 "a parameter chaining its actions");
       height->chain_actions = 0;
-      // and Height's stretch moves Width's
-      if (add_stretch_code (height_stretch, width->evalexpr.nodeid, 1))
-        {
-          failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
-                                    "actions moving each other's parameters");
-          pop_stretch_code (height_stretch);
-        }
       pop_stretch_code (stretch);
     }
 
@@ -2016,6 +2209,99 @@ test_stretch_whole (Dwg_Data *dwg)
                                 "a HATCH crossing the frame");
       pop_stretch_entity (stretch);
     }
+  return failures;
+}
+
+/* AutoCAD moves whole an entity or parameter of a stretch action's
+   selection that lies wholly outside its frame, with none of its points
+   listed; the evaluator refuses one, before adding anything. Here a LINE
+   added to the Window outside 'Stretch Width''s frame joins the action's
+   selection with no stretch point listed, or listed with none; and the
+   action lists Window Height with none of its points. The parameter and
+   grip the fixture's selection holds are allowed, as test_linear shows. */
+static int
+test_stretch_selection (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCK_HEADER *def = block_header (dwg, WINDOW);
+  Dwg_Object_BLOCKSTRETCHACTION *stretch
+      = stretch_action (dwg, WINDOW, "Stretch Width");
+  Dwg_Object_BLOCKLINEARPARAMETER *height
+      = linear_param (dwg, WINDOW, "Window Height");
+  const dwg_point_3d start = { 50.0, 0.0, 0.0 };
+  const dwg_point_3d end = { 50.0, 10.0, 0.0 };
+  Dwg_Entity_LINE *line;
+  BITCODE_RLL h_line;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!def || !stretch || !height)
+    {
+      fail ("stretch selection: fixture objects not found");
+      return 1;
+    }
+  line = dwg_add_LINE (def, &start, &end);
+  loglevel = test_loglevel;
+  if (!line)
+    {
+      fail ("stretch selection: could not add the LINE");
+      return 1;
+    }
+  h_line = entity_handle (dwg, line->parent);
+  v.name = (char *)"Window Width";
+  v.value = 24.0;
+
+  if (!add_dep (dwg, &stretch->deps, &stretch->num_deps, h_line))
+    {
+      fail ("stretch selection: out of memory");
+      return 1;
+    }
+  failures += test_refusal (dwg, WINDOW, &v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a selected LINE with no stretch point listed");
+  if (add_stretch_entity (dwg, stretch, h_line, NULL, 0))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a selected LINE listed with no stretch "
+                                "point");
+      pop_stretch_entity (stretch);
+    }
+  else
+    {
+      fail ("stretch selection: out of memory");
+      failures++;
+    }
+  stretch->num_deps--;
+  // listed with no stretch point, though not selected
+  if (add_stretch_entity (dwg, stretch, h_line, NULL, 0))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a LINE listed with no stretch point");
+      pop_stretch_entity (stretch);
+    }
+  if (add_stretch_code (stretch, height->evalexpr.nodeid, NO_POINT))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a selected parameter with none of its "
+                                "points listed");
+      pop_stretch_code (stretch);
+    }
+  // the Window's extension dictionary, neither an entity of it nor a node
+  if (add_dep (dwg, &stretch->deps, &stretch->num_deps,
+               def->parent->xdicobjhandle->absolute_ref))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a stretch selecting an object outside the "
+                                "definition");
+      stretch->num_deps--;
+    }
+  if (evaluate (dwg, WINDOW, &v, 1, "stretch selection, restored"))
+    OK ("stretch selection: the Window evaluates again as AutoCAD lists it");
+  else
+    failures++;
   return failures;
 }
 
@@ -3011,8 +3297,7 @@ static int
 line_to_polyline (Dwg_Data *dwg, const BITCODE_RLL handle,
                   const dwg_point_2d *pts)
 {
-  Dwg_Object_BLOCK_HEADER *mspace = block_header (
-      dwg, dwg_model_space_ref (dwg)->absolute_ref);
+  Dwg_Object_BLOCK_HEADER *mspace = block_header (dwg, model_space (dwg));
   Dwg_Entity_POLYLINE_2D *donor
       = mspace ? dwg_add_POLYLINE_2D (mspace, 3, pts) : NULL;
   Dwg_Entity_POLYLINE_2D *pline;
@@ -3173,6 +3458,421 @@ test_check_owned (Dwg_Data *dwg)
   return failures;
 }
 
+/* Turns LINE obj into a TEXT of string text, in the drawing's codepage.
+   Returns 0 when obj is not a LINE or memory runs out. */
+static int
+line_to_text (Dwg_Object *obj, const char *text)
+{
+  Dwg_Entity_TEXT *_text;
+  if (!obj || obj->fixedtype != DWG_TYPE_LINE)
+    return 0;
+  _text = (Dwg_Entity_TEXT *)calloc (1, sizeof (Dwg_Entity_TEXT));
+  if (!_text)
+    return 0;
+  _text->text_value = strdup (text);
+  if (!_text->text_value)
+    {
+      free (_text);
+      return 0;
+    }
+  _text->extrusion.z = 1.0;
+  _text->height = 1.0;
+  _text->width_factor = 1.0;
+  _text->parent = obj->tio.entity;
+  // a LINE holds no pointer but its parent
+  free (obj->tio.entity->tio.LINE);
+  obj->tio.entity->tio.TEXT = _text;
+  obj->type = obj->fixedtype = DWG_TYPE_TEXT;
+  obj->name = (char *)"TEXT";
+  obj->dxfname = (char *)"TEXT";
+  return 1;
+}
+
+/* Whether s is whole UTF-8 characters. */
+static int
+is_utf8 (const char *s)
+{
+  const unsigned char *p = (const unsigned char *)s;
+  while (*p)
+    {
+      const int n = *p < 0x80             ? 0
+                    : (*p & 0xE0) == 0xC0 ? 1
+                    : (*p & 0xF0) == 0xE0 ? 2
+                    : (*p & 0xF8) == 0xF0 ? 3
+                                          : -1;
+      if (n < 0)
+        return 0;
+      p++;
+      for (int i = 0; i < n; i++, p++)
+        if ((*p & 0xC0) != 0x80)
+          return 0;
+    }
+  return 1;
+}
+
+/* The length of reason after the text AutoCAD's string starts with, or
+   -1. */
+static int
+acad_string_length (const char *reason)
+{
+  static const char start[] = "AutoCAD's \"";
+  const char *s = reason ? strstr (reason, start) : NULL;
+  return s ? (int)strlen (s + strlen (start)) : -1;
+}
+
+/* The check gives the strings it finds differing in UTF-8, from the
+   drawing's codepage, Windows-1252 here. A LINE of Trees, and its copy in
+   each Trees placement's block, becomes a TEXT: "abc" in the definition,
+   but "caf\xe9" (e acute) in R1's block, and 200 e acutes in R2's and R3's,
+   after one and two letters, which the reason cuts short. One of the two
+   cuts falls inside a two-byte character, which the reason leaves out, so
+   that it ends at a whole character. */
+static int
+test_check_utf8 (Dwg_Data *dwg)
+{
+  const Dwg_Object *r1_line = first_of_type (dwg, 0xCFF7, DWG_TYPE_LINE);
+  char long_text[2][204];
+  Dwg_DynBlock_Check_Report *report;
+  const Dwg_DynBlock_Check *c;
+  BITCODE_RL idx = 0;
+  BITCODE_RLL self = 0;
+  BITCODE_BL num_trees = 0;
+  int len[2], failures = 0;
+  loglevel = test_loglevel;
+  for (int k = 0; k < 2; k++)
+    {
+      memset (long_text[k], 'x', (size_t)k + 1);
+      memset (&long_text[k][k + 1], 0xE9, 200);
+      long_text[k][k + 201] = '\0';
+    }
+  if (dwg->header.codepage != 30 // ANSI_1252
+      || !r1_line || !etag (dwg, r1_line, &idx, &self)
+      || !line_to_text (rep_entity (dwg, TREES, idx), "abc"))
+    {
+      fail ("check utf8: fixture LINE of Trees not found, or codepage %u",
+            (unsigned)dwg->header.codepage);
+      return 1;
+    }
+  for (size_t i = 0; i < NUM_CHECKS; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      const char *text = e->block == 0xCFF7   ? "caf\xe9"
+                         : e->block == 0xD24A ? long_text[0]
+                         : e->block == 0xD49D ? long_text[1]
+                                              : "abc";
+      if (e->definition != TREES)
+        continue;
+      if (!line_to_text (rep_entity (dwg, e->block, idx), text))
+        {
+          fail ("check utf8: " FORMAT_HV " has no LINE %u", e->block,
+                (unsigned)idx);
+          return 1;
+        }
+      num_trees++;
+    }
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check utf8: no report");
+      return 1;
+    }
+  c = find_check (report, 0xC8E0, 0xCFF7);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->reason
+      && strstr (c->reason, "text_value is \"abc\", AutoCAD's "
+                            "\"caf\xc3\xa9\""))
+    OK ("check utf8: R1's string in UTF-8: %s", c->reason);
+  else
+    {
+      fail ("check utf8 R1: status %d, %s", c ? (int)c->status : -1,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  for (int k = 0; k < 2; k++)
+    {
+      c = find_check (report, k ? 0xC8E2 : 0xC8E1, k ? 0xD49D : 0xD24A);
+      len[k] = c ? acad_string_length (c->reason) : -1;
+      if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->reason
+          && is_utf8 (c->reason) && strstr (c->reason, "\xc3\xa9")
+          && len[k] > 0 && len[k] < 2 * 200)
+        OK ("check utf8: R%d's reason is cut short at a whole character",
+            k + 2);
+      else
+        {
+          fail ("check utf8 R%d: status %d, %s", k + 2,
+                c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+          failures++;
+        }
+    }
+  if (abs (len[0] - len[1]) == 1)
+    OK ("check utf8: one of the cuts left out a part character");
+  else
+    {
+      fail ("check utf8: AutoCAD's strings cut to %d and %d bytes", len[0],
+            len[1]);
+      failures++;
+    }
+  c = find_check (report, 0xC145, 0xB6AC);
+  if (num_trees < 4 || !c || c->status != MATCH)
+    {
+      fail ("check utf8: %u Trees placements, C145 status %d",
+            (unsigned)num_trees, c ? (int)c->status : -1);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
+/* The object or entity obj's EED, of *countp entries. */
+static Dwg_Eed *
+object_eed (Dwg_Object *obj, BITCODE_BL *countp)
+{
+  if (obj->supertype == DWG_SUPERTYPE_ENTITY)
+    {
+      *countp = obj->tio.entity->num_eed;
+      return obj->tio.entity->eed;
+    }
+  *countp = obj->tio.object->num_eed;
+  return obj->tio.object->eed;
+}
+
+/* Makes the AcDbBlockRepBTag EED of representation block blk name
+   definition def. Returns 0 when blk has none. */
+static int
+set_btag (Dwg_Data *dwg, const BITCODE_RLL blk, const BITCODE_RLL def)
+{
+  Dwg_Object *obj = dwg_resolve_handle (dwg, blk);
+  BITCODE_BL num_eed = 0;
+  Dwg_Eed *eed = obj ? object_eed (obj, &num_eed) : NULL;
+  int in_group = 0;
+  for (BITCODE_BL i = 0; eed && i < num_eed; i++)
+    {
+      if (eed[i].size)
+        {
+          const Dwg_Object *appid
+              = dwg_resolve_handle (dwg, eed[i].handle.value);
+          in_group = appid && appid->fixedtype == DWG_TYPE_APPID
+                     && !strcmp (appid->tio.object->tio.APPID->name,
+                                 "AcDbBlockRepBTag");
+        }
+      // Dwg_Eed_Data is packed
+      if (in_group && eed[i].data && eed[i].data->code == 5)
+        {
+          memcpy (&eed[i].data->u.eed_5.entity, &def, sizeof (def));
+          return 1;
+        }
+    }
+  return 0;
+}
+
+/* The XRECORD of a placement's stored values for the graph node with node
+   id nodeid, or NULL. */
+static Dwg_Object_XRECORD *
+stored_value (Dwg_Data *dwg, const BITCODE_RLL insert, const BITCODE_BL nodeid)
+{
+  Dwg_Object *obj = dwg_resolve_handle (dwg, insert);
+  Dwg_Object *data;
+  char key[16];
+  if (!obj || obj->supertype != DWG_SUPERTYPE_ENTITY)
+    return NULL;
+  data = dict_entry (
+      dwg,
+      dict_entry (dwg,
+                  dict_entry (dwg,
+                              dwg_ref_object (dwg,
+                                              obj->tio.entity->xdicobjhandle),
+                              "AcDbBlockRepresentation"),
+                  "AppDataCache"),
+      "ACAD_ENHANCEDBLOCKDATA");
+  snprintf (key, sizeof (key), "%u", (unsigned)nodeid);
+  obj = dict_entry (dwg, data, key);
+  return obj && obj->fixedtype == DWG_TYPE_XRECORD
+             ? obj->tio.object->tio.XRECORD
+             : NULL;
+}
+
+/* How the check reports a placement whose values can't be read: as failed
+   when they are damaged, here W4's stored Window Width, whose first point
+   item (10) is made 11, and the Door's placements, whose definition has a
+   graph node that doesn't resolve; as unsupported when the drawing isn't
+   r2004. Each names the definition the placement's values name, here the
+   Door for D1, whose block's AcDbBlockRepBTag is made to name the
+   Window. */
+static int
+test_check_status (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  Dwg_Object_EVALUATION_GRAPH *door_graph = definition_graph (dwg, DOOR);
+  Dwg_Object_XRECORD *xrecord
+      = width ? stored_value (dwg, 0xC8D3, width->evalexpr.nodeid) : NULL;
+  Dwg_DynBlock_Check_Report *report;
+  const Dwg_DynBlock_Check *c;
+  const Dwg_Version_Type version = dwg->header.from_version;
+  BITCODE_BL num_door = 0, num_failed = 0;
+  int damaged = 0, failures = 0;
+  loglevel = test_loglevel;
+  for (Dwg_Resbuf *rb = xrecord ? xrecord->xdata : NULL; rb && !damaged;
+       rb = rb->nextrb)
+    if (rb->type == 10)
+      {
+        rb->type = 11;
+        damaged = 1;
+      }
+  if (!damaged || !door_graph || !door_graph->nodes
+      || !door_graph->num_nodes || !set_btag (dwg, 0xC9F2, WINDOW))
+    {
+      fail ("check status: fixture objects not found");
+      return 1;
+    }
+  door_graph->nodes[0].evalexpr = dwg_add_handleref (dwg, 4, 0xFFFFFE, NULL);
+
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check status: no report");
+      return 1;
+    }
+  c = find_check (report, 0xC8D3, 0xC9C8);
+  if (c && c->status == DWG_DYNBLOCK_CHECK_FAILED && c->definition == WINDOW
+      && !c->evaluated && c->reason
+      && strstr (c->reason, "not in the layout AutoCAD writes"))
+    OK ("check status: damaged values fail, naming the Window: %s",
+        c->reason);
+  else
+    {
+      fail ("check status W4: status %d, definition " FORMAT_HV ", %s",
+            c ? (int)c->status : -1, c ? c->definition : 0,
+            c && c->reason ? c->reason : "");
+      failures++;
+    }
+  for (size_t i = 0; i < NUM_CHECKS; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      if (e->definition != DOOR)
+        continue;
+      c = find_check (report, e->insert, e->block);
+      num_door++;
+      if (c && c->status == DWG_DYNBLOCK_CHECK_FAILED
+          && c->definition == DOOR && c->reason
+          && strstr (c->reason, "doesn't resolve"))
+        OK ("check status " FORMAT_HV ": a graph node that doesn't resolve "
+            "fails, naming the Door",
+            e->insert);
+      else
+        {
+          fail ("check status " FORMAT_HV ": status %d, definition " FORMAT_HV
+                ", %s",
+                e->insert, c ? (int)c->status : -1, c ? c->definition : 0,
+                c && c->reason ? c->reason : "");
+          failures++;
+        }
+    }
+  num_failed = report->num_failed;
+  if (num_door != 5 || num_failed != num_door + 1)
+    {
+      fail ("check status: %u failed, expected %u", (unsigned)num_failed,
+            (unsigned)num_door + 1);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+
+  // reading the values refuses a drawing other than r2004
+  dwg->header.from_version = R_2000;
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  dwg->header.from_version = version;
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check status: no report");
+      return failures + 1;
+    }
+  c = find_check (report, 0xC8D5, 0xC9F2);
+  if (report->num_unsupported == NUM_CHECKS && !report->num_failed && c
+      && c->definition == DOOR && c->reason && strstr (c->reason, "r2004"))
+    OK ("check status: a drawing other than r2004 is unsupported, naming "
+        "the definitions: %s",
+        c->reason);
+  else
+    {
+      fail ("check status, not r2004: %u unsupported, %u failed, D1 "
+            "definition " FORMAT_HV ", %s",
+            (unsigned)report->num_unsupported, (unsigned)report->num_failed,
+            c ? c->definition : 0, c && c->reason ? c->reason : "");
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
+/* The check reports the placements of a block whose linear properties'
+   actions move each other's parameters as unsupported, not failed: here
+   the Window with test_linear_cycle's codes, whose placements each store
+   both its linear values, which the check gives the evaluator. */
+static int
+test_check_cycle (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCKSTRETCHACTION *width_stretch
+      = stretch_action (dwg, WINDOW, "Stretch Width");
+  Dwg_Object_BLOCKSTRETCHACTION *height_stretch
+      = stretch_action (dwg, WINDOW, "Stretch Height");
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  Dwg_Object_BLOCKLINEARPARAMETER *height
+      = linear_param (dwg, WINDOW, "Window Height");
+  Dwg_DynBlock_Check_Report *report;
+  BITCODE_BL num_window = 0;
+  int failures = 0;
+  loglevel = test_loglevel;
+  if (!width_stretch || !height_stretch || !width || !height
+      || !add_stretch_code (width_stretch, height->evalexpr.nodeid, 1)
+      || !add_stretch_code (height_stretch, width->evalexpr.nodeid, 1))
+    {
+      fail ("check cycle: fixture objects not found");
+      return 1;
+    }
+  report = dwg_dynblock_check (dwg, TOLERANCE);
+  loglevel = test_loglevel;
+  if (!report)
+    {
+      fail ("check cycle: no report");
+      return 1;
+    }
+  for (size_t i = 0; i < NUM_CHECKS; i++)
+    {
+      const Expected_Check *e = &expected_checks[i];
+      const Dwg_DynBlock_Check *c;
+      if (e->definition != WINDOW)
+        continue;
+      c = find_check (report, e->insert, e->block);
+      num_window++;
+      if (c && c->status == UNSUPPORTED && c->definition == WINDOW
+          && c->reason && strstr (c->reason, "cycle"))
+        OK ("check cycle " FORMAT_HV ": unsupported: %s", e->insert,
+            c->reason);
+      else
+        {
+          fail ("check cycle " FORMAT_HV ": status %d, %s", e->insert,
+                c ? (int)c->status : -1, c && c->reason ? c->reason : "");
+          failures++;
+        }
+    }
+  if (num_window != 5 || report->num_failed
+      || report->num_unsupported != expected (UNSUPPORTED) + num_window
+      || report->num_match != expected (MATCH) - num_window)
+    {
+      fail ("check cycle: %u Window placements, %u match, %u unsupported, "
+            "%u failed",
+            (unsigned)num_window, (unsigned)report->num_match,
+            (unsigned)report->num_unsupported, (unsigned)report->num_failed);
+      failures++;
+    }
+  dwg_dynblock_free_check_report (report);
+  return failures;
+}
+
 /* Reads the fixture into dwg, runs test on it, and frees it. */
 static int
 on_fixture (int (*test) (Dwg_Data *))
@@ -3196,9 +3896,11 @@ test_linear_all (Dwg_Data *dwg)
 {
   int failures = test_linear (dwg);
   failures += test_linear_order (dwg);
+  failures += test_linear_cycle (dwg);
   failures += test_linear_refusals (dwg);
   failures += test_angle_offset (dwg);
   failures += test_stretch_whole (dwg);
+  failures += test_stretch_selection (dwg);
   failures += test_move (dwg);
   failures += test_selected_nodes (dwg);
   return failures;
@@ -3208,6 +3910,7 @@ static int
 test_evaluate_all (Dwg_Data *dwg)
 {
   int failures = test_params (dwg);
+  failures += test_rotation_default (dwg);
   failures += test_values (dwg);
   failures += test_refusals (dwg);
   failures += test_evaluate (dwg);
@@ -3248,5 +3951,8 @@ main (int argc, char *argv[])
   failures += on_fixture (test_check_ellipse);
   failures += on_fixture (test_check_mleader);
   failures += on_fixture (test_check_owned);
+  failures += on_fixture (test_check_utf8);
+  failures += on_fixture (test_check_status);
+  failures += on_fixture (test_check_cycle);
   return failures ? 1 : 0;
 }

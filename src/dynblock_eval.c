@@ -45,7 +45,9 @@
 /* What a refused call returns, with a bit for the reason, as copy.c's. */
 #define DYNBLOCK_REFUSED DWG_ERR_INVALIDDWG
 
-/* How far a value may be from the definition's and still be at it. */
+/* How far a value may be from the definition's and still be at it; also
+   the tolerance of the geometry the evaluator checks: a length, an angle,
+   or a coordinate against a plane or a frame. */
 #define DYNBLOCK_VALUE_EPSILON 1e-9
 
 #define REASON_SIZE 512
@@ -868,8 +870,9 @@ block_representation (const Dwg_Data *dwg, const Dwg_Object *insert)
 }
 
 /* Reads the values of the placement at insert_handle, as
-   dwg_dynblock_get_values (). *def_handlep gets the definition once it is
-   found, also when reading a value then fails. */
+   dwg_dynblock_get_values (). *def_handlep gets the definition the
+   placement names once it is found, also when reading the definition or a
+   value then fails. */
 static int
 placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
                   BITCODE_RLL *def_handlep, Dwg_DynValue **valuesp,
@@ -921,11 +924,11 @@ placement_values (const Dwg_Data *dwg, const BITCODE_RLL insert_handle,
   else
     // a placement at the defaults draws the definition itself
     def_handle = ref_handle (placement_block (insert));
+  *def_handlep = def_handle;
   error = definition_params (dwg, def_handle, &list, &parametric, reason,
                              reason_size);
   if (error)
     return error;
-  *def_handlep = def_handle;
   values = (Dwg_DynValue *)calloc (list.count ? list.count : 1,
                                    sizeof (Dwg_DynValue));
   if (!values)
@@ -1186,14 +1189,17 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * action its whole selection, a stretch action the stretch points its
  * frame holds, which AutoCAD lists with the action (hdls) by their index
  * in the entity's own list of stretch points. An entity wholly inside the
- * frame has all its stretch points listed and so moves whole. Each action
- * scales the change by its distance multiplier and turns it by its angle
- * offset.
+ * frame has all its stretch points listed and so moves whole. AutoCAD also
+ * moves whole an entity of the selection (deps) that lies wholly outside
+ * the frame; how it lists one is not known, so the evaluator refuses an
+ * entity of the selection with no stretch point listed. Each action scales
+ * the change by its distance multiplier and turns it by its angle offset.
  *
  * Actions also move the points of other parameters in their selection
  * (codes, for a stretch, and the node ids a move lists), which changes
  * those parameters' values unless they are set too. So each parameter is
- * evaluated after the actions that move it. The evaluation graph doesn't
+ * evaluated after the actions that move it, of the properties given a
+ * value: the actions of the others don't run. The evaluation graph doesn't
  * list its nodes in that order. As every action translates, the order
  * doesn't change the geometry otherwise.
  *
@@ -1757,6 +1763,46 @@ plan_whole (Dynblock_Plan *plan, const Dynblock_Action *a,
   return error ? error : add_move (plan, obj->handle.value, -1, delta);
 }
 
+/* Refuses an entity that stretch action a selects (deps) with none of its
+   stretch points listed (hdls): one wholly outside the action's frame,
+   which AutoCAD moves whole. The parameters and grips the action selects
+   are nodes of the graph, whose points it lists by node id (codes). */
+static int
+check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
+{
+  const Dwg_Object_BLOCKSTRETCHACTION *_a
+      = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+  dwg_inthash *listed = hash_new ((uint64_t)_a->num_hdls * 2 + 8);
+  int error = 0;
+  if (!listed)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; _a->hdls && i < _a->num_hdls; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->hdls[i].hdl);
+      if (handle && _a->hdls[i].indexes && _a->hdls[i].num_indexes)
+        hash_set (listed, handle, 1);
+    }
+  for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (_a->deps[i]);
+      const Dwg_Object *obj;
+      if (handle && hash_get (plan->node_handles, handle) != HASH_NOT_FOUND)
+        continue;
+      obj = selected_entity (plan, a, handle, &error);
+      if (obj && hash_get (listed, handle) == HASH_NOT_FOUND)
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' selects %s " FORMAT_HV
+                      " with none of its stretch points in its frame; "
+                      "moving an entity outside the frame is not supported",
+                      a->name, dwg_type_name (obj->fixedtype), handle);
+          error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+    }
+  free_hash (listed);
+  return error;
+}
+
 /* Plans stretch action a moving the stretch points it lists by delta,
    and the points of the linear parameters it lists. */
 static int
@@ -1806,7 +1852,15 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
         }
       free (seen);
       if (!listed)
-        continue;
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' lists %s " FORMAT_HV
+                      " with none of its stretch points in its frame; "
+                      "moving an entity outside the frame is not supported",
+                      a->name, dwg_type_name (obj->fixedtype),
+                      obj->handle.value);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
       if (listed == count)
         {
           if (obj->fixedtype == DWG_TYPE_HATCH)
@@ -1832,19 +1886,34 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
           return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
     }
+  if (!error)
+    error = check_stretch_selection (plan, a);
   if (error)
     return error;
   for (BITCODE_BL i = 0; _a->codes && i < _a->num_codes; i++)
     {
       const Dwg_BLOCKSTRETCHACTION_codes *c = &_a->codes[i];
       const int k = find_linear (plan, c->bl95);
-      if (k < 0 && c->indexes && c->num_indexes)
+      if (k < 0)
         {
           error = check_selected_node (plan, a, c->bl95);
           if (error)
             return error;
         }
-      for (BITCODE_BS j = 0; k >= 0 && c->indexes && j < c->num_indexes; j++)
+      // a parameter wholly outside the frame, which AutoCAD moves whole
+      if (!c->indexes || !c->num_indexes)
+        {
+          const Dwg_Object *node = find_node (plan, c->bl95);
+          set_reason (plan->reason, plan->reason_size,
+                      "stretch action '%s' selects %s (node %u) with none "
+                      "of its points in its frame; moving a parameter "
+                      "outside the frame is not supported",
+                      a->name,
+                      node ? dwg_type_name (node->fixedtype) : "a node",
+                      (unsigned)c->bl95);
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      for (BITCODE_BS j = 0; k >= 0 && j < c->num_indexes; j++)
         {
           Dynblock_Linear *q = &plan->linear[k];
           if (c->indexes[j] > 1)
@@ -1936,9 +2005,10 @@ moves_linear (const Dwg_Object *a, const BITCODE_BL nodeid)
   return 0;
 }
 
-/* The next linear parameter to evaluate: one no action of a parameter not
-   yet evaluated moves. -1 when all are evaluated, -2 when the rest move
-   each other. */
+/* The next linear parameter to evaluate: one that no action of a given
+   parameter not yet evaluated moves; the actions of a parameter that isn't
+   given don't run. -1 when all are evaluated, -2 when the rest wait on
+   given parameters whose actions move each other's. */
 static int
 next_linear (const Dynblock_Plan *plan)
 {
@@ -1952,7 +2022,8 @@ next_linear (const Dynblock_Plan *plan)
       for (BITCODE_BL j = 0; !moved && j < plan->num_actions; j++)
         {
           const int k = plan->actions[j].linear;
-          moved = k >= 0 && k != (int)i && !plan->linear[k].done
+          moved = k >= 0 && k != (int)i && plan->linear[k].given
+                  && !plan->linear[k].done
                   && moves_linear (plan->actions[j].obj,
                                    plan->linear[i].nodeid);
         }
@@ -2410,10 +2481,17 @@ plan_linear (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
     }
   if (!error && next == -2)
     {
+      // which of them AutoCAD evaluates first is not known
+      const Dynblock_Linear *p = NULL;
+      for (BITCODE_BL i = 0; !p && i < plan->num_linear; i++)
+        if (plan->linear[i].given && !plan->linear[i].done)
+          p = &plan->linear[i];
       set_reason (plan->reason, plan->reason_size,
-                  "the actions of the linear properties move each other's "
-                  "parameters in a cycle");
-      return DYNBLOCK_REFUSED;
+                  "linear properties given a value, such as '%s', wait on "
+                  "each other: their actions move each other's parameters "
+                  "in a cycle, which is not supported",
+                  p ? p->name : "");
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   return error ? error : check_reach (plan);
 }
