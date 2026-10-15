@@ -9547,8 +9547,9 @@ extern "C"
                   const double yscale, const double zscale,
                   const double rotation) __nonnull_all;
   /* dwg_add_INSERT with the block given by reference, not by name: every
-     anonymous "*U" block has the same name. block must be a block of
-     blkhdr's document, and not blkhdr itself, which is refused. */
+     anonymous "*U" block has the same name. blkhdr and block must be blocks
+     of one document, given as the document's own structs, not copies, and
+     block not blkhdr itself; anything else is refused. */
   EXPORT Dwg_Entity_INSERT *
   dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
                         const dwg_point_3d *restrict ins_pt,

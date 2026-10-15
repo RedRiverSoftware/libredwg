@@ -908,7 +908,8 @@ test_refusals (Dwg_Data *src)
   BITCODE_RLL map[8][2];
   unsigned num_map;
   Dwg_Object_BLOCK_HEADER *ms, *window, *toilet, *trees, *altezza;
-  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 }, nan_pt = { 0.0, NAN, 0.0 };
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 },
+                    nan_pt = { 0.0, (double)NAN, 0.0 };
   Dwg_DynValue v[2];
   Dwg_AttValue a[2];
   int failures;
@@ -983,8 +984,8 @@ test_refusals (Dwg_Data *src)
   failures += test_refusal (dst, ms, trees, &pt, 0.0, 0.0, NULL, 0, NULL, 0,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a scale of 0");
-  failures += test_refusal (dst, ms, trees, &pt, 1.0, INFINITY, NULL, 0, NULL,
-                            0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+  failures += test_refusal (dst, ms, trees, &pt, 1.0, (double)INFINITY, NULL,
+                            0, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a rotation that isn't finite");
 
   v[0].name = (char *)"Window Width";
@@ -1006,7 +1007,7 @@ test_refusals (Dwg_Data *src)
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a flip value of 0.5");
   v[0].name = (char *)"Window Width";
-  v[0].value = NAN;
+  v[0].value = (double)NAN;
   failures += test_refusal (dst, ms, window, &pt, 1.0, 0.0, v, 1, NULL, 0,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a value that isn't finite");
@@ -1198,6 +1199,40 @@ test_add_insert_block (void)
             (unsigned)(dwg->num_objects - num_objects));
       failures++;
     }
+  {
+    // it links to model space's object, but the document doesn't hold it
+    Dwg_Object_BLOCK_HEADER *ms = model_space (dwg);
+    Dwg_Object_BLOCK_HEADER owner_copy = *ms;
+    const BITCODE_BL num_owned = ms->num_owned;
+    BITCODE_H *const entities = ms->entities;
+    if (!dwg_add_INSERT_block (&owner_copy, &pt, second, 1.0, 1.0, 1.0, 0.0)
+        && dwg->num_objects == num_objects && second->num_inserts == 1
+        && owner_copy.num_owned == num_owned
+        && owner_copy.entities == entities && ms->num_owned == num_owned)
+      OK ("add_INSERT_block: refuses a copy of the owner's struct");
+    else
+      {
+        FAIL ("add_INSERT_block: a copy of the owner's struct: %u objects "
+              "added, the copy owns %u entities",
+              (unsigned)(dwg->num_objects - num_objects),
+              (unsigned)owner_copy.num_owned);
+        failures++;
+      }
+  }
+  {
+    Dwg_Object_BLOCK_HEADER block_copy = *second;
+    if (!dwg_add_INSERT_block (model_space (dwg), &pt, &block_copy, 1.0, 1.0,
+                               1.0, 0.0)
+        && dwg->num_objects == num_objects && second->num_inserts == 1)
+      OK ("add_INSERT_block: refuses a copy of the block's struct");
+    else
+      {
+        FAIL ("add_INSERT_block: a copy of the block's struct: %u objects "
+              "added",
+              (unsigned)(dwg->num_objects - num_objects));
+        failures++;
+      }
+  }
   loglevel = test_loglevel;
 
   error = write_dwg (WRITTEN_BLOCK, dwg);

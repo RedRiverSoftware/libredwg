@@ -26184,8 +26184,9 @@ dwg_add_INSERT (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
 
 /* As dwg_add_INSERT (), with the block to insert given by reference rather
    than by name, as anonymous blocks share their names: every "*U" block is
-   called "*U". block must be a BLOCK_HEADER of blkhdr's document other
-   than blkhdr, and is checked before anything is added. */
+   called "*U". blkhdr and block must be BLOCK_HEADERs of one document, the
+   document's own structs rather than copies of them, and block not blkhdr.
+   They are checked before anything is added. */
 EXPORT Dwg_Entity_INSERT *
 dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
                       const dwg_point_3d *restrict ins_pt,
@@ -26196,12 +26197,16 @@ dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
   int err;
   const Dwg_Object *owner = dwg_obj_generic_to_object (blkhdr, &err);
   const Dwg_Object *target = dwg_obj_generic_to_object (block, &err);
+  // A copy of a block's struct resolves to the block's object too, but
+  // adding to it would update the copy's entity list, not the block's.
   if (!owner || !target || target->parent != owner->parent
+      || owner->fixedtype != DWG_TYPE_BLOCK_HEADER
+      || owner->tio.object->tio.BLOCK_HEADER != blkhdr
       || target->fixedtype != DWG_TYPE_BLOCK_HEADER
       || target->tio.object->tio.BLOCK_HEADER != block || target == owner)
     {
-      LOG_ERROR ("add_INSERT_block: block is not a BLOCK_HEADER of the "
-                 "owner's document, or is the owner");
+      LOG_ERROR ("add_INSERT_block: owner or block is not a BLOCK_HEADER of "
+                 "one document, or the block is the owner");
       return NULL;
     }
   if (isnan (ins_pt->x) || isnan (ins_pt->y) || isnan (ins_pt->z)
