@@ -2143,7 +2143,8 @@ typedef struct _dwg_entity_TEXT
   BITCODE_RC dataflags;        /*!< r2000+. should be renamed to opts for r11 compat */
   BITCODE_RD elevation;        /*!< DXF 30 (z coord of 10), when dataflags & 1 */
   BITCODE_2DPOINT ins_pt;      /*!< DXF 10 */
-  BITCODE_2DPOINT alignment_pt; /*!< DXF 11. optional, when dataflags & 2, i.e 72/73 != 0 */
+  BITCODE_2DPOINT alignment_pt; /*!< DXF 11. used when 72/73 != 0. Not stored
+                                   when dataflags & 2, then (0,0) */
   BITCODE_BE extrusion;       /*!< DXF 210. Default 0,0,1 */
   BITCODE_RD thickness;       /*!< DXF 39 */
   BITCODE_RD oblique_angle;   /*!< DXF 51 */
