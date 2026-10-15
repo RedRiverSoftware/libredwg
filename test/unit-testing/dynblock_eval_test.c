@@ -1883,6 +1883,24 @@ added (Dwg_Data *dwg, const Dwg_Object_Entity *ent, const BITCODE_BL n,
   return a;
 }
 
+/* Whether text b, a copy of a TEXT, ATTDEF or ATTRIB a, moved by dx, dy:
+   its insertion point, and the alignment point of text that isn't
+   left-aligned on the baseline, with dataflags 0x02 set only for an
+   alignment point of (0,0), as AutoCAD writes it. Left-aligned text keeps
+   its alignment point and flag. */
+#define IS_MOVED_TEXT(a, b, dx, dy)                                           \
+  (is_point ((b)->ins_pt.x, (b)->ins_pt.y, (a)->ins_pt.x + (dx),              \
+             (a)->ins_pt.y + (dy))                                            \
+   && ((a)->horiz_alignment || (a)->vert_alignment                            \
+           ? is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,              \
+                       (a)->alignment_pt.x + (dx), (a)->alignment_pt.y + (dy)) \
+                 && !((b)->dataflags & 0x02)                                  \
+                        == ((b)->alignment_pt.x != 0.0                        \
+                            || (b)->alignment_pt.y != 0.0)                    \
+           : is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,              \
+                       (a)->alignment_pt.x, (a)->alignment_pt.y)              \
+                 && ((b)->dataflags & 0x02) == ((a)->dataflags & 0x02)))
+
 /* Whether copy, of src, moved by dx, dy in its own coordinates: every
    point of it, and the ATTRIBs of an INSERT. */
 static int
@@ -1937,27 +1955,14 @@ is_moved (Dwg_Data *dwg, const Dwg_Object *src, const Dwg_Object *copy,
         return same;
       }
     case DWG_TYPE_TEXT:
-      {
-        const Dwg_Entity_TEXT *a = src->tio.entity->tio.TEXT;
-        const Dwg_Entity_TEXT *b = copy->tio.entity->tio.TEXT;
-        // the alignment point only when the text has one
-        const double ax = a->dataflags & 0x02 ? 0.0 : dx;
-        const double ay = a->dataflags & 0x02 ? 0.0 : dy;
-        return is_point (b->ins_pt.x, b->ins_pt.y, a->ins_pt.x + dx,
-                         a->ins_pt.y + dy)
-               && is_point (b->alignment_pt.x, b->alignment_pt.y,
-                            a->alignment_pt.x + ax, a->alignment_pt.y + ay);
-      }
+      return IS_MOVED_TEXT (src->tio.entity->tio.TEXT,
+                            copy->tio.entity->tio.TEXT, dx, dy);
     case DWG_TYPE_ATTDEF:
-      return is_point (copy->tio.entity->tio.ATTDEF->ins_pt.x,
-                       copy->tio.entity->tio.ATTDEF->ins_pt.y,
-                       src->tio.entity->tio.ATTDEF->ins_pt.x + dx,
-                       src->tio.entity->tio.ATTDEF->ins_pt.y + dy);
+      return IS_MOVED_TEXT (src->tio.entity->tio.ATTDEF,
+                            copy->tio.entity->tio.ATTDEF, dx, dy);
     case DWG_TYPE_ATTRIB:
-      return is_point (copy->tio.entity->tio.ATTRIB->ins_pt.x,
-                       copy->tio.entity->tio.ATTRIB->ins_pt.y,
-                       src->tio.entity->tio.ATTRIB->ins_pt.x + dx,
-                       src->tio.entity->tio.ATTRIB->ins_pt.y + dy);
+      return IS_MOVED_TEXT (src->tio.entity->tio.ATTRIB,
+                            copy->tio.entity->tio.ATTRIB, dx, dy);
     case DWG_TYPE_MTEXT:
       return is_point (copy->tio.entity->tio.MTEXT->ins_pt.x,
                        copy->tio.entity->tio.MTEXT->ins_pt.y,
@@ -2105,15 +2110,20 @@ test_stretch_whole (Dwg_Data *dwg)
   elliptical_arc->start_angle = 0.0;
   elliptical_arc->end_angle = M_PI;
   spline->scenario = 2;
-  // as the decoder leaves a left-aligned text, with no alignment point
+  // left-aligned, as AutoCAD writes it: alignment point (0,0), not stored.
+  // It stays so in the copy.
   text->dataflags = 0x02;
+  attdef->dataflags = 0x02;
   centred->horiz_alignment = 1;
   centred->alignment_pt.x = 35.5;
   centred->alignment_pt.y = 22.0;
-  // centred, but with no alignment point stored, as AutoCAD writes one at
-  // its insertion point: the decoder leaves it 0, and so does the copy
+  // centred on (0,0), which AutoCAD doesn't store (dataflags 0x02): the
+  // copy's alignment point moves with it, and is then stored
   unstored->horiz_alignment = 1;
   unstored->dataflags = 0x02;
+  // the same for a middle-aligned ATTRIB, moved with its INSERT
+  attrib->horiz_alignment = 4;
+  attrib->dataflags = 0x02;
 
   list[n++] = added (dwg, line->parent, 2, "LINE");
   list[n++] = added (dwg, arc->parent, 2, "ARC");
@@ -2303,12 +2313,13 @@ test_move (Dwg_Data *dwg)
   Dwg_Object_BLOCK_HEADER *def = block_header (dwg, DOOR);
   Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
   dwg_point_3d pt = { 10.0, -2.0, 0.0 };
-  Dwg_Entity_TEXT *text;
+  const dwg_point_3d mc_pt = { -2.3, -1.25, 0.0 };
+  Dwg_Entity_TEXT *text, *centred;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_POINT *point;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
-  BITCODE_RLL h_text, h_insert;
+  BITCODE_RLL h_text, h_centred, h_insert;
   int failures = 0;
   memset (&v, 0, sizeof (v));
   if (!def || !move)
@@ -2317,20 +2328,28 @@ test_move (Dwg_Data *dwg)
       return 1;
     }
   text = dwg_add_TEXT (def, "caption", &pt, 1.0);
+  centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
-  if (!text || !insert || !point)
+  if (!text || !centred || !insert || !point)
     {
       fail ("move: could not add the entities");
       return 1;
     }
   text->dataflags = 0x02;
+  // middle-centred on the block's base point, as AutoCAD writes it: the
+  // alignment point (0,0) isn't stored
+  centred->horiz_alignment = 1;
+  centred->vert_alignment = 2;
+  centred->dataflags = 0x3f;
   h_text = entity_handle (dwg, text->parent);
+  h_centred = entity_handle (dwg, centred->parent);
   h_insert = entity_handle (dwg, insert->parent);
   if (!add_move_entity (dwg, move, h_text)
+      || !add_move_entity (dwg, move, h_centred)
       || !add_move_entity (dwg, move, h_insert))
     {
       fail ("move: out of memory");
@@ -2348,6 +2367,17 @@ test_move (Dwg_Data *dwg)
   else
     {
       fail ("move: the TEXT and the INSERT don't move by -0.5");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_centred),
+                   copy_of (dwg, def, rep, h_centred), 0.0, -0.5))
+    OK ("move: the TEXT centred on (0,0) moves its alignment point by -0.5, "
+        "then stored");
+  else
+    {
+      fail ("move: the TEXT centred on (0,0) doesn't move its alignment "
+            "point by -0.5, stored");
       failures++;
     }
   if (add_move_entity (dwg, move, entity_handle (dwg, point->parent)))

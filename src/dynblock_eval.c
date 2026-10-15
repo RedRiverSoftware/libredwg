@@ -2566,14 +2566,32 @@ move_hatch (Dwg_Entity_HATCH *_obj, const BITCODE_3BD *delta)
     }
 }
 
+/* Sets the dataflags bit 0x02 of a TEXT, ATTDEF or ATTRIB, which leaves out
+   an alignment point of (0,0), as its alignment point is. The encoder
+   writes the flags as they are unless it converts the drawing. */
+#define SET_ALIGNMENT_FLAG(_obj)                                              \
+  do                                                                          \
+    {                                                                         \
+      if ((_obj)->alignment_pt.x == 0.0 && (_obj)->alignment_pt.y == 0.0)     \
+        (_obj)->dataflags |= 0x02;                                            \
+      else                                                                    \
+        (_obj)->dataflags &= ~0x02;                                           \
+    }                                                                         \
+  while (0)
+
 /* Moves a TEXT, ATTDEF or ATTRIB by delta, in its OCS: its insertion
-   point, and its alignment point when it has one. */
+   point, and the alignment point of text that isn't left-aligned on the
+   baseline, also when that is (0,0) and not stored. Left-aligned text
+   doesn't use its alignment point, and AutoCAD keeps it (0,0). */
 #define MOVE_TEXT(_obj, delta)                                                \
   do                                                                          \
     {                                                                         \
-      MOVE_2D ((_obj)->ins_pt, delta);                                       \
-      if (!((_obj)->dataflags & 0x02))                                        \
-        MOVE_2D ((_obj)->alignment_pt, delta);                               \
+      MOVE_2D ((_obj)->ins_pt, delta);                                        \
+      if ((_obj)->horiz_alignment || (_obj)->vert_alignment)                  \
+        {                                                                     \
+          MOVE_2D ((_obj)->alignment_pt, delta);                              \
+          SET_ALIGNMENT_FLAG (_obj);                                          \
+        }                                                                     \
     }                                                                         \
   while (0)
 

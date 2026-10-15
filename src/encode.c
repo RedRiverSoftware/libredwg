@@ -7838,7 +7838,9 @@ in_postprocess_handles (Dwg_Object *restrict obj)
     }
 }
 
-// when updating TEXT/ATTDEF/ATTRIB to R_2000
+/* When updating TEXT/ATTDEF/ATTRIB to R_2000. Each flag leaves out a value
+   that is its default. As AutoCAD writes and reads it, the alignment
+   point's default is (0,0), not the insertion point. */
 void
 dwg_set_dataflags (Dwg_Object *obj)
 {
@@ -7850,8 +7852,7 @@ dwg_set_dataflags (Dwg_Object *obj)
   _obj->dataflags = 0xff;                                                     \
   if (_obj->elevation != 0.0)                                                 \
     _obj->dataflags &= ~1;                                                    \
-  if (_obj->alignment_pt.x != _obj->ins_pt.x                                  \
-      || _obj->alignment_pt.y != _obj->ins_pt.y)                              \
+  if (_obj->alignment_pt.x != 0.0 || _obj->alignment_pt.y != 0.0)             \
     _obj->dataflags &= ~2;                                                    \
   if (_obj->oblique_angle != 0.0)                                             \
     _obj->dataflags &= ~4;                                                    \
