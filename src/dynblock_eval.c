@@ -4324,7 +4324,9 @@ typedef struct _dynblock_compare
   int depth;
   const char *entity; /* the entity being compared, for the reason */
   int differs;        /* the entity differs */
-  int equivalent;     /* the entity is the same curve, stored another way */
+  /* the entity matches only stored another way: the same curve, or text
+     that differs only in what AutoCAD measures from its layout */
+  int equivalent;
   char reason[REASON_SIZE];
 } Dynblock_Compare;
 
@@ -4729,6 +4731,44 @@ is_turned_angle (const char *structname, const char *field)
   return 0;
 }
 
+/* Whether field of struct structname is a size AutoCAD measures from the
+   laid-out text, which the evaluation can't do: an MTEXT's extents, which
+   are unmeasured when 0 or less (AutoCAD writes 0 or -1). */
+static int
+is_measured_extent (const char *structname, const char *field)
+{
+  return strEQc (structname, "MTEXT")
+         && (strEQc (field, "extents_width")
+             || strEQc (field, "extents_height"));
+}
+
+/* Whether the insertion points of attribute definitions a, AutoCAD's, and
+   b differ only as AutoCAD's measuring of text moves them. When text is
+   justified other than left, aligned or fit (centre, right or middle),
+   its alignment point places it, and AutoCAD derives the insertion point
+   from that point and the width of the string it measures: for an
+   attribute definition, the tag in a definition, but the default value in
+   the blocks it evaluates. That moves the insertion point along the
+   baseline only. Left-justified text starts where it is placed whatever
+   its width, at any vertical alignment. Only an attribute definition that
+   isn't constant: an INSERT draws its ATTRIB instead, but draws a
+   constant one from its block. */
+static int
+is_measured_ins_pt (const Dynblock_Compare *c, const Dwg_Entity_ATTDEF *a,
+                    const Dwg_Entity_ATTDEF *b)
+{
+  const BITCODE_BS h = a->horiz_alignment, v = a->vert_alignment;
+  const double dx = a->ins_pt.x - b->ins_pt.x;
+  const double dy = a->ins_pt.y - b->ins_pt.y;
+  // left (0), aligned (3), fit (5) or unknown; the alignment point
+  // compares as any other field
+  if ((a->flags & 2) || !h || h == 3 || h >= 5 || v > 3)
+    return 0;
+  // the difference across the baseline, at AutoCAD's rotation
+  return fabs (dy * cos (a->rotation) - dx * sin (a->rotation))
+         <= c->tolerance;
+}
+
 static void
 compare_fields (Dynblock_Compare *c, const char *prefix,
                 const char *structname, const Dwg_DYNAPI_field *fields,
@@ -4759,6 +4799,34 @@ compare_fields (Dynblock_Compare *c, const char *prefix,
         {
           compare_array (c, name, structname, fields, f, a, b);
           continue;
+        }
+      // an MTEXT's extents that only one side has measured; a value that
+      // isn't finite compares as any other
+      if (!*prefix && strEQc (type, "BD")
+          && is_measured_extent (structname, f->name))
+        {
+          const double da = *(const double *)pa, db = *(const double *)pb;
+          if (isfinite (da) && isfinite (db) && (da <= 0.0 || db <= 0.0)
+              && !(fabs (da - db) <= c->tolerance))
+            {
+              c->equivalent = 1;
+              continue;
+            }
+        }
+      // an attribute definition's insertion point that AutoCAD derived
+      // from the width of another string: moved along the baseline only
+      if (!*prefix && strEQc (structname, "ATTDEF")
+          && strEQc (f->name, "ins_pt"))
+        {
+          const Dwg_Entity_ATTDEF *aa = (const Dwg_Entity_ATTDEF *)a;
+          const Dwg_Entity_ATTDEF *ab = (const Dwg_Entity_ATTDEF *)b;
+          if ((!(fabs (aa->ins_pt.x - ab->ins_pt.x) <= c->tolerance)
+               || !(fabs (aa->ins_pt.y - ab->ins_pt.y) <= c->tolerance))
+              && is_measured_ins_pt (c, aa, ab))
+            {
+              c->equivalent = 1;
+              continue;
+            }
         }
       if ((strEQc (type, "BD") || strEQc (type, "RD"))
           && is_turned_angle (structname, f->name))
