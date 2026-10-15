@@ -120,7 +120,8 @@ static const Dynblock_Node_Record node_records[] = {
   { DWG_TYPE_BLOCKALIGNMENTGRIP, RECORD_ALIGNMENT_GRIP, { 6886097, 9208651 } },
   { DWG_TYPE_BLOCKSTRETCHACTION, RECORD_OFFSET, { 6895636, 9291323 } },
   { DWG_TYPE_BLOCKMOVEACTION, RECORD_OFFSET, { 1553528, 2094574 } },
-  /* only seen with a base point of (0, 0, 0) */
+  /* only seen with a base point of (0, 0, 0): check_representation ()
+     refuses others */
   { DWG_TYPE_BLOCKROTATEACTION, RECORD_BASE_POINT, { 4195796, 5656503 } },
   { DWG_TYPE_BLOCKSCALEACTION, RECORD_BASE_POINT, { 2551693, 3435815 } },
   { DWG_TYPE_BLOCKLINEARGRIP, RECORD_NONE, { 0, 0 } },
@@ -643,8 +644,10 @@ inserts_block (const Dwg_Data *dwg, const BITCODE_RLL blk,
 }
 
 /* For a representation block: refuses a graph node whose record isn't
-   known, and an entity that owns a block of its own, which the evaluated
-   copy would share with the definition's entity. */
+   known, a rotate or scale action whose base point isn't (0, 0, 0), as
+   its record holds the base point and AutoCAD's has only been seen with
+   (0, 0, 0), and an entity that owns a block of its own, which the
+   evaluated copy would share with the definition's entity. */
 static int
 check_representation (Dynblock_Placement *p)
 {
@@ -655,12 +658,26 @@ check_representation (Dynblock_Placement *p)
   for (BITCODE_BL i = 0; graph->nodes && i < graph->num_nodes; i++)
     {
       const Dwg_Object *node = ref_object (dwg, graph->nodes[i].evalexpr);
+      const BITCODE_3BD *base = NULL;
       if (node && !node_record (node->fixedtype))
         {
           set_reason (p,
                       "the placement data of an evaluation graph node of "
                       "class %s is not known",
                       class_name (dwg, node));
+          return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      if (node && node->fixedtype == DWG_TYPE_BLOCKROTATEACTION)
+        base = &node->tio.object->tio.BLOCKROTATEACTION->base_pt;
+      else if (node && node->fixedtype == DWG_TYPE_BLOCKSCALEACTION)
+        base = &node->tio.object->tio.BLOCKSCALEACTION->base_pt;
+      if (base && (base->x != 0.0 || base->y != 0.0 || base->z != 0.0))
+        {
+          set_reason (p,
+                      "the placement data of %s " FORMAT_HV " with the base "
+                      "point (%g, %g, %g) is not known",
+                      node->name, node->handle.value, base->x, base->y,
+                      base->z);
           return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
     }
@@ -703,8 +720,8 @@ check_representation (Dynblock_Placement *p)
   return 0;
 }
 
-/* The attribute definitions of block blk that get an ATTRIB: those that
-   aren't constant. */
+/* Whether entity ent is an attribute definition that gets an ATTRIB: one
+   that isn't constant. */
 static int
 is_placed_attdef (const Dwg_Object *ent)
 {
@@ -712,11 +729,47 @@ is_placed_attdef (const Dwg_Object *ent)
          && !(ent->tio.entity->tio.ATTDEF->flags & 2);
 }
 
+/* The WCS point of block point (x, y, z), placed by p in the block with
+   base point base. */
+static void
+place_point (const Dynblock_Placement *p, const BITCODE_3BD *base,
+             const double x, const double y, const double z, BITCODE_3BD *out)
+{
+  const double dx = (x - base->x) * p->scale, dy = (y - base->y) * p->scale;
+  const double c = cos (p->rotation), s = sin (p->rotation);
+  out->x = p->ins_pt.x + dx * c - dy * s;
+  out->y = p->ins_pt.y + dx * s + dy * c;
+  out->z = p->ins_pt.z + (z - base->z) * p->scale;
+}
+
+/* The insertion and alignment points of attdef's ATTRIB, placed by p in
+   the block with base point base. Text left-aligned on the baseline has
+   no alignment point, and an attribute definition whose dataflags have
+   0x02 doesn't store it, which leaves it 0 when read: both take the
+   insertion point, as AutoCAD's ATTRIBs do. */
+static void
+place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
+              const Dwg_Entity_ATTDEF *attdef, BITCODE_3BD *pt,
+              BITCODE_3BD *align)
+{
+  place_point (p, base, attdef->ins_pt.x, attdef->ins_pt.y, attdef->elevation,
+               pt);
+  if ((attdef->dataflags & 0x02)
+      || (!attdef->horiz_alignment && !attdef->vert_alignment))
+    *align = *pt;
+  else
+    place_point (p, base, attdef->alignment_pt.x, attdef->alignment_pt.y,
+                 attdef->elevation, align);
+}
+
 /* Checks atts against def's attribute definitions: each tag names one, is
    given once, and has a value. The definitions must lie in the XY plane,
-   as the INSERT's transform is applied in it, and have tags that
-   dwg_add_ATTRIB () takes, which are fewer than AutoCAD allows, so that a
-   refusal comes before anything is added. */
+   as the INSERT's transform is applied in it, have tags that
+   dwg_add_ATTRIB () takes, which are fewer than AutoCAD allows, and be
+   placed at points, a height and a thickness that a double holds, so that
+   a refusal comes before anything is added. The representation block's
+   attribute definitions are where def's are, as only visibility states
+   change at the values check_values () takes. */
 static int
 check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                   const BITCODE_BL num_atts)
@@ -727,6 +780,7 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
     {
       const Dwg_Object *ent = ref_object (dwg, def->entities[i]);
       const Dwg_Entity_ATTDEF *attdef;
+      BITCODE_3BD pt, align;
       char *tag;
       int valid;
       if (!is_placed_attdef (ent))
@@ -737,9 +791,22 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
         {
           set_reason (p,
                       "attribute definition " FORMAT_HV " does not lie in "
-                      "the XY plane",
+                      "the XY plane: its extrusion is not (0, 0, 1)",
                       ent->handle.value);
           return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      place_attdef (p, &def->base_pt, attdef, &pt, &align);
+      if (!isfinite (pt.x) || !isfinite (pt.y) || !isfinite (pt.z)
+          || !isfinite (align.x) || !isfinite (align.y)
+          || !isfinite (attdef->height * p->scale)
+          || !isfinite (attdef->thickness * p->scale))
+        {
+          set_reason (p,
+                      "attribute definition " FORMAT_HV " placed at a scale "
+                      "of %g has a point, height or thickness beyond what "
+                      "a double holds",
+                      ent->handle.value, p->scale);
+          return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
       tag = utf8_copy (dwg, attdef->tag);
       if (!tag)
@@ -1284,7 +1351,7 @@ add_node_record (Dynblock_Placement *p, Dwg_Object_DICTIONARY *data,
 /* Gives the INSERT the extension dictionary AutoCAD stores a placement's
    values in: AcDbBlockRepresentation, holding AcDbRepData, which names the
    definition, and AppDataCache, holding ACAD_ENHANCEDBLOCKDATA with a
-   record per graph node. */
+   record for each graph node AutoCAD keeps one of. */
 static int
 add_representation_data (Dynblock_Placement *p)
 {
@@ -1342,19 +1409,6 @@ add_representation_data (Dynblock_Placement *p)
 /*--------------------------------------------------------------------------------
  * Attributes
  */
-
-/* The WCS point of block point (x, y, z), placed by p in the block with
-   base point base. */
-static void
-place_point (const Dynblock_Placement *p, const BITCODE_3BD *base,
-             const double x, const double y, const double z, BITCODE_3BD *out)
-{
-  const double dx = (x - base->x) * p->scale, dy = (y - base->y) * p->scale;
-  const double c = cos (p->rotation), s = sin (p->rotation);
-  out->x = p->ins_pt.x + dx * c - dy * s;
-  out->y = p->ins_pt.y + dx * s + dy * c;
-  out->z = p->ins_pt.z + (z - base->z) * p->scale;
-}
 
 /* Gives entity to the layer, colour, linetype, lineweight and plot style
    of entity from. */
@@ -1454,10 +1508,7 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       for (BITCODE_BL k = 0; k < num_atts && !value; k++)
         if (strEQ (atts[k].tag, tag))
           value = atts[k].value;
-      place_point (p, &base, attdef->ins_pt.x, attdef->ins_pt.y,
-                   attdef->elevation, &pt);
-      place_point (p, &base, attdef->alignment_pt.x, attdef->alignment_pt.y,
-                   attdef->elevation, &align);
+      place_attdef (p, &base, attdef, &pt, &align);
       if (etags)
         has_etag = etag_index (dwg, defobj, &etag_value, &etag);
       ins.x = pt.x;
@@ -1611,7 +1662,6 @@ place (Dynblock_Placement *p, const Dwg_DynValue *values,
   p->insert = dwg->object[insert->parent->objid].handle.value;
   if (!p->at_defaults)
     error |= add_representation_data (p);
-  // last: the add API's ATTRIBs relink the INSERT
   if (error < DWG_ERR_CRITICAL)
     error |= add_attributes (p, atts, num_atts, p->at_defaults);
   return error;
@@ -1642,6 +1692,12 @@ dwg_dynblock_insert (Dwg_Object_BLOCK_HEADER *owner,
     }
   if (!ownerobj || !defobj)
     {
+      // the log level of the document the structs link to
+      const Dwg_Data *dwg = def->parent && def->parent->dwg
+                                ? def->parent->dwg
+                                : (owner->parent ? owner->parent->dwg : NULL);
+      if (dwg)
+        loglevel = dwg->opts & DWG_OPTS_LOGLEVEL;
       LOG_ERROR ("dwg_dynblock_insert: %s is not a block of its document",
                  ownerobj ? "def" : "owner");
       if (errorp)

@@ -9551,7 +9551,9 @@ extern "C"
   /* dwg_add_INSERT with the block given by reference, not by name: every
      anonymous "*U" block has the same name. blkhdr and block must be blocks
      of one document, given as the document's own structs, not copies, and
-     block not blkhdr itself; anything else is refused. */
+     block not blkhdr itself; anything else is refused. As dwg_add_INSERT,
+     it refuses a NaN point, scale or rotation, and a rotation beyond 12
+     radians either way. */
   EXPORT Dwg_Entity_INSERT *
   dwg_add_INSERT_block (Dwg_Object_BLOCK_HEADER *blkhdr,
                         const dwg_point_3d *restrict ins_pt,

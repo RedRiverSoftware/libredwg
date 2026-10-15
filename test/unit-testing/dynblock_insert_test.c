@@ -52,19 +52,13 @@ static int test_loglevel;
       fail (__VA_ARGS__);                                                     \
     }                                                                         \
   while (0)
-#define TODO(...)                                                             \
-  do                                                                          \
-    {                                                                         \
-      loglevel = test_loglevel;                                               \
-      todo (__VA_ARGS__);                                                     \
-    }                                                                         \
-  while (0)
 
 #define FIXTURE "test/test-data/2004/Dynblocks.dwg"
 #define WRITTEN "dynblock_insert_test.dwg"
 #define WRITTEN_ATTRIBS "dynblock_insert_test_attribs.dwg"
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
+#define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -380,8 +374,8 @@ check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
   return 0;
 }
 
-/* The structure plan 5.1 asks of a placement, which the INSERT draws:
-   its definition itself at the definition's values; otherwise a new
+/* The structure AutoCAD gives a placement, which the INSERT draws: its
+   definition itself at the definition's values; otherwise a new
    anonymous block that AcDbBlockRepBTag names def in, with def's entity
    count, hasattrs and sort table, and an INSERT extension dictionary
    AcDbBlockRepresentation, with AcDbRepData naming def and AppDataCache
@@ -711,8 +705,9 @@ copy_of (BITCODE_RLL map[][2], const unsigned num_map, const BITCODE_RLL def)
   return 0;
 }
 
-/* The placements of plan 5.1's step (5) and their checks, before and after
-   a write and read back. */
+/* The fixture's definitions placed as AutoCAD placed them, at their own
+   values, and at other visibility states, scaled and rotated; and their
+   checks, before and after a write and read back. */
 static int
 test_placements (Dwg_Data *src)
 {
@@ -1287,64 +1282,48 @@ document_with (Dwg_Data *src, const BITCODE_RLL def, BITCODE_RLL *copyp)
   return dst;
 }
 
-/* The ATTRIBs of a placement, which dwg_add_ATTRIB () adds: AutoCAD makes an
-   INSERT the owner of its ATTRIBs and SEQEND, with hard-owner references
-   to its ATTRIBs and entmode 0 on them. The add API makes the block the
-   INSERT is in the ATTRIBs' owner, with its entmode (2 in model space),
-   refers to them with soft pointers, and points the INSERT at that block
-   too, which AutoCAD's AUDIT reports as an invalid sequence end. Until
-   runbook task P4-04 fixes the add API, those four are TODO, and any other
-   difference fails. */
+/* The ATTRIBs of a placement, which dwg_add_ATTRIB () adds, are linked as
+   AutoCAD links them: the INSERT owns its ATTRIBs and SEQEND, with
+   hard-owner references to its ATTRIBs and entmode 0 on them, and still
+   draws block. */
 static int
 check_attrib_links (const char *what, const Dwg_Data *dwg,
-                    const BITCODE_RLL insert, const BITCODE_RLL block,
-                    const BITCODE_RLL owner)
+                    const BITCODE_RLL insert, const BITCODE_RLL block)
 {
   const Dwg_Object *ins = object (dwg, insert);
   const Dwg_Entity_INSERT *_ins = ins->tio.entity->tio.INSERT;
   const BITCODE_RLL drawn = ref (_ins->block_header);
   const Dwg_Object *seqend = object (dwg, ref (_ins->seqend));
-  unsigned owned_by_insert = 0, owned_by_owner = 0, n = 0;
-  unsigned hard = 0, soft = 0, entmode0 = 0, entmode2 = 0;
+  unsigned owned_by_insert = 0, n = 0, hard = 0, entmode0 = 0;
   int failures = 0;
   for (BITCODE_BL i = 0; i < _ins->num_owned; i++)
     {
       const Dwg_Object *sub = object (dwg, ref (_ins->attribs[i]));
-      const BITCODE_RC code = _ins->attribs[i]->handleref.code;
-      if (!sub)
+      if (!sub || sub->fixedtype != DWG_TYPE_ATTRIB)
         continue;
       n++;
       if (ref (sub->tio.entity->ownerhandle) == insert)
         owned_by_insert++;
-      else if (ref (sub->tio.entity->ownerhandle) == owner)
-        owned_by_owner++;
-      if (code == 3)
+      if (_ins->attribs[i]->handleref.code == 3)
         hard++;
-      else if (code == 4 || code == 6 || code == 8 || code == 10
-               || code == 12)
-        soft++;
       if (sub->tio.entity->entmode == 0)
         entmode0++;
-      else if (sub->tio.entity->entmode == 2)
-        entmode2++;
     }
-  if (n == _ins->num_owned && hard == n)
+  if (n != _ins->num_owned)
+    {
+      FAIL ("%s: %u of its %u ATTRIBs resolve", what, n,
+            (unsigned)_ins->num_owned);
+      failures++;
+    }
+  if (hard == n)
     OK ("%s: hard-owns its %u ATTRIBs", what, n);
-  else if (n == _ins->num_owned && soft == n)
-    TODO ("%s: refers to its ATTRIBs with soft pointers, as "
-          "dwg_add_ATTRIB () does (runbook task P4-04)",
-          what);
   else
     {
       FAIL ("%s: %u of %u ATTRIBs hard-owned", what, hard, n);
       failures++;
     }
-  if (n == _ins->num_owned && entmode0 == n)
+  if (entmode0 == n)
     OK ("%s: its ATTRIBs have entmode 0", what);
-  else if (n == _ins->num_owned && entmode2 == n)
-    TODO ("%s: its ATTRIBs have the entmode of model space, as "
-          "dwg_add_ATTRIB () gives them (runbook task P4-04)",
-          what);
   else
     {
       FAIL ("%s: %u of %u ATTRIBs with entmode 0", what, entmode0, n);
@@ -1361,26 +1340,17 @@ check_attrib_links (const char *what, const Dwg_Data *dwg,
     }
   if (drawn == block)
     OK ("%s: still draws its block", what);
-  else if (drawn == owner)
-    TODO ("%s: draws the block it is in, as dwg_add_ATTRIB () points it "
-          "there (runbook task P4-04)",
-          what);
   else
     {
-      FAIL ("%s: draws " FORMAT_HV, what, drawn);
+      FAIL ("%s: draws " FORMAT_HV ", not " FORMAT_HV, what, drawn, block);
       failures++;
     }
-  if (n == _ins->num_owned && owned_by_insert == n)
+  if (owned_by_insert == n)
     OK ("%s: owns its %u ATTRIBs", what, n);
-  else if (n == _ins->num_owned && owned_by_owner == n)
-    TODO ("%s: its ATTRIBs are owned by the block it is in, as "
-          "dwg_add_ATTRIB () makes them (runbook task P4-04)",
-          what);
   else
     {
-      FAIL ("%s: %u of %u ATTRIBs owned by the INSERT, %u by the block it "
-            "is in",
-            what, owned_by_insert, n, owned_by_owner);
+      FAIL ("%s: %u of %u ATTRIBs owned by the INSERT", what,
+            owned_by_insert, n);
       failures++;
     }
   return failures;
@@ -1428,18 +1398,23 @@ typedef struct
   const char *value;
 } Expected_Attrib;
 
-/* The ATTRIBs of placement insert, placed at ins_pt, scale and rotation in
-   block (base point 0): one per attribute definition that isn't constant,
-   in order, each with its definition's properties placed by the INSERT. */
+/* The ATTRIBs of placement insert in dwg, placed at ins_pt, scale and
+   rotation in block (base point 0) of defs, which is dwg or the document
+   dwg was written from: one per attribute definition that isn't constant,
+   in order, each with its definition's properties placed by the INSERT.
+   Text that is left-aligned on the baseline, and a definition that doesn't
+   store its alignment point (dataflags 0x02, which the decoder leaves 0),
+   take the insertion point as the alignment point, and the ATTRIB then
+   doesn't store it either. */
 static int
-check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
-               const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
-               const double scale, const double rotation,
-               const Expected_Attrib *expected, const unsigned num_expected,
-               const int etags)
+check_attribs (const char *what, const Dwg_Data *dwg, const Dwg_Data *defs,
+               const BITCODE_RLL insert, const BITCODE_RLL block,
+               const BITCODE_3BD *ins_pt, const double scale,
+               const double rotation, const Expected_Attrib *expected,
+               const unsigned num_expected, const int etags)
 {
   const Dwg_Entity_INSERT *_ins = object (dwg, insert)->tio.entity->tio.INSERT;
-  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (defs, block);
   const BITCODE_3BD *base = &blk->base_pt;
   unsigned k = 0;
   int failures = 0;
@@ -1452,10 +1427,11 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
     }
   for (BITCODE_BL i = 0; i < blk->num_owned; i++)
     {
-      const Dwg_Object *defobj = object (dwg, ref (blk->entities[i]));
+      const Dwg_Object *defobj = object (defs, ref (blk->entities[i]));
       const Dwg_Entity_ATTDEF *d;
       const Dwg_Object *attobj;
       const Dwg_Entity_ATTRIB *a;
+      const BITCODE_2DPOINT *dalign, *aalign;
       double x, y, ax, ay;
       BITCODE_RLL etag_handle = 1, def_etag = 0;
       BITCODE_RL etag_index = 0, def_index = 1;
@@ -1471,6 +1447,11 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
           return failures + 1;
         }
       a = attobj->tio.entity->tio.ATTRIB;
+      dalign = (d->dataflags & 0x02)
+                       || (!d->horiz_alignment && !d->vert_alignment)
+                   ? &d->ins_pt
+                   : &d->alignment_pt;
+      aalign = (a->dataflags & 0x02) ? &a->ins_pt : &a->alignment_pt;
       x = ins_pt->x
           + scale
                 * ((d->ins_pt.x - base->x) * c - (d->ins_pt.y - base->y) * s);
@@ -1479,23 +1460,21 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                 * ((d->ins_pt.x - base->x) * s + (d->ins_pt.y - base->y) * c);
       ax = ins_pt->x
            + scale
-                 * ((d->alignment_pt.x - base->x) * c
-                    - (d->alignment_pt.y - base->y) * s);
+                 * ((dalign->x - base->x) * c - (dalign->y - base->y) * s);
       ay = ins_pt->y
            + scale
-                 * ((d->alignment_pt.x - base->x) * s
-                    + (d->alignment_pt.y - base->y) * c);
+                 * ((dalign->x - base->x) * s + (dalign->y - base->y) * c);
       has_etag = eed_tag (dwg, attobj, "AcDbBlockRepETag", &etag_handle,
                           &etag_index);
       // at the definition's values, an ATTRIB of a definition with one
-      def_has_etag = eed_tag (dwg, defobj, "AcDbBlockRepETag", &def_etag,
+      def_has_etag = eed_tag (defs, defobj, "AcDbBlockRepETag", &def_etag,
                               &def_index);
       if (strcmp (a->tag, d->tag) || strcmp (a->tag, expected[k].tag)
           || strcmp (a->text_value, expected[k].value)
           || fabs (a->ins_pt.x - x) > 1e-9 || fabs (a->ins_pt.y - y) > 1e-9
           || fabs (a->elevation - ins_pt->z - scale * d->elevation) > 1e-9
-          || fabs (a->alignment_pt.x - ax) > 1e-9
-          || fabs (a->alignment_pt.y - ay) > 1e-9
+          || fabs (aalign->x - ax) > 1e-9 || fabs (aalign->y - ay) > 1e-9
+          || !(a->dataflags & 0x02) != (ax != x || ay != y)
           || fabs (a->height - d->height * scale) > 1e-9
           || fabs (a->rotation - fmod (d->rotation + rotation, 2.0 * M_PI))
                  > 1e-9
@@ -1508,11 +1487,14 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
           || has_etag != (etags && def_has_etag)
           || (has_etag && (etag_handle != 0 || etag_index != def_index)))
         {
-          FAIL ("%s: ATTRIB %s '%s' at (%g, %g) h %g r %g, layer " FORMAT_HV
-                ", ETag %d, expected '%s' at (%g, %g) h %g r %g, ETag %d",
+          FAIL ("%s: ATTRIB %s '%s' at (%g, %g) aligned at (%g, %g), "
+                "dataflags 0x%x, h %g r %g, layer " FORMAT_HV
+                ", ETag %d, expected '%s' at (%g, %g) aligned at (%g, %g), h "
+                "%g r %g, ETag %d",
                 what, a->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
-                a->height, a->rotation, ref (attobj->tio.entity->layer),
-                has_etag, expected[k].value, x, y, d->height * scale,
+                aalign->x, aalign->y, (unsigned)a->dataflags, a->height,
+                a->rotation, ref (attobj->tio.entity->layer), has_etag,
+                expected[k].value, x, y, ax, ay, d->height * scale,
                 fmod (d->rotation + rotation, 2.0 * M_PI), etags);
           failures++;
         }
@@ -1557,11 +1539,14 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
   return 1;
 }
 
-/* Attributes, on a copy of Trees given attribute definitions: a plain one,
-   a constant one, which gets no ATTRIB, and one centred, rotated, on a
-   layer of its own and shown in the first visibility state only. Placed at
-   the definition's values and at another state, scaled and rotated, with
-   one value given. */
+/* Attributes, on a copy of Trees given attribute definitions: a plain one
+   that doesn't store its alignment point, as a decoded one with dataflags
+   0x02; a constant one, which gets no ATTRIB; one centred, rotated, on a
+   layer of its own and shown in the first visibility state only; one
+   left-aligned, as dwg_add_ATTDEF () makes it, with an alignment point of
+   0; and one centred that doesn't store its alignment point. Placed at the
+   definition's values and at another state, scaled and rotated, with one
+   value given. */
 static int
 test_attributes (Dwg_Data *src)
 {
@@ -1569,18 +1554,24 @@ test_attributes (Dwg_Data *src)
   Dwg_Data *dst = document_with (src, TREES, &def_h);
   Dwg_Object_BLOCK_HEADER *def;
   const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 },
-                     p3 = { 0.0, -6.0, 0.0 };
-  Dwg_Entity_ATTDEF *number, *constant, *centred;
+                     p3 = { 0.0, -6.0, 0.0 }, p4 = { 7.0, -1.0, 0.0 },
+                     p5 = { -5.0, -2.0, 0.0 };
+  Dwg_Entity_ATTDEF *number, *constant, *centred, *label, *mark;
   Dwg_Object_LAYER *layer;
   const BITCODE_3BD at1 = { 50.0, 60.0, 0.0 }, at2 = { -20.0, 10.0, 5.0 };
   const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7" } };
-  const Expected_Attrib expected1[]
-      = { { "NUMBER", "EL-7" }, { "RATING", "10W" } };
-  const Expected_Attrib expected2[]
-      = { { "NUMBER", "#" }, { "RATING", "10W" } };
+  const Expected_Attrib expected1[] = { { "NUMBER", "EL-7" },
+                                        { "RATING", "10W" },
+                                        { "LABEL", "L1" },
+                                        { "MARK", "M" } };
+  const Expected_Attrib expected2[] = { { "NUMBER", "#" },
+                                        { "RATING", "10W" },
+                                        { "LABEL", "L1" },
+                                        { "MARK", "M" } };
   Dwg_DynValue v;
   Dwg_Entity_INSERT *ins1, *ins2;
   BITCODE_RLL h1, h2, block2;
+  Placement pl1, pl2;
   Dwg_Data readback;
   int failures = 0, error = 0;
 
@@ -1598,6 +1589,8 @@ test_attributes (Dwg_Data *src)
            = dwg_add_ATTDEF (def, 2.5, 2, "Constant", &p2, "KIND", "TREE"))
       || !(centred
            = dwg_add_ATTDEF (def, 1.5, 0, "Rating", &p3, "RATING", "10W"))
+      || !(label = dwg_add_ATTDEF (def, 1.0, 0, "Label", &p4, "LABEL", "L1"))
+      || !(mark = dwg_add_ATTDEF (def, 1.0, 0, "Mark", &p5, "MARK", "M"))
       || add_etag (dst, number->parent, 1001))
     {
       FAIL ("attributes: adding the definitions failed");
@@ -1615,6 +1608,11 @@ test_attributes (Dwg_Data *src)
   centred->rotation = 0.1;
   centred->parent->layer
       = dwg_add_handleref (dst, 5, handle_of (dst, layer), NULL);
+  label->width_factor = mark->width_factor = 1.0;
+  // the alignment point is the insertion point, so not stored
+  number->dataflags = 0x02;
+  mark->dataflags = 0x02;
+  mark->horiz_alignment = 1;
   if (show_in_first_state (dst, def_h, handle_of (dst, centred)))
     {
       FAIL ("attributes: Trees has no visibility parameter");
@@ -1644,36 +1642,48 @@ test_attributes (Dwg_Data *src)
     }
   h1 = handle_of (dst, ins1);
   h2 = handle_of (dst, ins2);
-  // the representation block, as the INSERT may no longer name it
-  block2 = 0;
-  for (BITCODE_BL i = 0; i < dst->num_objects; i++)
-    {
-      BITCODE_RLL named = 0;
-      if (dst->object[i].fixedtype == DWG_TYPE_BLOCK_HEADER
-          && eed_tag (dst, &dst->object[i], "AcDbBlockRepBTag", &named, NULL)
-          && named == def_h)
-        block2 = dst->object[i].handle.value;
-    }
-  failures += check_attribs ("attributes at the definition's values", dst, h1,
-                             def_h, &at1, 2.0, 0.5, expected1, 2, 1);
-  failures += check_attribs ("attributes at Shrub (Plan)", dst, h2, block2,
-                             &at2, 1.5, 2.0 * M_PI - 0.25, expected2, 2, 0);
+  block2 = ref (object (dst, h2)->tio.entity->tio.INSERT->block_header);
+  memset (&pl1, 0, sizeof (pl1));
+  pl1.insert = h1;
+  pl1.def = def_h;
+  pl1.at_defaults = 1;
+  memset (&pl2, 0, sizeof (pl2));
+  pl2.insert = h2;
+  pl2.def = def_h;
+  pl2.values[0] = v;
+  pl2.num_values = 1;
+  failures += check_structure ("attributes at the definition's values", dst,
+                               &pl1);
+  failures += check_structure ("attributes at Shrub (Plan)", dst, &pl2);
+  failures
+      += check_values ("attributes at the definition's values", dst, &pl1);
+  failures += check_values ("attributes at Shrub (Plan)", dst, &pl2);
+  failures += check_attribs ("attributes at the definition's values", dst, dst,
+                             h1, def_h, &at1, 2.0, 0.5, expected1, 4, 1);
+  failures += check_attribs ("attributes at Shrub (Plan)", dst, dst, h2,
+                             block2, &at2, 1.5, 2.0 * M_PI - 0.25, expected2,
+                             4, 0);
   failures += check_attrib_links ("attributes at the definition's values",
-                                  dst, h1, def_h,
-                                  handle_of (dst, model_space (dst)));
-  failures += check_attrib_links ("attributes at Shrub (Plan)", dst, h2,
-                                  block2, handle_of (dst, model_space (dst)));
+                                  dst, h1, def_h);
+  failures
+      += check_attrib_links ("attributes at Shrub (Plan)", dst, h2, block2);
   // At Shrub (Plan) the state hides RATING's definition, but not the
   // ATTRIB: AutoCAD keeps its ATTRIB's invisible flag clear then, as its own
   // evaluation of such a placement does.
   {
     const Dwg_Object_BLOCK_HEADER *rep = block_header (dst, block2);
-    // RATING was added last
-    const Dwg_Object *rating
-        = rep ? object (dst, ref (rep->entities[rep->num_owned - 1])) : NULL;
+    const Dwg_Object *rating = NULL;
     const Dwg_Entity_INSERT *_ins2 = object (dst, h2)->tio.entity->tio.INSERT;
+    // RATING's is the second ATTRIB
     const Dwg_Object *attrib
-        = _ins2->num_owned == 2 ? object (dst, ref (_ins2->attribs[1])) : NULL;
+        = _ins2->num_owned == 4 ? object (dst, ref (_ins2->attribs[1])) : NULL;
+    for (BITCODE_BL i = 0; rep && i < rep->num_owned; i++)
+      {
+        const Dwg_Object *ent = object (dst, ref (rep->entities[i]));
+        if (ent && ent->fixedtype == DWG_TYPE_ATTDEF
+            && !strcmp (ent->tio.entity->tio.ATTDEF->tag, "RATING"))
+          rating = ent;
+      }
     if (rating && rating->fixedtype == DWG_TYPE_ATTDEF
         && rating->tio.entity->invisible && attrib
         && !attrib->tio.entity->invisible)
@@ -1699,7 +1709,23 @@ test_attributes (Dwg_Data *src)
       failures++;
     }
 
-  error = write_dwg (WRITTEN_ATTRIBS, dst);
+  // The encoder works out the dataflags of a document built with the add
+  // API again, so NUMBER and MARK, and their copies in the representation
+  // block, are written with their alignment points of 0 stored. The
+  // ATTRIBs read back are checked against the definitions as they were
+  // placed.
+  {
+    const BITCODE_BL n = dst->num_objects;
+    BITCODE_RC *flags = (BITCODE_RC *)calloc (n, 1);
+    for (BITCODE_BL i = 0; flags && i < n; i++)
+      if (dst->object[i].fixedtype == DWG_TYPE_ATTDEF)
+        flags[i] = dst->object[i].tio.entity->tio.ATTDEF->dataflags;
+    error = flags ? write_dwg (WRITTEN_ATTRIBS, dst) : DWG_ERR_OUTOFMEM;
+    for (BITCODE_BL i = 0; flags && i < n; i++)
+      if (dst->object[i].fixedtype == DWG_TYPE_ATTDEF)
+        dst->object[i].tio.entity->tio.ATTDEF->dataflags = flags[i];
+    free (flags);
+  }
   if (error < DWG_ERR_CRITICAL)
     error = read_dwg (WRITTEN_ATTRIBS, &readback);
   if (error >= DWG_ERR_CRITICAL)
@@ -1709,13 +1735,29 @@ test_attributes (Dwg_Data *src)
     }
   else
     {
+      failures += check_structure ("read back attributes at the "
+                                   "definition's values",
+                                   &readback, &pl1);
+      failures += check_structure ("read back attributes at Shrub (Plan)",
+                                   &readback, &pl2);
+      failures += check_values ("read back attributes at the definition's "
+                                "values",
+                                &readback, &pl1);
+      failures += check_values ("read back attributes at Shrub (Plan)",
+                                &readback, &pl2);
       failures += check_attribs ("read back attributes at the definition's "
                                  "values",
-                                 &readback, h1, def_h, &at1, 2.0, 0.5,
-                                 expected1, 2, 1);
+                                 &readback, dst, h1, def_h, &at1, 2.0, 0.5,
+                                 expected1, 4, 1);
       failures += check_attribs ("read back attributes at Shrub (Plan)",
-                                 &readback, h2, block2, &at2, 1.5,
-                                 2.0 * M_PI - 0.25, expected2, 2, 0);
+                                 &readback, dst, h2, block2, &at2, 1.5,
+                                 2.0 * M_PI - 0.25, expected2, 4, 0);
+      failures += check_attrib_links ("read back attributes at the "
+                                      "definition's values",
+                                      &readback, h1, def_h);
+      failures += check_attrib_links ("read back attributes at Shrub (Plan)",
+                                      &readback, h2, block2);
+      failures += check_inserts ("read back attributes", &readback);
       failures += check_refs ("read back attributes", &readback);
       free_dwg (&readback);
     }
@@ -2159,32 +2201,41 @@ test_without_sortents (Dwg_Data *src)
   return failures;
 }
 
-/* The add API leaves dwg->num_entities short of the entities it adds,
-   which dwg_get_entities () sizes its array by; until runbook task P4-04
-   fixes it, a shortfall of exactly the INSERTs, ATTRIBs and SEQENDs the
-   placements add through it is TODO. */
+/* dwg->num_entities counts every entity the placements add: the
+   representation block's, and the INSERTs, ATTRIBs and SEQENDs the add API
+   adds. dwg_get_entities () sizes its array by it. */
 static int
 test_entity_count (Dwg_Data *src)
 {
   Dwg_Data *dst = dwg_new_Document (R_2004, 0, tracelevel);
   BITCODE_RLL map[8][2];
-  unsigned num_map, added_by_api = 0, added = 0;
+  unsigned num_map, added = 0, attribs = 0, seqends = 0;
   BITCODE_BL counted, first;
   const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d pt = { 1.0, 2.0, 0.0 };
+  Dwg_Object_BLOCK_HEADER *trees;
   Dwg_DynValue v;
   int failures, error = 0;
 
   loglevel = test_loglevel;
   failures = copy_definitions (dst, src, map, &num_map);
+  trees = block_header (dst, copy_of (map, num_map, TREES));
+  // so that the placement of Trees adds an ATTRIB and a SEQEND
+  if (!trees || !dwg_add_ATTDEF (trees, 2.5, 0, "Number", &pt, "NUMBER", "#"))
+    {
+      FAIL ("entity count: adding an attribute definition to Trees failed");
+      free_dwg (dst);
+      free (dst);
+      return failures + 1;
+    }
   counted = dst->num_entities;
   first = dst->num_objects;
   memset (&v, 0, sizeof (v));
   v.name = (char *)"Type (view)";
   v.state = (char *)"Shrub (Plan)";
   loglevel = tracelevel;
-  if (!dwg_dynblock_insert (model_space (dst),
-                            block_header (dst, copy_of (map, num_map, TREES)),
-                            &at, 1.0, 0.0, &v, 1, NULL, 0, &error)
+  if (!dwg_dynblock_insert (model_space (dst), trees, &at, 1.0, 0.0, &v, 1,
+                            NULL, 0, &error)
       || !dwg_dynblock_insert (model_space (dst),
                                block_header (dst,
                                              copy_of (map, num_map, WINDOW)),
@@ -2201,34 +2252,436 @@ test_entity_count (Dwg_Data *src)
     if (dst->object[i].supertype == DWG_SUPERTYPE_ENTITY)
       {
         added++;
-        if (dst->object[i].fixedtype == DWG_TYPE_INSERT
-            && dst->object[i].index >= first
-            && ref (dst->object[i].tio.entity->ownerhandle)
-                   == handle_of (dst, model_space (dst)))
-          added_by_api++;
-        else if (dst->object[i].fixedtype == DWG_TYPE_ATTRIB
-                 || dst->object[i].fixedtype == DWG_TYPE_SEQEND)
-          added_by_api++;
+        attribs += dst->object[i].fixedtype == DWG_TYPE_ATTRIB;
+        seqends += dst->object[i].fixedtype == DWG_TYPE_SEQEND;
       }
-  if (dst->num_entities - counted == added)
-    {
-      Dwg_Object_Entity **entities = dwg_get_entities (dst);
-      OK ("entity count: the %u entities the placements add are counted",
-          added);
-      free (entities);
-    }
-  else if (added - (dst->num_entities - counted) == added_by_api)
-    TODO ("entity count: the %u entities the add API adds are not counted "
-          "(runbook task P4-04)",
-          added_by_api);
+  if (dst->num_entities - counted == added && attribs == 1 && seqends == 1)
+    OK ("entity count: the %u entities the placements add are counted, "
+        "their ATTRIB and SEQEND too",
+        added);
   else
     {
-      FAIL ("entity count: %u entities added, %u counted", added,
-            (unsigned)(dst->num_entities - counted));
+      FAIL ("entity count: %u entities added, %u counted, %u ATTRIBs and %u "
+            "SEQENDs added, expected 1 of each",
+            added, (unsigned)(dst->num_entities - counted), attribs, seqends);
       failures++;
     }
+  // the array's last entry is the document's last entity
+  {
+    Dwg_Object_Entity **entities = dwg_get_entities (dst);
+    const Dwg_Object_Entity *last = NULL;
+    for (BITCODE_BL i = 0; i < dst->num_objects; i++)
+      if (dst->object[i].supertype == DWG_SUPERTYPE_ENTITY)
+        last = dst->object[i].tio.entity;
+    if (entities && dst->num_entities && entities[dst->num_entities - 1] == last)
+      OK ("entity count: dwg_get_entities () holds all %u entities",
+          (unsigned)dst->num_entities);
+    else
+      {
+        FAIL ("entity count: dwg_get_entities () doesn't end with the last "
+              "entity");
+        failures++;
+      }
+    free (entities);
+  }
   free_dwg (dst);
   free (dst);
+  return failures;
+}
+
+/* The evaluation graph of definition def. */
+static Dwg_Object_EVALUATION_GRAPH *
+evaluation_graph (const Dwg_Data *dwg, const BITCODE_RLL def)
+{
+  const Dwg_Object *graph = dict_item (dwg, xdic (dwg, object (dwg, def)),
+                                       "ACAD_ENHANCEDBLOCK");
+  return graph && graph->fixedtype == DWG_TYPE_EVALUATION_GRAPH
+             ? graph->tio.object->tio.EVALUATION_GRAPH
+             : NULL;
+}
+
+/* The first node of class type in def's evaluation graph, with its place
+   in the graph in *indexp, or NULL. */
+static Dwg_Object *
+graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
+            const Dwg_Object_Type type, BITCODE_BL *indexp)
+{
+  const Dwg_Object_EVALUATION_GRAPH *g = evaluation_graph (dwg, def);
+  for (BITCODE_BL i = 0; g && g->nodes && i < g->num_nodes; i++)
+    {
+      Dwg_Object *node = object (dwg, ref (g->nodes[i].evalexpr));
+      if (node && node->fixedtype == type)
+        {
+          if (indexp)
+            *indexp = i;
+          return node;
+        }
+    }
+  return NULL;
+}
+
+/* Places def in dwg's model space with the given values, which must
+   succeed. */
+static int
+test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
+               const Dwg_DynValue *values, const BITCODE_BL n,
+               const char *what)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  int error = 0;
+  Dwg_Entity_INSERT *insert;
+  loglevel = tracelevel;
+  insert = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def),
+                                &pt, scale, 0.0, values, n, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (insert && !error)
+    {
+      OK ("insert accepts %s", what);
+      return 0;
+    }
+  FAIL ("insert %s: 0x%x", what, error);
+  return 1;
+}
+
+static void
+free_document (Dwg_Data *dwg)
+{
+  if (dwg)
+    {
+      free_dwg (dwg);
+      free (dwg);
+    }
+}
+
+/* Refusals of what a definition holds, each on a copy of the definition
+   in a document of its own: a rotate or scale action whose base point is
+   not (0, 0, 0), a graph node of a class whose stored value is not known,
+   and a DIMENSION, which draws a block of its own, all only at other
+   values than the definition's; and attribute definitions off the XY
+   plane, attribute values given twice or without a tag or value, and
+   scales at which an attribute's placed point, height or thickness is
+   beyond what a double holds. */
+static int
+test_definition_refusals (Dwg_Data *src)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  const struct
+  {
+    BITCODE_RLL def;
+    Dwg_Object_Type type;
+    const char *property, *state, *what;
+  } actions[] = {
+    { TOILET, DWG_TYPE_BLOCKROTATEACTION, "Type (view)", "Round (Plan)",
+      "a rotate action whose base point isn't (0, 0, 0)" },
+    { DOOR, DWG_TYPE_BLOCKSCALEACTION, "Opening Angle", "Closed",
+      "a scale action whose base point isn't (0, 0, 0)" },
+  };
+  Dwg_DynValue v;
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst;
+  int failures = 0;
+
+  for (size_t i = 0; i < sizeof (actions) / sizeof (actions[0]); i++)
+    {
+      Dwg_Object *node;
+      BITCODE_3BD *base;
+      dst = document_with (src, actions[i].def, &def_h);
+      node = dst ? graph_node (dst, def_h, actions[i].type, NULL) : NULL;
+      if (!node)
+        {
+          FAIL ("%s: the definition has no such action", actions[i].what);
+          failures++;
+          free_document (dst);
+          continue;
+        }
+      base = actions[i].type == DWG_TYPE_BLOCKROTATEACTION
+                 ? &node->tio.object->tio.BLOCKROTATEACTION->base_pt
+                 : &node->tio.object->tio.BLOCKSCALEACTION->base_pt;
+      if (base->x != 0.0 || base->y != 0.0 || base->z != 0.0)
+        {
+          FAIL ("%s: AutoCAD's base point is not (0, 0, 0)",
+                actions[i].what);
+          failures++;
+        }
+      base->x = 1.0;
+      memset (&v, 0, sizeof (v));
+      v.name = (char *)actions[i].property;
+      v.state = (char *)actions[i].state;
+      failures += test_refusal (dst, model_space (dst),
+                                block_header (dst, def_h), &pt, 1.0, 0.0, &v,
+                                1, NULL, 0, REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                actions[i].what);
+      // at the definition's values no stored values are written
+      {
+        char what[256];
+        snprintf (what, sizeof (what), "%s, at the definition's values",
+                  actions[i].what);
+        failures += test_accepted (dst, def_h, 1.0, NULL, 0, what);
+      }
+      free_document (dst);
+    }
+
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  // a graph node of a class with no known stored value: Trees' visibility
+  // grip, made to name the definition's extension dictionary
+  dst = document_with (src, TREES, &def_h);
+  {
+    BITCODE_BL index = 0;
+    Dwg_Object_EVALUATION_GRAPH *g
+        = dst ? evaluation_graph (dst, def_h) : NULL;
+    if (g && graph_node (dst, def_h, DWG_TYPE_BLOCKVISIBILITYGRIP, &index))
+      {
+        g->nodes[index].evalexpr = dwg_add_handleref (
+            dst, 4, ref (object (dst, def_h)->tio.object->xdicobjhandle),
+            NULL);
+        failures += test_refusal (
+            dst, model_space (dst), block_header (dst, def_h), &pt, 1.0, 0.0,
+            &v, 1, NULL, 0, REFUSED (DWG_ERR_NOTYETSUPPORTED),
+            "a graph node of a class with no known stored value");
+        failures += test_accepted (dst, def_h, 1.0, NULL, 0,
+                                   "a graph node of a class with no known "
+                                   "stored value, at the definition's "
+                                   "values");
+      }
+    else
+      {
+        FAIL ("Trees has no visibility grip");
+        failures++;
+      }
+  }
+  free_document (dst);
+
+  // a DIMENSION, which draws a block of its own
+  dst = document_with (src, TREES, &def_h);
+  {
+    const dwg_point_3d p1 = { 0.0, 0.0, 0.0 }, p2 = { 10.0, 0.0, 0.0 },
+                       p3 = { 5.0, 5.0, 0.0 };
+    Dwg_Object_BLOCK_HEADER *blk = dst ? add_anonymous_block (dst) : NULL;
+    Dwg_Entity_DIMENSION_LINEAR *dim
+        = blk ? dwg_add_DIMENSION_LINEAR (block_header (dst, def_h), &p1, &p2,
+                                          &p3, 0.0)
+              : NULL;
+    loglevel = test_loglevel;
+    if (dim)
+      {
+        dim->block = dwg_add_handleref (dst, 5, handle_of (dst, blk), NULL);
+        failures += test_refusal (dst, model_space (dst),
+                                  block_header (dst, def_h), &pt, 1.0, 0.0,
+                                  &v, 1, NULL, 0,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a DIMENSION at another state");
+        failures += test_accepted (dst, def_h, 1.0, NULL, 0,
+                                   "a DIMENSION at the definition's values");
+      }
+    else
+      {
+        FAIL ("adding a DIMENSION to Trees failed");
+        failures++;
+      }
+  }
+  free_document (dst);
+
+  // attribute definitions and values
+  dst = document_with (src, TREES, &def_h);
+  {
+    Dwg_Object_BLOCK_HEADER *def = dst ? block_header (dst, def_h) : NULL;
+    const dwg_point_3d at = { def ? def->base_pt.x : 0.0,
+                              def ? def->base_pt.y : 0.0, 0.0 };
+    Dwg_Entity_ATTDEF *attdef
+        = def ? dwg_add_ATTDEF (def, 1.0, 0, "Number", &at, "NUMBER", "#")
+              : NULL;
+    Dwg_AttValue a[2];
+    loglevel = test_loglevel;
+    if (attdef)
+      {
+        memset (a, 0, sizeof (a));
+        a[0].tag = a[1].tag = (char *)"NUMBER";
+        a[0].value = (char *)"1";
+        a[1].value = (char *)"2";
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 2,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute given twice");
+        a[0].tag = NULL;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute without a tag");
+        a[0].tag = (char *)"NUMBER";
+        a[0].value = NULL;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute without a value");
+
+        // at a scale of 1e300, a point 1e10 from the base point
+        attdef->ins_pt.x = at.x + 1e10;
+        attdef->height = 1e-10;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1e300,
+                                  0.0, NULL, 0, NULL, 0,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute placed beyond a double");
+        attdef->ins_pt.x = at.x;
+        attdef->height = 1e10;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1e300,
+                                  0.0, NULL, 0, NULL, 0,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute height beyond a double");
+        attdef->height = 1.0;
+        attdef->thickness = 1e10;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1e300,
+                                  0.0, NULL, 0, NULL, 0,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute thickness beyond a double");
+        attdef->thickness = 0.0;
+        failures += test_accepted (dst, def_h, 1e300, NULL, 0,
+                                   "an attribute at the base point, at a "
+                                   "scale of 1e300");
+
+        attdef->extrusion.z = -1.0;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, NULL, 0,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "an attribute definition off the XY "
+                                  "plane");
+      }
+    else
+      {
+        FAIL ("adding an attribute definition to Trees failed");
+        failures++;
+      }
+  }
+  free_document (dst);
+
+  // a drawing other than r2004
+  dst = document_with (src, TREES, &def_h);
+  if (dst)
+    {
+      dst->header.from_version = R_2000;
+      failures += test_refusal (dst, model_space (dst),
+                                block_header (dst, def_h), &pt, 1.0, 0.0,
+                                NULL, 0, NULL, 0,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a drawing other than r2004");
+      dst->header.from_version = R_2004;
+      free_document (dst);
+    }
+  else
+    {
+      FAIL ("copying Trees failed");
+      failures++;
+    }
+  return failures;
+}
+
+/* A definition holding a MINSERT, placed at another state: the
+   representation block's copy of the MINSERT is listed by the block it
+   draws, before and after a write and read back, and that block can't be
+   the placement's owner. */
+static int
+test_minsert (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0, grid_h = 0, minsert_h = 0, copy_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  const dwg_point_3d start = { 0.0, 0.0, 0.0 }, end = { 1.0, 1.0, 0.0 },
+                     at = { 2.0, 3.0, 0.0 };
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  Dwg_Object_BLOCK_HEADER *grid;
+  Dwg_Entity_MINSERT *minsert = NULL;
+  Dwg_Entity_INSERT *ins;
+  Dwg_DynValue v;
+  Placement pl;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("minsert: copying Trees failed");
+      return 1;
+    }
+  grid = dwg_add_BLOCK_HEADER (dst, "GRID");
+  if (grid && dwg_add_BLOCK (grid, "GRID")
+      && dwg_add_LINE (grid, &start, &end) && dwg_add_ENDBLK (grid))
+    {
+      grid_h = handle_of (dst, grid);
+      minsert = dwg_add_MINSERT (block_header (dst, def_h), &at, "GRID", 1.0,
+                                 1.0, 1.0, 0.0, 2, 3, 10.0, 10.0);
+    }
+  loglevel = test_loglevel;
+  if (!minsert)
+    {
+      FAIL ("minsert: adding the MINSERT to Trees failed");
+      free_document (dst);
+      return 1;
+    }
+  minsert_h = handle_of (dst, minsert);
+  failures += test_refusal (dst, block_header (dst, grid_h),
+                            block_header (dst, def_h), &pt, 1.0, 0.0, NULL, 0,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "an owner the definition draws with a MINSERT");
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), block_header (dst, def_h), &pt,
+                             1.0, 0.0, &v, 1, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!ins || error)
+    {
+      FAIL ("minsert: placing failed: 0x%x", error);
+      free_document (dst);
+      return failures + 1;
+    }
+  memset (&pl, 0, sizeof (pl));
+  pl.insert = handle_of (dst, ins);
+  pl.def = def_h;
+  pl.values[0] = v;
+  pl.num_values = 1;
+  failures += check_structure ("minsert", dst, &pl);
+  // the MINSERT's copy, at its place in the representation block
+  {
+    const Dwg_Object_BLOCK_HEADER *def = block_header (dst, def_h);
+    const Dwg_Object_BLOCK_HEADER *rep
+        = block_header (dst, ref (ins->block_header));
+    for (BITCODE_BL i = 0; rep && i < def->num_owned && i < rep->num_owned;
+         i++)
+      if (ref (def->entities[i]) == minsert_h)
+        copy_h = ref (rep->entities[i]);
+  }
+  grid = block_header (dst, grid_h);
+  if (copy_h && object (dst, copy_h)
+      && object (dst, copy_h)->fixedtype == DWG_TYPE_MINSERT
+      && grid->num_inserts == 2 && ref (grid->inserts[0]) == minsert_h
+      && ref (grid->inserts[1]) == copy_h)
+    OK ("minsert: GRID lists the definition's MINSERT and its copy");
+  else
+    {
+      FAIL ("minsert: GRID lists %u MINSERTs, the copy " FORMAT_HV,
+            (unsigned)grid->num_inserts, copy_h);
+      failures++;
+    }
+  failures += check_inserts ("minsert", dst);
+
+  error = write_dwg (WRITTEN_MINSERT, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_MINSERT, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("minsert: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      failures += check_structure ("read back minsert", &readback, &pl);
+      failures += check_inserts ("read back minsert", &readback);
+      failures += check_refs ("read back minsert", &readback);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_MINSERT);
+  free_document (dst);
   return failures;
 }
 
@@ -2265,6 +2718,8 @@ main (int argc, char *argv[])
   failures += test_sortents_order (&src);
   failures += test_without_sortents (&src);
   failures += test_entity_count (&src);
+  failures += test_definition_refusals (&src);
+  failures += test_minsert (&src);
   free_dwg (&src);
   return failures ? 1 : 0;
 }

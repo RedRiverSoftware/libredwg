@@ -328,24 +328,31 @@ typedef struct _dwg_attvalue
    value the definition's), the INSERT draws def itself. Otherwise it draws
    a new representation block, which dwg_dynblock_evaluate () makes, and
    which gets what AutoCAD's have: AcDbBlockRepBTag EED naming def, def's
-   hasattrs flag, an ACAD_SORTENTS table mapped from def's when def has
-   one (an entry for an entity that isn't def's is left out), its nested INSERTs and MINSERTs listed by the blocks they draw, and
-   for each IMAGE or WIPEOUT an image definition reactor of its own. The
-   INSERT then gets the extension dictionary AutoCAD stores the values in:
-   AcDbBlockRepresentation, holding AcDbRepData (a BLOCKREPRESENTATION that
-   names def) and AppDataCache, holding ACAD_ENHANCEDBLOCKDATA with an
-   XRECORD named by the node id for each graph node that AutoCAD keeps a
-   record of. Each placement gets a block of its own.
+   hasattrs flag, an ACAD_SORTENTS table of its own when def has one,
+   which draws the block's entities in the order def draws its own (the
+   entities' handles are handed out as sort keys in that order), its
+   nested INSERTs and MINSERTs listed by the blocks they draw, and for each
+   IMAGE or WIPEOUT that has an image definition reactor, a reactor of its
+   own. The INSERT then gets the extension dictionary AutoCAD stores the
+   values in: AcDbBlockRepresentation, holding AcDbRepData (a
+   BLOCKREPRESENTATION that names def) and AppDataCache, holding
+   ACAD_ENHANCEDBLOCKDATA with an XRECORD named by the node id for each
+   graph node that AutoCAD keeps a record of. Each placement at other
+   values gets a representation block of its own.
 
    Attributes: the INSERT gets an ATTRIB for each attribute definition of
    the block it draws that isn't constant, in the block's order, with the
    definition's tag, flags, text style, height, width factor, oblique
    angle, alignment, layer, colour, linetype, lineweight and plot style;
    its position, alignment point, height, thickness and rotation placed by
-   the INSERT; and its value from atts, by tag, or else the definition's
-   default value. At the definition's values each ATTRIB gets the
-   AcDbBlockRepETag index of its definition, as AutoCAD's do. They are
-   added with dwg_add_ATTRIB (), and linked to the INSERT as it links them.
+   the INSERT (text left-aligned on the baseline, and a definition that
+   doesn't store its alignment point, take the position as the alignment
+   point); and its value from atts, by tag, or else the definition's
+   default value. A preset attribute takes its value from atts too: preset
+   only means AutoCAD doesn't prompt for it. At the definition's values
+   each ATTRIB gets the AcDbBlockRepETag index of its definition, as
+   AutoCAD's do. They are added with dwg_add_ATTRIB (), which links them to
+   the INSERT as AutoCAD does.
 
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
    document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
@@ -357,17 +364,20 @@ typedef struct _dwg_attvalue
    FLIP value other than the definition's (DWG_ERR_NOTYETSUPPORTED), as the
    stored values of such a placement are not written yet; for a
    representation block, a graph node of a class whose stored value is not
-   known, or an entity that draws a block of its own, as a DIMENSION does
-   (DWG_ERR_NOTYETSUPPORTED); an attribute definition that isn't in the XY
-   plane, or with a tag dwg_add_ATTRIB () refuses, such as one with a
-   period (DWG_ERR_NOTYETSUPPORTED); an attribute tag that names no
-   attribute definition that isn't constant, is given twice, or has no
-   value (DWG_ERR_VALUEOUTOFBOUNDS). In a LibreDWG built without write
-   support, a placement at other values than the definition's is refused
-   (DWG_ERR_NOTYETSUPPORTED).
+   known, a rotate or scale action whose base point isn't (0, 0, 0), or an
+   entity that draws a block of its own, as a DIMENSION does
+   (DWG_ERR_NOTYETSUPPORTED); an attribute definition whose extrusion
+   isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()
+   refuses, such as one with a period (DWG_ERR_NOTYETSUPPORTED); an
+   attribute definition whose placed position, alignment point, height or
+   thickness is beyond what a double holds, at a huge scale, or an
+   attribute tag that names no attribute definition that isn't constant,
+   is given twice, or has no value (DWG_ERR_VALUEOUTOFBOUNDS). In a
+   LibreDWG built without write support, a placement at other values than
+   the definition's is refused (DWG_ERR_NOTYETSUPPORTED).
 
    @param errorp If not NULL, receives 0 or DWG_ERR_* bits. From
-                 DWG_ERR_CRITICAL up the INSERT was not made: a refusal is
+                 DWG_ERR_CRITICAL up no INSERT is returned: a refusal is
                  DWG_ERR_INVALIDDWG with a bit for the reason, logged at
                  LOG_ERROR; DWG_ERR_INTERNALERROR for NULL arguments; any
                  other failure, such as DWG_ERR_OUTOFMEM, may leave what was
