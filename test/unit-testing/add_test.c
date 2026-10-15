@@ -2783,6 +2783,87 @@ test_non_ascii_text (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* Whether dwg has one LAYER and one BLOCK_HEADER named, and one TEXT
+   holding, the non_ascii strings 1, 8 and 0 in codepage 1252. */
+static void
+check_non_ascii_r11 (const char *what, const Dwg_Data *dwg)
+{
+  const char *layer = non_ascii[1].cp1252;
+  const char *block = non_ascii[8].cp1252;
+  const char *value = non_ascii[0].cp1252;
+  unsigned layers = 0, blocks = 0, texts = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          const char *name = obj->tio.object->tio.LAYER->name;
+          if (name && strEQ (name, layer))
+            layers++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+        {
+          const char *name = obj->tio.object->tio.BLOCK_HEADER->name;
+          if (name && strEQ (name, block))
+            blocks++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_TEXT)
+        {
+          const char *text = obj->tio.entity->tio.TEXT->text_value;
+          if (text && strEQ (text, value))
+            texts++;
+        }
+    }
+  if (layers != 1)
+    fail ("%s: %u layers with the non-ASCII name", what, layers);
+  if (blocks != 1)
+    fail ("%s: %u blocks with the non-ASCII name", what, blocks);
+  if (texts != 1)
+    fail ("%s: %u TEXTs with the non-ASCII value", what, texts);
+}
+
+/* r11: table names are fixed-length text. A layer and a block named
+   outside ASCII and a TEXT, through the add API, written as r11 and read
+   back in codepage 1252. Before r13 a document built with the add API
+   converts text to the codepage when it is added, so the writer leaves it
+   as it is: converted again, the block's name "Ã©" would become "é". */
+static int
+test_non_ascii_text_r11 (void)
+{
+  const char *file = "add_non_ascii_r11.dwg";
+  const char *what = "non_ascii r11";
+  Dwg_Data *dwg = dwg_new_Document (R_11, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  Dwg_Object_BLOCK_HEADER *blk;
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p = { 10.0, 5.0, 0.0 };
+
+  failed = 0;
+  dwg_add_LAYER (dwg, non_ascii[1].utf8);
+  blk = dwg_add_BLOCK_HEADER (dwg, non_ascii[8].utf8);
+  dwg_add_BLOCK (blk, non_ascii[8].utf8);
+  dwg_add_LINE (blk, &o, &p);
+  dwg_add_ENDBLK (blk);
+  dwg_add_TEXT (ms, non_ascii[0].utf8, &p, 2.5);
+  check_non_ascii_r11 ("non_ascii r11: added", dwg);
+
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  if (read.header.codepage != CP_ANSI_1252)
+    fail ("%s: written with codepage %u", what,
+          (unsigned)read.header.codepage);
+  check_non_ascii_r11 ("non_ascii r11: written", &read);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("%s", what);
+      unlink (file);
+    }
+  return numfailed ();
+}
+
 /* r2007+ documents built with the add API keep 8-bit UTF-8 too. */
 static int
 test_non_ascii_text_r2007 (void)
@@ -3290,6 +3371,7 @@ main (int argc, char *argv[])
   error += test_vertex_links_read ();
   error += test_non_ascii_text (R_2000);
   error += test_non_ascii_text (R_2004);
+  error += test_non_ascii_text_r11 ();
   error += test_non_ascii_text_r2007 ();
 
 #ifndef DISABLE_DXF

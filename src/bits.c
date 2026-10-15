@@ -1810,6 +1810,7 @@ bit_write_TFv (Bit_Chain *restrict dat, BITCODE_TF restrict chain,
                size_t length)
 {
   size_t len;
+  char *converted = NULL;
   if (!chain)
     {
       loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
@@ -1827,6 +1828,21 @@ bit_write_TFv (Bit_Chain *restrict dat, BITCODE_TF restrict chain,
   if (dat->byte + length > dat->size)
     return;
   len = strlen ((char *)chain);
+  // Documents imported from JSON or built with the add API keep 8-bit
+  // strings in UTF-8, as bit_write_TV () converts them. The fixed-length
+  // text of preR13 (table names, header and table strings) is converted
+  // here; from R13 TFv is only used for 3DSOLID SAT data.
+  if (len && dat->opts & DWG_OPTS_INJSON && dat->version < R_13b1)
+    {
+      loglevel = dat->opts & DWG_OPTS_LOGLEVEL;
+      converted = bit_utf8_to_TV_alloc ((const char *)chain, len, 0,
+                                        dat->codepage);
+      if (converted)
+        {
+          chain = (BITCODE_TF)converted;
+          len = strlen (converted);
+        }
+    }
   if (dat->bit == 0)
     {
       if (len >= length) // long enough
@@ -1846,6 +1862,7 @@ bit_write_TFv (Bit_Chain *restrict dat, BITCODE_TF restrict chain,
             bit_write_RC (dat, 0);
         }
     }
+  free (converted);
 }
 
 /** Read simple text. After usage, the allocated memory must be properly freed.
@@ -3288,11 +3305,12 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
   char *d = dest;
   const bool is_asian_cp = dwg_codepage_isasian ((const Dwg_Codepage)codepage);
 
-  while ((c = *s++))
+  // src need not be NUL-terminated: nothing at or after ends is read
+  while (s < ends && (c = *s++))
     {
       if (dest >= endp)
         return NULL;
-      else if (cquoted && c == '\\' && dest + 1 < endp && s + 1 <= ends &&
+      else if (cquoted && c == '\\' && dest + 1 < endp && s < ends &&
                // skip \" to " and \\ to \.
                (*s == '"' || *s == '\\' || *s == 'r' || *s == 'n'))
         {
@@ -3308,14 +3326,14 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
             }
         }
       // 0 bytes
-      else if (c == '\\' && dest + 7 < endp && *s == 'u' && s + 5 <= ends
+      else if (c == '\\' && dest + 7 < endp && ends - s >= 5 && *s == 'u'
                && !memcmp (s, "u0000", 5))
         {
           *dest++ = 0;
           s += 5;
         }
       // \uxxxx => \U+XXXX as in bit_embed_TU
-      else if (c == '\\' && dest + 7 < endp && *s == 'u' && s + 5 <= ends)
+      else if (c == '\\' && dest + 7 < endp && ends - s >= 5 && *s == 'u')
         {
           *dest++ = c;
           *dest++ = 'U';
@@ -3330,7 +3348,8 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
         {
           *dest++ = c;
         }
-      else if ((c & 0xe0) == 0xc0 && s < ends && (*s & 0xc0) == 0x80)
+      // 0xC0 and 0xC1 only start overlong sequences
+      else if (c >= 0xc2 && c <= 0xdf && s < ends && (*s & 0xc0) == 0x80)
         {
           if (dest + 7 < endp)
             {
@@ -3364,8 +3383,11 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
           else
             return NULL;
         }
-      else if ((c & 0xf0) == 0xe0 && s + 1 < ends && (*s & 0xc0) == 0x80
-               && (*(s + 1) & 0xc0) == 0x80 && (c != 0xe0 || *s >= 0xa0))
+      // not overlong (0xE0 0x80-0x9F), nor a UTF-16 surrogate (0xED
+      // 0xA0-0xBF)
+      else if ((c & 0xf0) == 0xe0 && ends - s >= 2 && (*s & 0xc0) == 0x80
+               && (*(s + 1) & 0xc0) == 0x80 && (c != 0xe0 || *s >= 0xa0)
+               && (c != 0xed || *s < 0xa0))
         {
           if (dest + 7 < endp)
             {
@@ -3397,19 +3419,21 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
           else
             return NULL;
         }
-      // U+10000 and up: \U+XXXX can't express it, so it is left out
-      else if ((c & 0xf8) == 0xf0 && s + 2 < ends && (*s & 0xc0) == 0x80
-               && (*(s + 1) & 0xc0) == 0x80 && (*(s + 2) & 0xc0) == 0x80)
+      // U+10000 to U+10FFFF: \U+XXXX can't express it, so it is left out.
+      // Not overlong (0xF0 0x80-0x8F), nor above U+10FFFF (0xF4 0x90 and
+      // up, 0xF5 and up).
+      else if (c >= 0xf0 && c <= 0xf4 && ends - s >= 3 && (*s & 0xc0) == 0x80
+               && (*(s + 1) & 0xc0) == 0x80 && (*(s + 2) & 0xc0) == 0x80
+               && (c != 0xf0 || *s >= 0x90) && (c != 0xf4 || *s < 0x90))
         s += 3;
       else
         {
-          // Not UTF-8 (a stray continuation byte, a sequence cut short or
-          // overlong): keep the byte as it is.
+          // Not UTF-8 (a stray continuation byte, a sequence cut short,
+          // overlong, a surrogate or above U+10FFFF): keep the byte as it
+          // is.
           LOG_WARN ("utf-8: invalid byte 0x%02X kept", (unsigned)c);
           *dest++ = c;
         }
-      if (s >= ends)
-        break;
     }
 
   if (dest >= endp)

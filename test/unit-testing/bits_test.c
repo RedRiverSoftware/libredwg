@@ -1291,6 +1291,14 @@ bit_utf8_to_TV_invalid_tests (void)
     { "\xE0\x80\xAF", "\xE0\x80\xAF" },       // overlong '/'
     { "\xC3\xA9\xE9", "\xE9\xE9" },           // valid, then not
     { "\xF0\x9F\x98\x80!", "!" },             // U+1F600 is left out
+    { "\xC0\xAF", "\xC0\xAF" },               // overlong 2-byte '/'
+    { "\xC1\xBF", "\xC1\xBF" },               // overlong 2-byte U+007F
+    { "a\xED\xA0\x80z", "a\xED\xA0\x80z" },   // UTF-16 surrogate U+D800
+    { "\xF0\x80\x80\xAF", "\xF0\x80\x80\xAF" }, // overlong 4-byte '/'
+    { "\xF4\x90\x80\x80", "\xF4\x90\x80\x80" }, // above U+10FFFF
+    { "\xF5\x80\x80\x80", "\xF5\x80\x80\x80" }, // lead byte above 0xF4
+    { "\xF0\x90\x80\x80!", "!" },             // U+10000 is left out
+    { "\xF4\x8F\xBF\xBF!", "!" },             // U+10FFFF is left out
   };
   char dest[64];
   char *p;
@@ -1333,6 +1341,27 @@ bit_utf8_to_TV_invalid_tests (void)
       fail ("bit_utf8_to_TV cut sequence, unterminated source: %s",
             p ? p : "NULL");
     free (cut);
+  }
+  // an unterminated source ending in a backslash, or cut inside a \u
+  // escape, is read no further than srclen, quoted or not
+  {
+    static const char *const ends[] = { "\\", "a\\", "\\u12" };
+    for (int i = 0; i < ARRAY_SIZE (ends); i++)
+      for (unsigned cquoted = 0; cquoted <= 1; cquoted++)
+        {
+          const size_t len = strlen (ends[i]);
+          char *src1 = (char *)malloc (len);
+          memcpy (src1, ends[i], len);
+          p = bit_utf8_to_TV (dest, (const unsigned char *)src1,
+                              sizeof (dest), len, cquoted, CP_ANSI_1252);
+          if (p && strEQ (p, ends[i]))
+            ok ("bit_utf8_to_TV unterminated \"%s\", cquoted %u", ends[i],
+                cquoted);
+          else
+            fail ("bit_utf8_to_TV unterminated \"%s\", cquoted %u: %s",
+                  ends[i], cquoted, p ? p : "NULL");
+          free (src1);
+        }
   }
   // NULL only when dest is too small
   p = bit_utf8_to_TV (dest, (const unsigned char *)"caf\xC3\xA9", 4, 5, 0,
@@ -1482,6 +1511,58 @@ bit_write_TV_utf8_tests (void)
     free (longstr);
     free (expect);
   }
+}
+
+/* preR13 fixed-length text (table names): the UTF-8 of a document built
+   with the add API or imported from JSON is converted to the codepage and
+   padded with NULs. Other documents' strings, and from R13 the SAT data
+   TFv writes, are written as they are. */
+static void
+bit_write_TFv_utf8_tests (void)
+{
+  static const struct
+  {
+    Dwg_Version_Type version;
+    unsigned char opts;
+    const char *expect;
+  } t[] = {
+    { R_11, DWG_OPTS_IN, "caf\xE9 10\xB2" },
+    { R_11, DWG_OPTS_INJSON, "caf\xE9 10\xB2" },
+    { R_11, 0, "caf\xC3\xA9 10\xC2\xB2" },
+    { R_2000, DWG_OPTS_IN, "caf\xC3\xA9 10\xC2\xB2" },
+  };
+  const char *str = "caf\xC3\xA9 10\xC2\xB2";
+
+  for (int i = 0; i < ARRAY_SIZE (t); i++)
+    {
+      Bit_Chain dat;
+      char *copy = strdup (str);
+      unsigned char got[16];
+      int good = 1;
+      bitprepare (&dat, 64);
+      dat.from_version = dat.version = t[i].version;
+      // with the test's loglevel, which bit_write_TFv () takes from them
+      dat.opts = (unsigned char)(t[i].opts | (loglevel & DWG_OPTS_LOGLEVEL));
+      dat.codepage = CP_ANSI_1252;
+      bit_write_TFv (&dat, (BITCODE_TF)copy, sizeof (got));
+      bit_write_RC (&dat, 0x5A);
+      bit_set_position (&dat, 0);
+      for (size_t k = 0; k < sizeof (got); k++)
+        got[k] = bit_read_RC (&dat);
+      for (size_t k = 0; k < sizeof (got); k++)
+        if (got[k] != (k < strlen (t[i].expect)
+                           ? (unsigned char)t[i].expect[k]
+                           : 0))
+          good = 0;
+      if (good && bit_read_RC (&dat) == 0x5A && strEQ (copy, str))
+        ok ("bit_write_TFv %s opts 0x%x", dwg_version_type (t[i].version),
+            (unsigned)t[i].opts);
+      else
+        fail ("bit_write_TFv %s opts 0x%x", dwg_version_type (t[i].version),
+              (unsigned)t[i].opts);
+      free (copy);
+      bitfree (&dat);
+    }
 }
 
 /* r2007+: the UTF-8 of a document built with the add API (DWG_OPTS_IN) or
@@ -2076,6 +2157,7 @@ main (int argc, char const *argv[])
   bit_utf8_to_TV_invalid_tests ();
   bit_utf8_to_TV_alloc_tests ();
   bit_write_TV_utf8_tests ();
+  bit_write_TFv_utf8_tests ();
   bit_write_T_utf8_tests ();
   bit_read_TF_tests ();
   bit_write_TF_tests ();
