@@ -3001,6 +3001,88 @@ test_block_control_refresh (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* A soft pointer that dwg_add_handle () and dwg_add_handleref () store
+   relative to its holder's handle, with codes 6, 8, 0xA or 0xC, when the
+   handles are 2^31 and more or further apart than that: it resolves to its
+   target. A target 2^32 away from the holder is not the holder itself. */
+static int
+test_add_handle_high (void)
+{
+  const struct
+  {
+    BITCODE_RLL holder, target;
+    BITCODE_RC code;
+    BITCODE_RLL value;
+  } cases[] = {
+    { 0x100000000ULL, 1, 12, 0xFFFFFFFFULL },
+    { 1, 0x80000001ULL, 10, 0x80000000ULL },
+    { 0x80000001ULL, 1, 12, 0x80000000ULL },
+    { 0x7FFFFFFFULL, 0x80000000ULL, 6, 0 },
+    { 0x80000000ULL, 0x7FFFFFFFULL, 8, 0 },
+    { 0x200000005ULL, 0x200000003ULL, 12, 2 },
+    { 0x10, 0x100000010ULL, 10, 0x100000000ULL },
+    { 2, 0xFFFFFFFFFFFFFFFFULL, 10, 0xFFFFFFFFFFFFFFFDULL },
+    { 0xFFFFFFFFFFFFFFFFULL, 1, 12, 0xFFFFFFFFFFFFFFFEULL },
+  };
+  const dwg_point_3d p1 = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p2 = { 1.0, 1.0, 0.0 };
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object *mspace = dwg ? dwg_model_space_object (dwg) : NULL;
+  Dwg_Entity_LINE *line
+      = mspace ? dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p1, &p2)
+               : NULL;
+  Dwg_Object *obj;
+  Dwg_Handle saved;
+
+  failed = 0;
+  if (!line)
+    {
+      fail ("add_handle: no LINE added");
+      if (dwg)
+        {
+          dwg_free (dwg);
+          free (dwg);
+        }
+      return numfailed ();
+    }
+  obj = &dwg->object[line->parent->objid];
+  saved = obj->handle;
+  for (int i = 0; i < ARRAY_SIZE (cases); i++)
+    {
+      Dwg_Handle hdl = { 0 };
+      Dwg_Object_Ref ref = { 0 };
+      Dwg_Object_Ref *added;
+      obj->handle.value = cases[i].holder;
+      dwg_add_handle (&hdl, 4, cases[i].target, obj);
+      ref.handleref = hdl;
+      dwg_resolve_handleref (&ref, obj);
+      added = dwg_add_handleref (dwg, 4, cases[i].target, obj);
+      if (hdl.code == cases[i].code && hdl.value == cases[i].value
+          && ref.absolute_ref == cases[i].target && added
+          && added->handleref.code == cases[i].code
+          && added->handleref.value == cases[i].value
+          && added->absolute_ref == cases[i].target)
+        ok ("add_handle: " FORMAT_RLLx " from " FORMAT_RLLx
+            " as %u." FORMAT_RLLx,
+            cases[i].target, cases[i].holder, (unsigned)hdl.code, hdl.value);
+      else
+        fail ("add_handle: " FORMAT_RLLx " from " FORMAT_RLLx
+              " as %u." FORMAT_RLLx ", resolving to " FORMAT_RLLx
+              ", expected %u." FORMAT_RLLx,
+              cases[i].target, cases[i].holder, (unsigned)hdl.code, hdl.value,
+              ref.absolute_ref, (unsigned)cases[i].code, cases[i].value);
+    }
+  // no object has the handle 0x100000010, though the LINE had 0x10
+  if (dwg_resolve_handle (dwg, 0x100000010ULL))
+    fail ("add_handle: 100000010 resolves to an object");
+  else
+    ok ("add_handle: 100000010 resolves to no object");
+  obj->handle = saved;
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -3063,6 +3145,7 @@ main (int argc, char *argv[])
   error += test_attrib_r11 (R_10, 1);
   error += test_attrib_r11 (R_11, 2);
   error += test_vertex_links_read ();
+  error += test_add_handle_high ();
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)
