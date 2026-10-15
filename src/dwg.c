@@ -813,6 +813,20 @@ dwg_get_num_entities (const Dwg_Data *dwg)
   return dwg->num_entities;
 }
 
+/* The number of dwg's objects that are entities, which dwg->num_entities
+   holds. For the importers, which create entities without the decoder's
+   dwg_setup_<token> or the add API, which count them, and may drop some
+   again. */
+BITCODE_BL
+dwg_count_entities (const Dwg_Data *restrict dwg)
+{
+  BITCODE_BL num_entities = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    if (dwg->object[i].supertype == DWG_SUPERTYPE_ENTITY)
+      num_entities++;
+  return num_entities;
+}
+
 /** Returns a copy of all entities */
 EXPORT Dwg_Object_Entity **
 dwg_get_entities (const Dwg_Data *dwg)

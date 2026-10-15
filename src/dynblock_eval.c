@@ -1306,9 +1306,6 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  // the add API doesn't count the entities it adds, as the decoder and the
-  // copy do
-  dwg->num_entities++;
   _rep->anonymous = 1;
   _rep->flag |= 1;
   _rep->base_pt = _def->base_pt;
@@ -1338,7 +1335,6 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  dwg->num_entities++;
 
   for (BITCODE_BL j = 0; j < list.count; j++)
     if (state[j])

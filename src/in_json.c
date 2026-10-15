@@ -5486,7 +5486,11 @@ dwg_read_json (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
       else if (strEQc (key, "CLASSES"))
         error |= json_CLASSES (dat, dwg, &tokens);
       else if (strEQc (key, "OBJECTS"))
-        error |= json_OBJECTS (dat, dwg, &tokens);
+        {
+          error |= json_OBJECTS (dat, dwg, &tokens);
+          // counted once all are read, as json_OBJECTS may stop part-way
+          dwg->num_entities = dwg_count_entities (dwg);
+        }
       else if (strEQc (key, "THUMBNAILIMAGE"))
         error |= json_THUMBNAILIMAGE (dat, dwg, &tokens);
       else if (strEQc (key, "AuxHeader"))
