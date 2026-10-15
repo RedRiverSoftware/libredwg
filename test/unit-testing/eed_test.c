@@ -19,7 +19,12 @@
    - a byte left over at a group's end is skipped;
    - an item the decoder can't read leaves the rest of its group to the
      raw bytes, while the groups after it and the LINE's own data are still
-     read.
+     read;
+   - a group as AutoCAD 2027 writes it in an r2004 file: the handles of
+     1003 (layer) and 1005 (entity) big-endian, and so the codepage of a
+     1000 string;
+   - items written by the encoder, a 1003 layer and 1000 strings, also one
+     read from an r2007 or later file, in those byte orders.
    In an r11 file, a string that ends an entity's EED group is read. And in
    public drawings every EED group is read whole: its items take all of its
    bytes. */
@@ -478,6 +483,257 @@ cleanup:
   return numfailed ();
 }
 
+/* An EED group of a LINE that AutoCAD 2027 saved in an r2004 file, made
+   with (entmake) from:
+     (1000 . "first") (1003 . <layer>) (1000 . "second") (1003 . "0")
+     (1005 . "273") (1004 . "0102AB") (1070 . 7) (1071 . 305419896)
+     (1040 . 1.5)
+   where <layer> is the name of a layer with the handle 273, and layer 0
+   has the handle 10. */
+static const unsigned char autocad_group[] = {
+  0,    5,    0,    30,   'f',  'i',  'r',  's',  't',  // 1000, codepage 30
+  3,    0,    0,    0,    0,    0,    0,    0x02, 0x73, // 1003 <layer>
+  0,    6,    0,    30,   's',  'e',  'c',  'o',  'n',  'd',
+  3,    0,    0,    0,    0,    0,    0,    0,    0x10, // 1003 layer 0
+  5,    0,    0,    0,    0,    0,    0,    0x02, 0x73, // 1005
+  4,    3,    0x01, 0x02, 0xAB,                         // 1004
+  70,   7,    0,                                        // 1070
+  71,   0x78, 0x56, 0x34, 0x12,                         // 1071
+  40,   0,    0,    0,    0,    0,    0,    0xF8, 0x3F  // 1040
+};
+
+static int
+test_autocad_group (const Dwg_Version_Type version)
+{
+  const char *what = "EED group as AutoCAD writes it";
+  const char *file = "eed_autocad_group.dwg";
+  const unsigned char binary[] = { 0x01, 0x02, 0xAB };
+  Drawing d;
+  Dwg_Data drawn;
+  const Dwg_Object *obj = NULL;
+  const Dwg_Eed *eed;
+  int error = 0;
+
+  failed = 0;
+  memset (&drawn, 0, sizeof (drawn));
+  if (new_drawing (version, autocad_group, sizeof (autocad_group), &d))
+    obj = write_and_read (&d, file, &drawn, &error);
+  if (!obj)
+    {
+      FAIL ("%s, %s: no LINE read back, error 0x%x", what,
+            version_name (version), (unsigned)error);
+      goto cleanup;
+    }
+  eed = obj->tio.entity->eed;
+  if (obj->tio.entity->num_eed < 9 || eed[0].size != sizeof (autocad_group))
+    {
+      FAIL ("%s, %s: %u items", what, version_name (version),
+            (unsigned)obj->tio.entity->num_eed);
+      goto cleanup;
+    }
+  if (is_string (eed[0].data, "first") && eed[0].data->u.eed_0.codepage == 30
+      && is_string (eed[2].data, "second")
+      && eed[2].data->u.eed_0.codepage == 30)
+    OK ("%s, %s: 1000 strings with codepage 30", what,
+        version_name (version));
+  else
+    FAIL ("%s, %s: 1000 strings misread", what, version_name (version));
+  if (eed[1].data && eed[1].data->code == 3
+      && eed[1].data->u.eed_3.layer == 0x273 && eed[3].data
+      && eed[3].data->code == 3 && eed[3].data->u.eed_3.layer == 0x10)
+    OK ("%s, %s: 1003 layers 273 and 10", what, version_name (version));
+  else
+    FAIL ("%s, %s: 1003 layers " FORMAT_HV " and " FORMAT_HV, what,
+          version_name (version),
+          eed[1].data ? eed[1].data->u.eed_3.layer : 0,
+          eed[3].data ? eed[3].data->u.eed_3.layer : 0);
+  if (eed[4].data && eed[4].data->code == 5
+      && eed[4].data->u.eed_5.entity == 0x273 && eed[5].data
+      && eed[5].data->code == 4 && eed[5].data->u.eed_4.length == 3
+      && !memcmp (eed[5].data->u.eed_4.data, binary, 3)
+      && is_short (eed[6].data, 7) && eed[7].data && eed[7].data->code == 71
+      && eed[7].data->u.eed_71.rl == 305419896 && eed[8].data
+      && eed[8].data->code == 40 && eed[8].data->u.eed_40.real == 1.5)
+    OK ("%s, %s: 1005, 1004, 1070, 1071 and 1040 read", what,
+        version_name (version));
+  else
+    FAIL ("%s, %s: 1005, 1004, 1070, 1071 or 1040 misread", what,
+          version_name (version));
+  if (line_read_whole (&d, obj, 9) && !(error & DWG_ERR_INVALIDEED))
+    OK ("%s, %s: the next group and the LINE read", what,
+        version_name (version));
+  else
+    FAIL ("%s, %s: the next group or the LINE misread, error 0x%x", what,
+          version_name (version), (unsigned)error);
+
+cleanup:
+  free_dwg (&drawn);
+  free_drawing (&d);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* An EED item of code with room for extra bytes of string or binary
+   data. */
+static Dwg_Eed_Data *
+new_item (const BITCODE_RC code, const size_t extra)
+{
+  Dwg_Eed_Data *data
+      = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data) + extra + 2);
+  if (data)
+    data->code = code;
+  return data;
+}
+
+static Dwg_Eed_Data *
+new_string (const char *text, const BITCODE_RS codepage)
+{
+  const size_t len = strlen (text);
+  Dwg_Eed_Data *data = new_item (0, len + 1);
+  if (data)
+    {
+      data->u.eed_0.length = (BITCODE_RS)len;
+      data->u.eed_0.codepage = codepage;
+      memcpy (data->u.eed_0.string, text, len);
+    }
+  return data;
+}
+
+/* A UTF-16 string, as the decoder reads one from an r2007 or later file. */
+static Dwg_Eed_Data *
+new_wide_string (const char *text)
+{
+  const size_t len = strlen (text);
+  Dwg_Eed_Data *data = new_item (0, (len + 1) * 2);
+  if (data)
+    {
+      data->u.eed_0_r2007.is_tu = 1;
+      data->u.eed_0_r2007.length = (BITCODE_RS)len;
+      for (size_t i = 0; i < len; i++)
+        data->u.eed_0_r2007.string[i] = (DWGCHAR)text[i];
+    }
+  return data;
+}
+
+/* Appends EED item data to ent, as the first of a group of APPID appid when
+   starts is set. Takes data, which it frees when it can't. */
+static int
+add_item (Dwg_Object_Entity *ent, const BITCODE_RLL appid, const int starts,
+          Dwg_Eed_Data *data)
+{
+  Dwg_Eed *eed;
+  if (!data)
+    return 0;
+  eed = (Dwg_Eed *)realloc (ent->eed, (ent->num_eed + 1) * sizeof (Dwg_Eed));
+  if (!eed)
+    {
+      free (data);
+      return 0;
+    }
+  ent->eed = eed;
+  eed = &ent->eed[ent->num_eed++];
+  memset (eed, 0, sizeof (Dwg_Eed));
+  eed->size = starts ? 1 : 0; // the encoder sizes the group
+  set_appid_handle (&eed->handle, appid);
+  eed->data = data;
+  return 1;
+}
+
+/* Items without raw bytes, which the encoder writes from their fields: a
+   1000 string, a 1003 layer, and a 1000 UTF-16 string, which it writes as
+   an 8-bit one with the document's codepage. */
+static int
+test_written_items (const Dwg_Version_Type version)
+{
+  const char *what = "EED items written";
+  const char *file = "eed_written_items.dwg";
+  const unsigned char dummy[] = { 70, 1, 0 };
+  unsigned char expected[32];
+  size_t n = 0;
+  Drawing d;
+  Dwg_Data drawn;
+  const Dwg_Object *obj = NULL;
+  Dwg_Object_Entity *ent = NULL;
+  const Dwg_Eed *eed;
+  BITCODE_RS cp = 0;
+  int error = 0, made = 0;
+
+  failed = 0;
+  memset (&drawn, 0, sizeof (drawn));
+  // new_drawing's groups, replaced by the items
+  if (new_drawing (version, dummy, sizeof (dummy), &d))
+    {
+      obj = dwg_resolve_handle (d.dwg, d.line);
+      ent = obj ? obj->tio.entity : NULL;
+      if (ent)
+        {
+          for (BITCODE_BL i = 0; i < ent->num_eed; i++)
+            {
+              free (ent->eed[i].raw);
+              free (ent->eed[i].data);
+            }
+          free (ent->eed);
+          ent->eed = NULL;
+          ent->num_eed = 0;
+          cp = d.dwg->header.codepage;
+          made = add_item (ent, d.appid1, 1, new_string ("abc", cp))
+                 && add_item (ent, d.appid1, 0, new_item (3, 0))
+                 && add_item (ent, d.appid1, 0, new_wide_string ("wide"));
+          if (made)
+            ent->eed[1].data->u.eed_3.layer = d.layer;
+        }
+    }
+  obj = made ? write_and_read (&d, file, &drawn, &error) : NULL;
+  if (!obj)
+    {
+      FAIL ("%s, %s: no LINE read back, error 0x%x", what,
+            version_name (version), (unsigned)error);
+      goto cleanup;
+    }
+
+  // code, length, codepage, string; code, handle
+  expected[n++] = 0;
+  expected[n++] = 3;
+  expected[n++] = (unsigned char)(cp >> 8);
+  expected[n++] = (unsigned char)(cp & 0xFF);
+  memcpy (&expected[n], "abc", 3);
+  n += 3;
+  expected[n++] = 3;
+  for (int shift = 56; shift >= 0; shift -= 8)
+    expected[n++] = (unsigned char)((d.layer >> shift) & 0xFF);
+  expected[n++] = 0;
+  expected[n++] = 4;
+  expected[n++] = (unsigned char)(cp >> 8);
+  expected[n++] = (unsigned char)(cp & 0xFF);
+  memcpy (&expected[n], "wide", 4);
+  n += 4;
+
+  eed = obj->tio.entity->eed;
+  if (obj->tio.entity->num_eed == 3 && eed[0].size == n && eed[0].raw
+      && !memcmp (eed[0].raw, expected, n))
+    OK ("%s, %s: written as AutoCAD writes them", what,
+        version_name (version));
+  else
+    FAIL ("%s, %s: written in other bytes", what, version_name (version));
+  if (obj->tio.entity->num_eed == 3 && is_string (eed[0].data, "abc")
+      && eed[0].data->u.eed_0.codepage == cp && eed[1].data
+      && eed[1].data->code == 3 && eed[1].data->u.eed_3.layer == d.layer
+      && is_string (eed[2].data, "wide")
+      && eed[2].data->u.eed_0.codepage == cp)
+    OK ("%s, %s: read back, codepage %u, layer " FORMAT_HV, what,
+        version_name (version), (unsigned)cp, d.layer);
+  else
+    FAIL ("%s, %s: read back as other values", what, version_name (version));
+
+cleanup:
+  free_dwg (&drawn);
+  free_drawing (&d);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
 /* An r11 entity has one EED group, of items without a codepage: its APPID
    index (1001) and then the data, as in r11/ACEB10.dwg. A string that ends
    its group, there or as the only item, is read. */
@@ -701,6 +957,8 @@ main (int argc, char *argv[])
       error += test_binary_overrun (versions[v]);
       error += test_failed_item (versions[v]);
       error += test_byte_left_over (versions[v]);
+      error += test_autocad_group (versions[v]);
+      error += test_written_items (versions[v]);
     }
   error += test_r11_groups ();
   for (const char *const *f = drawings; *f; f++)

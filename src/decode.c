@@ -3958,8 +3958,9 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
       }
       LATER_VERSIONS
       {
-        data->u.eed_3.layer = bit_read_RLL (dat);
-        LOG_TRACE ("layer: " FORMAT_RLL " [RLL]", data->u.eed_3.layer);
+        // the layer's handle, big-endian as 1005's
+        data->u.eed_3.layer = bit_read_RLL_BE (dat);
+        LOG_TRACE ("layer: " FORMAT_HV " [RLL_BE]", data->u.eed_3.layer);
       }
       break;
     case 4:

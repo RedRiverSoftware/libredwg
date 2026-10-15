@@ -8994,7 +8994,7 @@ typedef struct _dwg_entity_eed_data
   union eed_data_t {
     struct { /* 0 (1000) string */
       BITCODE_RS length;          /* RC */
-      unsigned short codepage:15; /* RS_LE */
+      unsigned short codepage:15; /* RS_BE */
       unsigned short is_tu:1;
 #ifndef SWIG
       // TODO broken gcc-15 optimization
