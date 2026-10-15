@@ -845,10 +845,136 @@ entity_map (const Dwg_Object_BLOCK_HEADER *def,
   return map;
 }
 
+/* An entity's sort key, by which a block draws it, and its place in the
+   block. */
+typedef struct
+{
+  BITCODE_RLL key;
+  BITCODE_BL index;
+} Draw_Key;
+
+static int
+compare_draw_keys (const void *a, const void *b)
+{
+  const Draw_Key *x = (const Draw_Key *)a;
+  const Draw_Key *y = (const Draw_Key *)b;
+  if (x->key != y->key)
+    return x->key < y->key ? -1 : 1;
+  return x->index < y->index ? -1 : x->index > y->index;
+}
+
+static int
+compare_handles (const void *a, const void *b)
+{
+  const BITCODE_RLL x = *(const BITCODE_RLL *)a;
+  const BITCODE_RLL y = *(const BITCODE_RLL *)b;
+  return x < y ? -1 : x > y;
+}
+
+/* Sets the entries of the representation block's sort table, rep_table, so
+   that the block draws its copies in the order def draws its entities.
+   A block draws an entity by its sort key: the key of the entity's entry
+   in the table, or else the entity's own handle. A key is a handle value
+   that need not name an entity of the block (it may be an erased
+   entity's), so mapping the keys to the copies' handles could reorder
+   them. Instead the copies' own handles, in ascending order, are handed
+   out as keys in def's draw order. A copy gets an entry when def's table
+   lists its entity or when its key isn't its own handle; def's entries
+   for entities of other blocks have no copy and are left out. */
+static int
+order_sortents (Dynblock_Placement *p, const BITCODE_RLL def_table,
+                const BITCODE_RLL rep_table)
+{
+  Dwg_Data *dwg = p->dwg;
+  const Dwg_Object_BLOCK_HEADER *def = block_of (dwg, p->def);
+  const Dwg_Object_BLOCK_HEADER *rep = block_of (dwg, p->block);
+  const Dwg_Object_SORTENTSTABLE *dt
+      = handle_object (dwg, def_table)->tio.object->tio.SORTENTSTABLE;
+  Dwg_Object_SORTENTSTABLE *rt
+      = handle_object (dwg, rep_table)->tio.object->tio.SORTENTSTABLE;
+  const BITCODE_BL n
+      = def->num_owned < rep->num_owned ? def->num_owned : rep->num_owned;
+  Draw_Key *order = (Draw_Key *)calloc (n ? n : 1, sizeof (Draw_Key));
+  BITCODE_RLL *handles = (BITCODE_RLL *)calloc (n ? n : 1, sizeof (*handles));
+  BITCODE_RLL *keys = (BITCODE_RLL *)calloc (n ? n : 1, sizeof (*keys));
+  char *listed = (char *)calloc (n ? n : 1, 1);
+  BITCODE_H *ents = NULL, *sort_ents = NULL;
+  BITCODE_BL num_order = 0, num = 0;
+  int error = DWG_ERR_OUTOFMEM;
+
+  if (!order || !handles || !keys || !listed)
+    goto done;
+  // def's draw order, and the copies' handles
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      const BITCODE_RLL def_h = ref_handle (def->entities[i]);
+      const BITCODE_RLL copy_h = ref_handle (rep->entities[i]);
+      BITCODE_RLL key = def_h;
+      if (!def_h || !copy_h)
+        continue;
+      for (BITCODE_BL j = 0; dt->ents && dt->sort_ents && j < dt->num_ents;
+           j++)
+        if (ref_handle (dt->ents[j]) == def_h)
+          {
+            key = ref_handle (dt->sort_ents[j]);
+            listed[i] = 1;
+            break;
+          }
+      order[num_order].key = key;
+      order[num_order].index = i;
+      handles[num_order] = copy_h;
+      num_order++;
+    }
+  qsort (order, num_order, sizeof (Draw_Key), compare_draw_keys);
+  qsort (handles, num_order, sizeof (BITCODE_RLL), compare_handles);
+  for (BITCODE_BL k = 0; k < num_order; k++)
+    keys[order[k].index] = handles[k];
+  for (BITCODE_BL i = 0; i < n; i++)
+    if (keys[i] && (listed[i] || keys[i] != ref_handle (rep->entities[i])))
+      num++;
+  if (num)
+    {
+      ents = (BITCODE_H *)calloc (num, sizeof (BITCODE_H));
+      sort_ents = (BITCODE_H *)calloc (num, sizeof (BITCODE_H));
+      if (!ents || !sort_ents)
+        goto done;
+    }
+  num = 0;
+  // in the block's order
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      const BITCODE_RLL copy_h = ref_handle (rep->entities[i]);
+      if (!keys[i] || !(listed[i] || keys[i] != copy_h))
+        continue;
+      ents[num] = dwg_add_handleref (dwg, 4, copy_h, NULL);
+      sort_ents[num] = dwg_add_handleref (dwg, 0, keys[i], NULL);
+      if (!ents[num] || !sort_ents[num])
+        goto done;
+      num++;
+    }
+  free (rt->ents);
+  free (rt->sort_ents);
+  rt->ents = ents;
+  rt->sort_ents = sort_ents;
+  rt->num_ents = num;
+  ents = sort_ents = NULL;
+  error = 0;
+done:
+  free (ents);
+  free (sort_ents);
+  free (order);
+  free (handles);
+  free (keys);
+  free (listed);
+  if (error)
+    set_reason (p, "ordering the sort table failed (0x%x)", (unsigned)error);
+  return error;
+}
+
 /* Copies def's ACAD_SORTENTS table, the draw order, into a new extension
-   dictionary of the representation block, its entities mapped to the
-   copies. AutoCAD gives a representation block one exactly when its
-   definition has one. */
+   dictionary of the representation block, with entries for the copies
+   that keep def's draw order (order_sortents ()). AutoCAD gives a
+   representation block one exactly when its definition has one. */
 static int
 copy_sortents (Dynblock_Placement *p, const Dwg_Object *sortents)
 {
@@ -887,26 +1013,10 @@ copy_sortents (Dynblock_Placement *p, const Dwg_Object *sortents)
                   (unsigned)error);
       return error ? error : DWG_ERR_INTERNALERROR;
     }
-  // an entry for an entity that isn't one of def's has no copy to name:
-  // it is left out, rather than naming an entity of another block
   {
-    Dwg_Object_SORTENTSTABLE *table
-        = handle_object (dwg, copy)->tio.object->tio.SORTENTSTABLE;
-    BITCODE_BL kept = 0;
-    for (BITCODE_BL i = 0; table->ents && table->sort_ents
-                           && i < table->num_ents;
-         i++)
-      {
-        const Dwg_Object *ent = ref_object (dwg, table->ents[i]);
-        if (ent && ent->supertype == DWG_SUPERTYPE_ENTITY
-            && ref_handle (ent->tio.entity->ownerhandle) == p->block)
-          {
-            table->ents[kept] = table->ents[i];
-            table->sort_ents[kept] = table->sort_ents[i];
-            kept++;
-          }
-      }
-    table->num_ents = kept;
+    const int order_error = order_sortents (p, source, copy);
+    if (order_error)
+      return order_error | error;
   }
   // xdic's struct doesn't move with dwg->object
   return add_item (xdic, "ACAD_SORTENTS", copy) | error;

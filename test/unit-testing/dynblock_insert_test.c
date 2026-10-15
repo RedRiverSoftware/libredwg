@@ -64,6 +64,7 @@ static int test_loglevel;
 #define WRITTEN "dynblock_insert_test.dwg"
 #define WRITTEN_ATTRIBS "dynblock_insert_test_attribs.dwg"
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
+#define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -1889,6 +1890,205 @@ test_sortents_entries (Dwg_Data *src)
   return failures;
 }
 
+/* The places of blk's entities, at most max, in the order blk draws them
+   by its sort table t: an entity by the key of its entry, or else by its
+   own handle. Returns the number of places. */
+static BITCODE_BL
+draw_order (const Dwg_Object_BLOCK_HEADER *blk,
+            const Dwg_Object_SORTENTSTABLE *t, BITCODE_BL *places,
+            BITCODE_RLL *keys, const BITCODE_BL max)
+{
+  const BITCODE_BL n = blk->num_owned < max ? blk->num_owned : max;
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      keys[i] = ref (blk->entities[i]);
+      for (BITCODE_BL j = 0; t->ents && t->sort_ents && j < t->num_ents; j++)
+        if (ref (t->ents[j]) == ref (blk->entities[i]))
+          {
+            keys[i] = ref (t->sort_ents[j]);
+            break;
+          }
+      places[i] = i;
+    }
+  // by key, then by place
+  for (BITCODE_BL i = 1; i < n; i++)
+    for (BITCODE_BL j = i; j > 0 && keys[places[j - 1]] > keys[places[j]];
+         j--)
+      {
+        const BITCODE_BL place = places[j];
+        places[j] = places[j - 1];
+        places[j - 1] = place;
+      }
+  return n;
+}
+
+#define MAX_SORTED 4096
+
+/* Checks that rep, the representation block of def, draws its copies in
+   the order def draws its entities, and that each of its sort keys is the
+   handle of one of its copies. */
+static int
+check_draw_order (const char *what, const Dwg_Data *dwg,
+                  const BITCODE_RLL def, const BITCODE_RLL rep)
+{
+  static BITCODE_BL def_places[MAX_SORTED], rep_places[MAX_SORTED];
+  static BITCODE_RLL def_keys[MAX_SORTED], rep_keys[MAX_SORTED];
+  const Dwg_Object_BLOCK_HEADER *defblk = block_header (dwg, def);
+  const Dwg_Object_BLOCK_HEADER *repblk = block_header (dwg, rep);
+  const Dwg_Object *def_table
+      = defblk ? dict_item (dwg, xdic (dwg, object (dwg, def)),
+                            "ACAD_SORTENTS")
+               : NULL;
+  const Dwg_Object *rep_table
+      = repblk ? dict_item (dwg, xdic (dwg, object (dwg, rep)),
+                            "ACAD_SORTENTS")
+               : NULL;
+  const Dwg_Object_SORTENTSTABLE *dt, *rt;
+  BITCODE_BL n, i, foreign = 0;
+
+  if (!def_table || !rep_table
+      || def_table->fixedtype != DWG_TYPE_SORTENTSTABLE
+      || rep_table->fixedtype != DWG_TYPE_SORTENTSTABLE
+      || defblk->num_owned != repblk->num_owned
+      || defblk->num_owned > MAX_SORTED)
+    {
+      FAIL ("%s: no sort tables, or the blocks differ in size", what);
+      return 1;
+    }
+  dt = def_table->tio.object->tio.SORTENTSTABLE;
+  rt = rep_table->tio.object->tio.SORTENTSTABLE;
+  n = draw_order (defblk, dt, def_places, def_keys, MAX_SORTED);
+  draw_order (repblk, rt, rep_places, rep_keys, MAX_SORTED);
+  for (i = 0; i < n && def_places[i] == rep_places[i]; i++)
+    ;
+  for (BITCODE_BL j = 0; j < rt->num_ents; j++)
+    {
+      const Dwg_Object *ent = object (dwg, ref (rt->sort_ents[j]));
+      if (!ent || ent->supertype != DWG_SUPERTYPE_ENTITY
+          || ref (ent->tio.entity->ownerhandle) != rep)
+        foreign++;
+    }
+  if (i == n && !foreign)
+    {
+      OK ("%s: drawn in the definition's order, %u entries", what,
+          (unsigned)rt->num_ents);
+      return 0;
+    }
+  if (i < n)
+    FAIL ("%s: draws entity %u where the definition draws entity %u", what,
+          (unsigned)rep_places[i], (unsigned)def_places[i]);
+  if (foreign)
+    FAIL ("%s: %u sort keys aren't the handles of its entities", what,
+          (unsigned)foreign);
+  return 1;
+}
+
+/* The sort keys of a definition's table may be handle values that name no
+   entity of the definition, as the key of an erased entity does; the
+   representation block still draws its copies in the definition's order.
+   Trees' table is given three entries: its first entity sorted by its
+   third's handle, its third by its first's, and its second by the handle
+   of a line in model space, which follows all of Trees' handles and isn't
+   copied, so that Trees draws its second entity last. */
+static int
+test_sortents_order (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p1 = { 0.0, 0.0, 0.0 }, p2 = { 1.0, 1.0, 0.0 };
+  static BITCODE_BL places[MAX_SORTED];
+  static BITCODE_RLL keys[MAX_SORTED];
+  Dwg_Object_BLOCK_HEADER *def;
+  const Dwg_Object *table;
+  Dwg_Object_SORTENTSTABLE *t;
+  Dwg_Entity_LINE *line;
+  Dwg_Entity_INSERT *ins;
+  Dwg_DynValue v;
+  Dwg_Data readback;
+  BITCODE_RLL h[3], line_h, rep_h = 0;
+  BITCODE_BL n;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("sort order: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  table = dict_item (dst, xdic (dst, object (dst, def_h)), "ACAD_SORTENTS");
+  line = dwg_add_LINE (model_space (dst), &p1, &p2);
+  loglevel = test_loglevel;
+  if (!table || !line || table->tio.object->tio.SORTENTSTABLE->num_ents
+      || def->num_owned < 4)
+    {
+      FAIL ("sort order: Trees' empty sort table not found");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  for (int i = 0; i < 3; i++)
+    h[i] = ref (def->entities[i]);
+  line_h = handle_of (dst, line);
+  t = table->tio.object->tio.SORTENTSTABLE;
+  t->num_ents = 3;
+  t->ents = (BITCODE_H *)calloc (3, sizeof (BITCODE_H));
+  t->sort_ents = (BITCODE_H *)calloc (3, sizeof (BITCODE_H));
+  t->ents[0] = dwg_add_handleref (dst, 4, h[0], NULL);
+  t->sort_ents[0] = dwg_add_handleref (dst, 0, h[2], NULL);
+  t->ents[1] = dwg_add_handleref (dst, 4, h[2], NULL);
+  t->sort_ents[1] = dwg_add_handleref (dst, 0, h[0], NULL);
+  t->ents[2] = dwg_add_handleref (dst, 4, h[1], NULL);
+  t->sort_ents[2] = dwg_add_handleref (dst, 0, line_h, NULL);
+  // the setup: Trees draws its third entity first and its second last
+  n = draw_order (def, t, places, keys, MAX_SORTED);
+  if (n != def->num_owned || places[0] != 2 || places[1] != 0
+      || places[n - 1] != 1)
+    {
+      FAIL ("sort order: Trees' draw order isn't the one set up");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, &v, 1,
+                             NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!ins || error)
+    {
+      FAIL ("sort order: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  rep_h = ref (ins->block_header);
+  failures += check_draw_order ("sort order", dst, def_h, rep_h);
+
+  error = write_dwg (WRITTEN_SORT, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_SORT, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("sort order: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      failures
+          += check_draw_order ("sort order, read back", &readback, def_h, rep_h);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_SORT);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
 /* A definition without a sort table gives a representation block without
    one: Trees' ACAD_SORTENTS entry is taken out of its dictionary. */
 static int
@@ -2062,6 +2262,7 @@ main (int argc, char *argv[])
   failures += test_attributes (&src);
   failures += test_image_reactors (&src);
   failures += test_sortents_entries (&src);
+  failures += test_sortents_order (&src);
   failures += test_without_sortents (&src);
   failures += test_entity_count (&src);
   free_dwg (&src);
