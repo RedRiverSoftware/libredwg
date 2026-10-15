@@ -22,7 +22,7 @@
 
 static int tracelevel;
 // the library sets loglevel from the document's opts (on read, write and
-// free); ok and fail need ours
+// free); ok prints only from loglevel 2, so it needs ours back
 static unsigned int test_loglevel;
 
 #include "config.h"
@@ -128,8 +128,8 @@ test_r12_block_xref_pname (void)
     unlink (file);
 }
 
-/* An MTEXT with two 46 groups: the importer reads them into column_heights,
-   which it allocated anew for each. */
+/* An MTEXT with two 46 groups: the importer allocates column_heights at the
+   first and keeps that one array for the second. */
 static void
 test_mtext_46 (void)
 {
