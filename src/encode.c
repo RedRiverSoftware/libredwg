@@ -80,8 +80,8 @@ void dwg_upgrade_MLINESTYLE (Dwg_Data *restrict dwg,
                              Dwg_Object_MLINESTYLE *restrict o);
 
 /* the current version per spec block */
-static Dwg_Version_Type cur_ver = R_INVALID;
-static BITCODE_BL rcount1 = 0, rcount2 = 0;
+static DWG_THREAD_LOCAL Dwg_Version_Type cur_ver = R_INVALID;
+static DWG_THREAD_LOCAL BITCODE_BL rcount1 = 0, rcount2 = 0;
 
 static size_t
 bit_umc_size (BITCODE_UMC value)
@@ -98,7 +98,7 @@ bit_umc_size (BITCODE_UMC value)
    SECTION_R13_SIZE is the size and the sentinel.
  */
 #define SECTION_R13_SIZE 7U
-static Dwg_Section_Type_r13 section_order[SECTION_R13_SIZE]
+static DWG_THREAD_LOCAL Dwg_Section_Type_r13 section_order[SECTION_R13_SIZE]
 #ifndef __cplusplus
     = { 0 }
 #endif
@@ -1626,7 +1626,7 @@ encode_preR13_section_hdr (const char *restrict name,
                            const Dwg_Section_Type_r11 id,
                            Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
 {
-  static BITCODE_BL addr = 0;
+  static DWG_THREAD_LOCAL BITCODE_BL addr = 0;
   Dwg_Section *tbl;
   int i;
   unsigned long end_address;

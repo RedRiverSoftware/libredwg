@@ -64,24 +64,15 @@
 /* Per-call rendering state.  Thread-local so concurrent calls to the SVG
    entry points in dwg_svg_api.c don't trample each other — each thread
    gets its own copy.  This replaced a process-wide mutex that previously
-   serialised all renderer calls.  MSVC's default C mode has no
-   _Thread_local, so it gets __declspec(thread); dwg_svg_api.c defines the
-   same macro before including this file. */
-#ifndef DWG_SVG_THREAD_LOCAL
-#  if defined(_MSC_VER) && !defined(__clang__)
-#    define DWG_SVG_THREAD_LOCAL __declspec (thread)
-#  else
-#    define DWG_SVG_THREAD_LOCAL _Thread_local
-#  endif
-#endif
-static DWG_SVG_THREAD_LOCAL int opts = 0;
-static DWG_SVG_THREAD_LOCAL int mspace = 0; // only mspace, even when pspace is defined
-static DWG_SVG_THREAD_LOCAL int in_block_definition = 0; // 1 when outputting block symbol entities
-static DWG_SVG_THREAD_LOCAL int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
+   serialised all renderer calls. */
+static DWG_THREAD_LOCAL int opts = 0;
+static DWG_THREAD_LOCAL int mspace = 0; // only mspace, even when pspace is defined
+static DWG_THREAD_LOCAL int in_block_definition = 0; // 1 when outputting block symbol entities
+static DWG_THREAD_LOCAL int paper_space_bg = 0; // 1 when rendering onto a white paper-space background
 /* > 0 while re-rendering Model_Space content through a Paper_Space VIEWPORT;
    holds that viewport's model→paper scale factor.  Used by entity_dasharray
    to implement PSLTSCALE=1 (dash lengths uniform in paper units). */
-static DWG_SVG_THREAD_LOCAL double viewport_ltype_scale = 0.0;
+static DWG_THREAD_LOCAL double viewport_ltype_scale = 0.0;
 
 // Case-insensitive prefix match
 static int
@@ -140,11 +131,11 @@ strcasestr_compat (const char *haystack, const char *needle)
    translate, which places the block's base point and undoes the shift, so
    the final on-canvas position is unchanged.  Zero by default ⇒ no-op for
    normal small-coord blocks. */
-static DWG_SVG_THREAD_LOCAL double current_block_offset_x = 0.0;
-static DWG_SVG_THREAD_LOCAL double current_block_offset_y = 0.0;
-DWG_SVG_THREAD_LOCAL Dwg_Data g_dwg;
-DWG_SVG_THREAD_LOCAL double model_xmin, model_ymin, model_xmax, model_ymax;
-DWG_SVG_THREAD_LOCAL double page_width, page_height, scale;
+static DWG_THREAD_LOCAL double current_block_offset_x = 0.0;
+static DWG_THREAD_LOCAL double current_block_offset_y = 0.0;
+DWG_THREAD_LOCAL Dwg_Data g_dwg;
+DWG_THREAD_LOCAL double model_xmin, model_ymin, model_xmax, model_ymax;
+DWG_THREAD_LOCAL double page_width, page_height, scale;
 
 // Extents calculation structure
 typedef struct _Extents
@@ -342,8 +333,8 @@ static char *insert_effective_layer (Dwg_Object *obj, Dwg_Data *dwg,
    output_BLOCK_HEADER to drive the layer-0-in-block inheritance rule.
    The BlockCombo machinery below assigns these before each <defs>
    clone emission and resets them to NULL afterwards. */
-static DWG_SVG_THREAD_LOCAL const char *current_eff_layer = NULL;
-static DWG_SVG_THREAD_LOCAL const char *current_eff_layer_safe = NULL;
+static DWG_THREAD_LOCAL const char *current_eff_layer = NULL;
+static DWG_THREAD_LOCAL const char *current_eff_layer_safe = NULL;
 
 /* ── Block-clone table ────────────────────────────────────────────────────
    Defined here (rather than later in the file) so output_INSERT, which is
@@ -365,9 +356,9 @@ typedef struct
   double offset_y;
 } BlockCombo;
 
-static DWG_SVG_THREAD_LOCAL BlockCombo *g_block_combos = NULL;
-static DWG_SVG_THREAD_LOCAL unsigned int g_block_combos_n = 0;
-static DWG_SVG_THREAD_LOCAL unsigned int g_block_combos_cap = 0;
+static DWG_THREAD_LOCAL BlockCombo *g_block_combos = NULL;
+static DWG_THREAD_LOCAL unsigned int g_block_combos_n = 0;
+static DWG_THREAD_LOCAL unsigned int g_block_combos_cap = 0;
 
 #ifndef DWG2SVG_NO_MAIN
 static int
@@ -2264,7 +2255,7 @@ output_XLINE (Dwg_Object *obj)
 {
   Dwg_Entity_XLINE *xline = obj->tio.entity->tio.XLINE;
   BITCODE_3DPOINT invvec;
-  static BITCODE_3DPOINT box[2];
+  static DWG_THREAD_LOCAL BITCODE_3DPOINT box[2];
   int sign[3];
   double txmin, txmax, tymin, tymax, tzmin, tzmax;
 
@@ -2311,7 +2302,7 @@ output_RAY (Dwg_Object *obj)
 {
   Dwg_Entity_XLINE *xline = obj->tio.entity->tio.RAY;
   BITCODE_3DPOINT point, invvec;
-  static BITCODE_3DPOINT box[2];
+  static DWG_THREAD_LOCAL BITCODE_3DPOINT box[2];
   int sign[3];
   double txmin, txmax, tymin, tymax, tzmin, tzmax;
 
@@ -3097,7 +3088,7 @@ output_SPLINE (Dwg_Object *obj)
      larger than any reasonable control polygon and avoids a per-call
      malloc.  Thread-local because dwg2SVG can be linked into a library
      used by multiple threads (the C# bindings do this). */
-  static DWG_SVG_THREAD_LOCAL BITCODE_3DPOINT samples[SPLINE_SAMPLE_CAP];
+  static DWG_THREAD_LOCAL BITCODE_3DPOINT samples[SPLINE_SAMPLE_CAP];
   int n_samples;
   int i;
   int emitted = 0;
@@ -3778,8 +3769,8 @@ typedef struct
   char *name;               /* HTML-escaped layer name (heap) */
 } LayerHandleEntry;
 
-static DWG_SVG_THREAD_LOCAL LayerHandleEntry *g_layer_htbl = NULL;
-static DWG_SVG_THREAD_LOCAL unsigned int g_layer_htbl_n = 0;
+static DWG_THREAD_LOCAL LayerHandleEntry *g_layer_htbl = NULL;
+static DWG_THREAD_LOCAL unsigned int g_layer_htbl_n = 0;
 
 static void
 build_layer_handle_table (Dwg_Data *dwg)
@@ -5245,7 +5236,7 @@ table_name_is (const Dwg_Data *dwg, char *name, const char *want)
 
 /* Set when the model-space viewBox was taken from the saved VPORT view
    rather than computed geometry extents (see below). */
-static DWG_SVG_THREAD_LOCAL int used_vport_view = 0;
+static DWG_THREAD_LOCAL int used_vport_view = 0;
 
 /* Zoom-extents framing breaks down when a drawing scatters geometry
    absurdly far apart — e.g. a site plan drawn in millimetres at map-grid
