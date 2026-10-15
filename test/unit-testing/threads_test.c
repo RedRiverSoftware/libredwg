@@ -357,8 +357,9 @@ start_thread (Test_Thread *thread, Worker *w)
 {
   pthread_attr_t attr;
   int error = pthread_attr_init (&attr);
-  if (!error)
-    error = pthread_attr_setstacksize (&attr, THREAD_STACK_SIZE);
+  if (error)
+    return error;
+  error = pthread_attr_setstacksize (&attr, THREAD_STACK_SIZE);
   if (!error)
     error = pthread_create (thread, &attr, thread_main, w);
   pthread_attr_destroy (&attr);

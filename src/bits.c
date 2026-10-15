@@ -38,18 +38,18 @@
 #  include <iconv.h>
 #endif
 
+#define DWG_LOGLEVEL loglevel
+#include "logging.h"
+#include "bits.h"
+#include "common.h"
+#include "codepages.h"
+
 #ifdef DWG_ABORT
 static DWG_THREAD_LOCAL unsigned int errors = 0;
 #  ifndef DWG_ABORT_LIMIT
 #    define DWG_ABORT_LIMIT 200
 #  endif
 #endif
-
-#define DWG_LOGLEVEL loglevel
-#include "logging.h"
-#include "bits.h"
-#include "common.h"
-#include "codepages.h"
 
 /*------------------------------------------------------------------------------
  * Public functions
