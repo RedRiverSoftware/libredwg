@@ -37,6 +37,7 @@
 #include "copy.h"
 #include "geom.h"
 #include "dwg_dynblock_api.h"
+#include "dynblock.h"
 
 #define DWG_LOGLEVEL loglevel
 #include "logging.h"
@@ -1210,10 +1211,12 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * which changes those parameters' values unless they are set too. So each
  * linear parameter is evaluated after the actions that move it, of the
  * properties that run: those given a value that changes their parameter,
- * or that such an action moves. The actions of the others don't run. The
- * evaluation graph doesn't list its nodes in that order. As the stretch
- * and move actions translate, their order doesn't change the geometry
- * otherwise.
+ * and those given a value that such an action moves. The actions of the
+ * others don't run. The evaluation graph doesn't list its nodes in that
+ * order. As the stretch and move actions translate, their order doesn't
+ * change the geometry otherwise. The points of every parameter are kept as
+ * the actions that run leave them, which is what AutoCAD stores for a
+ * placement (dynblock_evaluated_state ()).
  *
  * A ROTATION value turns its parameter's end point about its base point,
  * and the rotate actions connected to the parameter then turn the
@@ -1227,7 +1230,8 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * then independent of the others, and are evaluated after them.
  *
  * Everything is planned on the definition first, as moves and turns of
- * its entities, so that a refusal comes before anything is copied.
+ * its entities and of its parameters' points, so that a refusal comes
+ * before anything is copied.
  */
 
 /* A linear parameter during the evaluation: its points as the actions
@@ -1294,6 +1298,16 @@ typedef struct _dynblock_plan
   dwg_inthash *entities; /* def's own entities */
   const Dwg_Object **nodes; /* the evaluation graph's elements */
   BITCODE_BL num_nodes;
+  /* for each of nodes, its points as the actions planned so far moved
+     them; those of a linear parameter are in linear[] until the plan is
+     done */
+  Dynblock_Node_State *states;
+  /* for each of nodes, the STATE_MOVED and STATE_TURNED changes planned */
+  unsigned char *changes;
+  /* why the stored state of a parameter that an action moves is not
+     known, or empty: dynblock_evaluated_state () refuses it, while the
+     geometry is evaluated */
+  char unknown[REASON_SIZE];
   dwg_inthash *node_handles;
   Dynblock_Linear *linear;
   BITCODE_BL num_linear;
@@ -1468,9 +1482,201 @@ is_graph_element (const Dwg_Object *obj)
     }
 }
 
+/* The starts of a two-point parameter's struct (linear, alignment, flip,
+   rotation, XY, polar) and of a one-point one's (visibility, base point,
+   point). */
+typedef struct _dynblock_2pt_param
+{
+  struct _dwg_object_object *parent;
+  BLOCK2PTPARAMETER_fields;
+} Dynblock_2Pt_Param;
+
+typedef struct _dynblock_1pt_param
+{
+  struct _dwg_object_object *parent;
+  BLOCK1PTPARAMETER_fields;
+} Dynblock_1Pt_Param;
+
+/* The state of node obj before the evaluation: for a parameter whose
+   record on a placement AutoCAD's have shown, the points that record
+   holds; none for the other nodes. */
+static void
+init_state (const Dwg_Object *obj, Dynblock_Node_State *state)
+{
+  memset (state, 0, sizeof (*state));
+  state->handle = obj->handle.value;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARPARAMETER:
+    case DWG_TYPE_BLOCKALIGNMENTPARAMETER:
+    case DWG_TYPE_BLOCKFLIPPARAMETER:
+    case DWG_TYPE_BLOCKROTATIONPARAMETER:
+      {
+        const Dynblock_2Pt_Param *_obj
+            = (const Dynblock_2Pt_Param *)obj->tio.object->tio
+                  .BLOCKFLIPPARAMETER;
+        state->num_points = 2;
+        state->points[0] = _obj->def_basept;
+        state->points[1] = _obj->def_endpt;
+      }
+      break;
+    case DWG_TYPE_BLOCKVISIBILITYPARAMETER:
+    case DWG_TYPE_BLOCKBASEPOINTPARAMETER:
+      {
+        const Dynblock_1Pt_Param *_obj
+            = (const Dynblock_1Pt_Param *)obj->tio.object->tio
+                  .BLOCKVISIBILITYPARAMETER;
+        state->num_points = 1;
+        state->points[0] = _obj->def_pt;
+      }
+      break;
+    default:
+      break;
+    }
+}
+
+/* The state of the node with node id nodeid, or NULL. */
+static Dynblock_Node_State *
+find_state (const Dynblock_Plan *plan, const BITCODE_BL nodeid)
+{
+  for (BITCODE_BL i = 0; plan->states && i < plan->num_nodes; i++)
+    if (node_id (plan->nodes[i]) == nodeid)
+      return &plan->states[i];
+  return NULL;
+}
+
+/* Keeps the first reason why a parameter's stored state is not known. */
+static void ATTRIBUTE_FORMAT (2, 3)
+    set_unknown (Dynblock_Plan *plan, const char *fmt, ...)
+{
+  va_list ap;
+  int len;
+  if (plan->unknown[0])
+    return;
+  va_start (ap, fmt);
+  len = vsnprintf (plan->unknown, sizeof (plan->unknown), fmt, ap);
+  va_end (ap);
+  if (len >= (int)sizeof (plan->unknown))
+    utf8_trim (plan->unknown);
+}
+
+#define STATE_MOVED 1
+#define STATE_TURNED 2
+
+/* Notes that action a moves (STATE_MOVED) or turns (STATE_TURNED) the
+   points of the parameter with node id nodeid. Moves add up in any order,
+   but a turn and another move or turn of the same points don't, and the
+   order AutoCAD runs them in is not known. */
+static void
+note_change (Dynblock_Plan *plan, const Dynblock_Action *a,
+             const BITCODE_BL nodeid, const unsigned char change)
+{
+  for (BITCODE_BL i = 0; plan->changes && i < plan->num_nodes; i++)
+    if (node_id (plan->nodes[i]) == nodeid)
+      {
+        if (plan->changes[i]
+            && ((plan->changes[i] | change) & STATE_TURNED))
+          set_unknown (plan,
+                       "action '%s' and another action move or turn node "
+                       "%u, one of them by a turn; the order AutoCAD runs "
+                       "them in is not known",
+                       a->name, (unsigned)nodeid);
+        plan->changes[i] |= change;
+        return;
+      }
+}
+
+/* The state of the parameter with node id nodeid, other than a linear
+   one, whose points action a moves or turns, as change says, or NULL when
+   AutoCAD's records have not shown how they move: those of a rotation
+   parameter, whose record also holds its base angle point, and of a
+   parameter of a class whose record is not known. */
+static Dynblock_Node_State *
+moved_state (Dynblock_Plan *plan, const Dynblock_Action *a,
+             const BITCODE_BL nodeid, const unsigned char change)
+{
+  const Dwg_Object *obj = find_node (plan, nodeid);
+  Dynblock_Node_State *state = find_state (plan, nodeid);
+  if (!obj || !is_parameter (obj))
+    return NULL;
+  if (obj->fixedtype != DWG_TYPE_BLOCKROTATIONPARAMETER && state
+      && state->num_points)
+    {
+      note_change (plan, a, nodeid, change);
+      return state;
+    }
+  set_unknown (plan,
+               "action '%s' moves %s (node %u), whose stored state on a "
+               "placement is then not known",
+               a->name, dwg_type_name (obj->fixedtype), (unsigned)nodeid);
+  return NULL;
+}
+
+static void
+add_delta (BITCODE_3BD *pt, const BITCODE_3BD *delta)
+{
+  pt->x += delta->x;
+  pt->y += delta->y;
+  pt->z += delta->z;
+}
+
+/* Whether the n indexes of a stretch action's list name a point twice. */
+static int
+has_repeated_index (const BITCODE_BL *indexes, const BITCODE_BS n)
+{
+  for (BITCODE_BS i = 0; i < n; i++)
+    for (BITCODE_BS j = 0; j < i; j++)
+      if (indexes[i] == indexes[j])
+        return 1;
+  return 0;
+}
+
+/* Moves by delta the points that stretch action a lists in c of a
+   parameter other than a linear one: 0 its base point, or its one point,
+   and 1 its end point. */
+static void
+stretch_state (Dynblock_Plan *plan, const Dynblock_Action *a,
+               const Dwg_BLOCKSTRETCHACTION_codes *c, const BITCODE_3BD *delta)
+{
+  Dynblock_Node_State *state = moved_state (plan, a, c->bl95, STATE_MOVED);
+  if (!state)
+    return;
+  for (BITCODE_BS j = 0; j < c->num_indexes; j++)
+    if (c->indexes[j] >= state->num_points)
+      {
+        set_unknown (plan,
+                     "stretch action '%s' lists point %u of node %u, whose "
+                     "stored state on a placement holds %u",
+                     a->name, (unsigned)c->indexes[j], (unsigned)c->bl95,
+                     (unsigned)state->num_points);
+        return;
+      }
+  if (has_repeated_index (c->indexes, c->num_indexes))
+    {
+      set_unknown (plan, "stretch action '%s' lists a point of node %u twice",
+                   a->name, (unsigned)c->bl95);
+      return;
+    }
+  for (BITCODE_BS j = 0; j < c->num_indexes; j++)
+    add_delta (&state->points[c->indexes[j]], delta);
+}
+
+/* Turns the point pt about the point center of the block's XY plane,
+   counter-clockwise by angle. */
+static void
+turn_point (BITCODE_3BD *pt, const BITCODE_2RD *center, const double angle)
+{
+  const double dx = pt->x - center->x, dy = pt->y - center->y;
+  const double c = cos (angle), s = sin (angle);
+  pt->x = center->x + dx * c - dy * s;
+  pt->y = center->y + dx * s + dy * c;
+}
+
 /* Refuses an action that runs moving the points of rotation parameter r
-   given a value: its rotate actions would turn about a point that
-   moved. */
+   given a value, even at the definition's angle: its rotate actions would
+   turn about a point that moved, and a move of one of its points changes
+   its angle, so that a value at the definition's angle can still call for
+   a turn. */
 static int
 check_moved_rotation (Dynblock_Plan *plan, const Dynblock_Action *a,
                       const int r)
@@ -1484,11 +1690,11 @@ check_moved_rotation (Dynblock_Plan *plan, const Dynblock_Action *a,
   return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
 }
 
-/* Checks the node with node id nodeid, other than a linear parameter,
-   whose points action a moves: refuses an id the evaluation graph doesn't
-   have, a rotation parameter given a value, as check_moved_rotation ()
-   says, and a parameter that chains its actions, as AutoCAD would run them
-   too. */
+/* Checks the node with node id nodeid whose points action a moves (for a
+   stretch or move action, one other than a linear parameter): refuses an
+   id the evaluation graph doesn't have, a rotation parameter given a
+   value, as check_moved_rotation () says, and a parameter that chains its
+   actions, as AutoCAD would run them too. */
 static int
 check_selected_node (Dynblock_Plan *plan, const Dynblock_Action *a,
                      const BITCODE_BL nodeid)
@@ -1566,7 +1772,8 @@ lists_node (const Dwg_Object *a, const BITCODE_BL nodeid)
    AutoCAD stores one that does is not known: refuses one that chains its
    actions, which AutoCAD would then run, a rotation parameter given a
    value, or a linear parameter that runs, which a rotate action would
-   turn, as check_turned_linear () says. Grips are left alone. */
+   turn, as check_turned_linear () says. The stored state of one that it
+   doesn't refuse is not known. Grips are left alone. */
 static int
 check_selected_dep (Dynblock_Plan *plan, const Dynblock_Action *a,
                     const Dwg_Object *obj)
@@ -1594,7 +1801,14 @@ check_selected_dep (Dynblock_Plan *plan, const Dynblock_Action *a,
     }
   // every parameter starts with BLOCKPARAMETER_fields
   if (!obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->chain_actions)
-    return 0;
+    {
+      set_unknown (plan,
+                   "action '%s' selects %s (node %u) without listing it "
+                   "among the parameters it moves, so whether it moves is "
+                   "not known",
+                   a->name, dwg_type_name (obj->fixedtype), (unsigned)nodeid);
+      return 0;
+    }
   set_reason (plan->reason, plan->reason_size,
               "action '%s' selects %s (node %u), which chains its actions, "
               "without listing it among the parameters it moves; that is not "
@@ -2001,13 +2215,14 @@ check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
 }
 
 /* Plans stretch action a moving the stretch points it lists by delta,
-   and the points of the linear parameters it lists. */
+   and the points of the parameters it lists. */
 static int
 plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
               const BITCODE_3BD *delta)
 {
   const Dwg_Object_BLOCKSTRETCHACTION *_a
       = a->obj->tio.object->tio.BLOCKSTRETCHACTION;
+  const BITCODE_BL own = action_parameter (a);
   int error = 0;
   for (BITCODE_BL i = 0; _a->hdls && i < _a->num_hdls && !error; i++)
     {
@@ -2110,7 +2325,30 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
                       (unsigned)c->bl95);
           return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
-      for (BITCODE_BS j = 0; k >= 0 && j < c->num_indexes; j++)
+      // Its own parameter's end point is where the value puts it. Moving
+      // it again would change the value AutoCAD shows, so how AutoCAD
+      // stores one the action lists is not known; the geometry doesn't
+      // depend on it.
+      if (c->bl95 == own)
+        {
+          set_unknown (plan,
+                       "stretch action '%s' lists its own parameter among "
+                       "those it moves, so its stored state is not known",
+                       a->name);
+          continue;
+        }
+      if (k < 0)
+        {
+          stretch_state (plan, a, c, delta);
+          continue;
+        }
+      if (has_repeated_index (c->indexes, c->num_indexes))
+        set_unknown (plan,
+                     "stretch action '%s' lists a point of linear property "
+                     "'%s' twice",
+                     a->name, plan->linear[k].name);
+      note_change (plan, a, c->bl95, STATE_MOVED);
+      for (BITCODE_BS j = 0; j < c->num_indexes; j++)
         {
           Dynblock_Linear *q = &plan->linear[k];
           if (c->indexes[j] > 1)
@@ -2139,13 +2377,14 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
 }
 
 /* Plans move action a moving the entities it selects by delta, and the
-   linear parameters it lists. */
+   parameters it lists. */
 static int
 plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
            const BITCODE_3BD *delta)
 {
   const Dwg_Object_BLOCKMOVEACTION *_a
       = a->obj->tio.object->tio.BLOCKMOVEACTION;
+  const BITCODE_BL own = action_parameter (a);
   int error = 0;
   for (BITCODE_BL i = 0; _a->deps && i < _a->num_deps && !error; i++)
     {
@@ -2167,10 +2406,24 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
     {
       const int k = find_linear (plan, _a->actions[i]);
       if (k < 0)
-        error = check_selected_node (plan, a, _a->actions[i]);
+        {
+          Dynblock_Node_State *state;
+          error = check_selected_node (plan, a, _a->actions[i]);
+          state = error ? NULL
+                        : moved_state (plan, a, _a->actions[i], STATE_MOVED);
+          for (BITCODE_BL j = 0; state && j < state->num_points; j++)
+            add_delta (&state->points[j], delta);
+        }
+      // as for a stretch action that lists its own parameter
+      else if (_a->actions[i] == own)
+        set_unknown (plan,
+                     "move action '%s' lists its own parameter among those "
+                     "it moves, so its stored state is not known",
+                     a->name);
       else
         {
           Dynblock_Linear *q = &plan->linear[k];
+          note_change (plan, a, q->nodeid, STATE_MOVED);
           q->base.x += delta->x;
           q->base.y += delta->y;
           q->base.z += delta->z;
@@ -2207,10 +2460,11 @@ moves_linear (const Dwg_Object *a, const BITCODE_BL nodeid)
 }
 
 /* Marks the parameters that run, whose actions run: a linear one given a
-   value that differs from its length, or that a stretch or move action of
-   one that runs moves, worked out until no more are found; a rotation one
-   given a value that differs from its angle. A rotate action doesn't
-   change the length of a linear parameter it turns. */
+   value that differs from its length, or given a value and moved by a
+   stretch or move action of one that runs, worked out until no more are
+   found; a rotation one given a value that differs from its angle. A
+   rotate action doesn't change the length of a linear parameter it
+   turns. */
 static void
 mark_running (Dynblock_Plan *plan)
 {
@@ -2396,15 +2650,32 @@ plan_actions_of (Dynblock_Plan *plan, const Dynblock_Linear *p,
   return 0;
 }
 
-/* Whether the evaluator turns an entity of obj's type. Not an ATTDEF: in
-   a check, AutoCAD left the ATTDEFs a rotate action selected as they were,
-   neither moved nor turned, in the representation block and on the
-   placement, so how it turns one is not known. */
+/* Whether the evaluator turns an entity of obj's type: one that
+   turn_whole () turns, which leaves the other types as they are, so the
+   two lists must be kept the same. Not an ATTDEF: in a check, AutoCAD
+   left the ATTDEFs a rotate action selected as they were, neither moved
+   nor turned, in the representation block and on the placement, so how it
+   turns one is not known. */
 static int
 is_turnable (const Dwg_Object *obj)
 {
-  return (is_movable (obj) && obj->fixedtype != DWG_TYPE_ATTDEF)
-         || obj->fixedtype == DWG_TYPE_POINT;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+    case DWG_TYPE_LWPOLYLINE:
+    case DWG_TYPE_ARC:
+    case DWG_TYPE_CIRCLE:
+    case DWG_TYPE_ELLIPSE:
+    case DWG_TYPE_SPLINE:
+    case DWG_TYPE_TEXT:
+    case DWG_TYPE_MTEXT:
+    case DWG_TYPE_INSERT:
+    case DWG_TYPE_HATCH:
+    case DWG_TYPE_POINT:
+      return 1;
+    default:
+      return 0;
+    }
 }
 
 /* The extrusion of entity obj, of a type the evaluator turns, or NULL for
@@ -2543,8 +2814,9 @@ plan_turn (Dynblock_Plan *plan, const Dynblock_Action *a,
 }
 
 /* Plans rotate action a turning the entities it selects about center by
-   angle. The parameters it turns are checked, as check_turned_linear ()
-   and check_selected_node () say. */
+   angle, and the points of the parameters it lists. The parameters it
+   turns are checked, as check_turned_linear () and check_selected_node ()
+   say. */
 static int
 plan_rotate (Dynblock_Plan *plan, const Dynblock_Action *a,
              const BITCODE_2RD *center, const double angle)
@@ -2572,12 +2844,35 @@ plan_rotate (Dynblock_Plan *plan, const Dynblock_Action *a,
   for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
     {
       const BITCODE_BL nodeid = _a->actions[i];
-      // its own parameter's end point turns with the value
+      const int k = find_linear (plan, nodeid);
+      Dynblock_Node_State *state;
+      // Its own parameter's end point turns with the value, which the
+      // geometry depends on alone; how AutoCAD stores one the action lists
+      // is not known.
       if (nodeid == own)
-        continue;
-      error = check_turned_linear (plan, a, find_linear (plan, nodeid));
+        {
+          set_unknown (plan,
+                       "rotate action '%s' lists its own parameter among "
+                       "those it turns, so its stored state is not known",
+                       a->name);
+          continue;
+        }
+      error = check_turned_linear (plan, a, k);
       if (!error)
         error = check_selected_node (plan, a, nodeid);
+      if (error)
+        break;
+      // a linear parameter that doesn't run, whose length stays
+      if (k >= 0)
+        {
+          note_change (plan, a, nodeid, STATE_TURNED);
+          turn_point (&plan->linear[k].base, center, angle);
+          turn_point (&plan->linear[k].end, center, angle);
+          continue;
+        }
+      state = moved_state (plan, a, nodeid, STATE_TURNED);
+      for (BITCODE_BL j = 0; state && j < state->num_points; j++)
+        turn_point (&state->points[j], center, angle);
     }
   return error;
 }
@@ -2666,6 +2961,8 @@ free_plan (Dynblock_Plan *plan)
   free_hash (plan->entities);
   free_hash (plan->node_handles);
   free ((void *)plan->nodes);
+  free (plan->states);
+  free (plan->changes);
   free (plan->linear);
   free (plan->rotations);
   for (BITCODE_BL i = 0; plan->actions && i < plan->num_actions; i++)
@@ -2673,6 +2970,12 @@ free_plan (Dynblock_Plan *plan)
   free (plan->actions);
   free (plan->moves);
   free (plan->turns);
+}
+
+static int
+is_finite_3d (const BITCODE_3BD *pt)
+{
+  return isfinite (pt->x) && isfinite (pt->y) && isfinite (pt->z);
 }
 
 static int
@@ -2979,8 +3282,12 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
                                                  sizeof (Dynblock_Rotation));
   plan->actions = (Dynblock_Action *)calloc (_graph->num_nodes + 1,
                                              sizeof (Dynblock_Action));
+  plan->states = (Dynblock_Node_State *)calloc (_graph->num_nodes + 1,
+                                                sizeof (Dynblock_Node_State));
+  plan->changes = (unsigned char *)calloc (_graph->num_nodes + 1, 1);
   if (!plan->entities || !plan->node_handles || !plan->nodes || !plan->linear
-      || !plan->rotations || !plan->actions)
+      || !plan->rotations || !plan->actions || !plan->states
+      || !plan->changes)
     return DWG_ERR_OUTOFMEM;
   for (BITCODE_BL i = 0; _def->entities && i < _def->num_owned; i++)
     if (ref_handle (_def->entities[i]))
@@ -2991,6 +3298,7 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
           = ref_object (plan->dwg, _graph->nodes[i].evalexpr);
       if (obj && is_graph_element (obj))
         {
+          init_state (obj, &plan->states[plan->num_nodes]);
           plan->nodes[plan->num_nodes++] = obj;
           hash_set (plan->node_handles, obj->handle.value, 1);
         }
@@ -3041,6 +3349,23 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       a->linear = -1;
       for (BITCODE_BL j = 0; j < n && a->linear < 0; j++)
         a->linear = find_linear (plan, conn[j].code);
+    }
+  // A point that isn't finite makes an angle that isn't, which would
+  // compare as no change. A linear parameter's length that isn't finite is
+  // refused when it is evaluated.
+  for (BITCODE_BL i = 0; i < plan->num_rotations; i++)
+    {
+      const Dwg_Object_BLOCKROTATIONPARAMETER *_r
+          = plan->rotations[i].obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+      if (plan->rotations[i].given
+          && (!is_finite_3d (&_r->def_basept) || !is_finite_3d (&_r->def_endpt)
+              || !is_finite_3d (&_r->def_base_angle_pt)))
+        {
+          set_reason (plan->reason, plan->reason_size,
+                      "rotation property '%s' has a point that isn't finite",
+                      plan->rotations[i].name);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
     }
   mark_running (plan);
 
@@ -3112,18 +3437,34 @@ plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
       return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   // No action that ran moved a rotation parameter given a value, so each
-  // turns from the definition's angle.
+  // turns from the definition's angle, and its end point with it.
   for (BITCODE_BL i = 0; !error && i < plan->num_rotations; i++)
     {
       const Dynblock_Rotation *r = &plan->rotations[i];
       const Dwg_Object_BLOCKROTATIONPARAMETER *_r
           = r->obj->tio.object->tio.BLOCKROTATIONPARAMETER;
-      if (r->running)
-        error = plan_rotation_actions (
-            plan, r,
-            r->value
-                - rotation_angle (&_r->def_basept, &_r->def_endpt,
-                                  &_r->def_base_angle_pt));
+      Dynblock_Node_State *state = find_state (plan, r->nodeid);
+      double angle;
+      BITCODE_2RD center;
+      if (!r->running)
+        continue;
+      angle = r->value
+              - rotation_angle (&_r->def_basept, &_r->def_endpt,
+                                &_r->def_base_angle_pt);
+      error = plan_rotation_actions (plan, r, angle);
+      center.x = _r->def_basept.x;
+      center.y = _r->def_basept.y;
+      if (state && state->num_points == 2)
+        turn_point (&state->points[1], &center, angle);
+    }
+  for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+    {
+      Dynblock_Node_State *state = find_state (plan, plan->linear[i].nodeid);
+      if (state && state->num_points == 2)
+        {
+          state->points[0] = plan->linear[i].base;
+          state->points[1] = plan->linear[i].end;
+        }
     }
   if (!error)
     error = check_turns (plan);
@@ -3411,9 +3752,9 @@ turn_hatch (Dwg_Entity_HATCH *_obj, const Dynblock_Frame *f)
 }
 
 /* Turns copy obj whole about the block's point center, counter-clockwise
-   by angle, and the ATTRIBs an INSERT owns. An entity with OCS points
-   whose extrusion is -Z turns the other way in its OCS, whose X axis is
-   the block's -X. */
+   by angle, and the ATTRIBs an INSERT owns: the types is_turnable ()
+   lists. An entity with OCS points whose extrusion is -Z turns the other
+   way in its OCS, whose X axis is the block's -X. */
 static void
 turn_whole (Dwg_Data *dwg, Dwg_Object *obj, const BITCODE_2RD *center,
             const double angle)
@@ -3521,28 +3862,44 @@ apply_turns (Dwg_Data *dwg, const Dynblock_Plan *plan, const Dwg_Copy_Map *map)
     }
 }
 
-/* The evaluation itself, as dwg_dynblock_evaluate (), into *rep_handlep. */
-static int
-evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
-          const Dwg_DynValue *values, const BITCODE_BL num_values,
-          BITCODE_RLL *rep_handlep, char *reason, const size_t reason_size)
+/* An evaluation of a definition at chosen values, planned. */
+typedef struct _dynblock_evaluation
 {
-  Param_List list;
-  BITCODE_BL *state = NULL;
-  double *number = NULL;
-  BITCODE_RLL *handles = NULL;
-  BITCODE_BL num_handles = 0;
-  Dwg_Object_BLOCK_HEADER *_def, *_rep;
-  Dwg_Copy_Map *map = NULL;
-  Dwg_Copy_Unresolved *unresolved = NULL;
-  BITCODE_BL num_unresolved = 0;
-  dwg_inthash *copies = NULL;
+  Param_List list; /* the definition's properties */
+  /* for each property, the visibility state chosen, + 1, or 0; and the
+     LINEAR or ROTATION value, or a NaN */
+  BITCODE_BL *state;
+  double *number;
+  /* the definition's entities, as definition_entities () lists them */
+  BITCODE_RLL *handles;
+  BITCODE_BL num_handles;
   Dynblock_Plan plan;
-  int parametric, error, copy_error = 0;
-  *rep_handlep = 0;
-  memset (&plan, 0, sizeof (plan));
+} Dynblock_Evaluation;
 
-  error = definition_params (dwg, def_handle, &list, &parametric, reason,
+static void
+free_evaluation (Dynblock_Evaluation *ev)
+{
+  free_plan (&ev->plan);
+  free (ev->handles);
+  free (ev->state);
+  free (ev->number);
+  dwg_dynblock_free_params (ev->list.params, ev->list.count);
+  memset (ev, 0, sizeof (*ev));
+}
+
+/* Plans the evaluation of the definition at def_handle at values, as
+   dwg_dynblock_evaluate () does, with its refusals, into ev, which
+   free_evaluation () frees. Changes nothing in the document. */
+static int
+plan_evaluation (Dwg_Data *dwg, const BITCODE_RLL def_handle,
+                 const Dwg_DynValue *values, const BITCODE_BL num_values,
+                 Dynblock_Evaluation *ev, char *reason,
+                 const size_t reason_size)
+{
+  Dwg_Object_BLOCK_HEADER *_def;
+  int parametric, error;
+  memset (ev, 0, sizeof (*ev));
+  error = definition_params (dwg, def_handle, &ev->list, &parametric, reason,
                              reason_size);
   if (error)
     return error;
@@ -3550,61 +3907,52 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     {
       set_reason (reason, reason_size,
                   "constraint-based (parametric) blocks are not supported");
-      error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-      goto done;
+      return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
-  if (list.unknown_class)
+  if (ev->list.unknown_class)
     {
       set_reason (reason, reason_size,
                   "the evaluation graph has a node of class %s, which "
                   "LibreDWG can't decode",
-                  list.unknown_class);
-      error = DYNBLOCK_REFUSED | DWG_ERR_UNHANDLEDCLASS;
-      goto done;
+                  ev->list.unknown_class);
+      return DYNBLOCK_REFUSED | DWG_ERR_UNHANDLEDCLASS;
     }
-  // the visibility state chosen for each property, + 1, or 0; and the
-  // LINEAR or ROTATION value, or a NaN
-  state = (BITCODE_BL *)calloc (list.count + 1, sizeof (BITCODE_BL));
-  number = (double *)malloc ((list.count + 1) * sizeof (double));
-  if (!state || !number)
-    {
-      error = DWG_ERR_OUTOFMEM;
-      goto done;
-    }
-  for (BITCODE_BL j = 0; j < list.count; j++)
-    number[j] = nan ("");
+  ev->state
+      = (BITCODE_BL *)calloc (ev->list.count + 1, sizeof (BITCODE_BL));
+  ev->number = (double *)malloc ((ev->list.count + 1) * sizeof (double));
+  if (!ev->state || !ev->number)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL j = 0; j < ev->list.count; j++)
+    ev->number[j] = nan ("");
   for (BITCODE_BL i = 0; i < num_values; i++)
     {
       const Dwg_DynValue *v = &values[i];
       const Dwg_DynParam *p = NULL;
       BITCODE_BL j;
-      for (j = 0; v->name && j < list.count; j++)
-        if (strEQ (list.params[j].name, v->name))
+      for (j = 0; v->name && j < ev->list.count; j++)
+        if (strEQ (ev->list.params[j].name, v->name))
           {
-            p = &list.params[j];
+            p = &ev->list.params[j];
             break;
           }
       if (!p)
         {
           set_reason (reason, reason_size, "no property is named '%s'",
                       v->name ? v->name : "(NULL)");
-          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-          goto done;
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
       for (BITCODE_BL k = 0; k < i; k++)
         if (values[k].name && strEQ (values[k].name, v->name))
           {
             set_reason (reason, reason_size,
                         "property '%s' is given twice", v->name);
-            error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-            goto done;
+            return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
           }
       if (p->kind != DWG_DYNPARAM_VISIBILITY && !isfinite (v->value))
         {
           set_reason (reason, reason_size, "property '%s' is given %g",
                       p->name, v->value);
-          error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-          goto done;
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
       switch (p->kind)
         {
@@ -3619,10 +3967,9 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
                 set_reason (reason, reason_size,
                             "visibility property '%s' has no state '%s'",
                             p->name, v->state ? v->state : "(NULL)");
-                error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-                goto done;
+                return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
               }
-            state[j] = s + 1;
+            ev->state[j] = s + 1;
           }
           break;
         case DWG_DYNPARAM_FLIP:
@@ -3631,16 +3978,14 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
               set_reason (reason, reason_size,
                           "flip property '%s' is 0 or 1, not %g", p->name,
                           v->value);
-              error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-              goto done;
+              return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
             }
           if (v->value != 0.0)
             {
               set_reason (reason, reason_size,
                           "flip property '%s': flipping is not supported",
                           p->name);
-              error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-              goto done;
+              return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
             }
           break;
         case DWG_DYNPARAM_LINEAR:
@@ -3649,36 +3994,54 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
               set_reason (reason, reason_size,
                           "linear property '%s' is given %g, below 0",
                           p->name, v->value);
-              error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-              goto done;
+              return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
             }
-          number[j] = v->value;
+          ev->number[j] = v->value;
           break;
         case DWG_DYNPARAM_ROTATION:
-          number[j] = v->value;
+          ev->number[j] = v->value;
           break;
         default:
           set_reason (reason, reason_size,
                       "%s property '%s': setting it is not supported",
                       dwg_dynparam_kind_name (p->kind), p->name);
-          error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-          goto done;
+          return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
     }
 
   _def = handle_object (dwg, def_handle)->tio.object->tio.BLOCK_HEADER;
-  error = definition_entities (dwg, _def, &handles, &num_handles, reason,
-                               reason_size);
+  error = definition_entities (dwg, _def, &ev->handles, &ev->num_handles,
+                               reason, reason_size);
+  if (error)
+    return error;
+  ev->plan.dwg = dwg;
+  ev->plan.reason = reason;
+  ev->plan.reason_size = reason_size;
+  return plan_values (&ev->plan, _def,
+                      definition_graph (dwg, handle_object (dwg, def_handle)),
+                      &ev->list, ev->number);
+}
+
+/* The evaluation itself, as dwg_dynblock_evaluate (), into *rep_handlep. */
+static int
+evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
+          const Dwg_DynValue *values, const BITCODE_BL num_values,
+          BITCODE_RLL *rep_handlep, char *reason, const size_t reason_size)
+{
+  Dynblock_Evaluation ev;
+  Dwg_Object_BLOCK_HEADER *_def, *_rep;
+  Dwg_Copy_Map *map = NULL;
+  Dwg_Copy_Unresolved *unresolved = NULL;
+  BITCODE_BL num_unresolved = 0;
+  dwg_inthash *copies = NULL;
+  int error, copy_error = 0;
+  *rep_handlep = 0;
+
+  error = plan_evaluation (dwg, def_handle, values, num_values, &ev, reason,
+                           reason_size);
   if (error)
     goto done;
-  plan.dwg = dwg;
-  plan.reason = reason;
-  plan.reason_size = reason_size;
-  error = plan_values (&plan, _def,
-                       definition_graph (dwg, handle_object (dwg, def_handle)),
-                       &list, number);
-  if (error)
-    goto done;
+  _def = handle_object (dwg, def_handle)->tio.object->tio.BLOCK_HEADER;
   // The block table's count is 16-bit, and the add API would wrap it. As
   // dynblock_copy.c's add_to_table (), checked before anything is added.
   {
@@ -3693,7 +4056,7 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       }
   }
   map = dwg_copy_map_new ();
-  copies = hash_new (num_handles * 2 + 8);
+  copies = hash_new (ev.num_handles * 2 + 8);
   if (!map || !copies)
     {
       error = DWG_ERR_OUTOFMEM;
@@ -3703,8 +4066,8 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
   // The copies first, so that a refused copy adds nothing, then the block
   // that owns them. Adding objects may move dwg->object, so objects are
   // found by handle after each step.
-  error = dwg_copy_objects (dwg, dwg, handles, num_handles, map, &unresolved,
-                            &num_unresolved);
+  error = dwg_copy_objects (dwg, dwg, ev.handles, ev.num_handles, map,
+                            &unresolved, &num_unresolved);
   free (unresolved);
   if (error >= DWG_ERR_CRITICAL)
     {
@@ -3731,13 +4094,13 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     _rep->flag |= 2;
   _rep->base_pt = _def->base_pt;
   *rep_handlep = block_header_object (_rep)->handle.value;
-  for (BITCODE_BL i = 0; i < num_handles; i++)
-    if (dwg_copy_map_get (map, handles[i]))
-      hash_set (copies, dwg_copy_map_get (map, handles[i]), 1);
-  for (BITCODE_BL i = 0; i < num_handles; i++)
+  for (BITCODE_BL i = 0; i < ev.num_handles; i++)
+    if (dwg_copy_map_get (map, ev.handles[i]))
+      hash_set (copies, dwg_copy_map_get (map, ev.handles[i]), 1);
+  for (BITCODE_BL i = 0; i < ev.num_handles; i++)
     {
       Dwg_Object *copy
-          = handle_object (dwg, dwg_copy_map_get (map, handles[i]));
+          = handle_object (dwg, dwg_copy_map_get (map, ev.handles[i]));
       if (copy && copy->supertype == DWG_SUPERTYPE_ENTITY)
         detach_copy (copy, copies);
     }
@@ -3757,14 +4120,14 @@ evaluate (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       goto done;
     }
 
-  apply_moves (dwg, &plan, map);
-  apply_turns (dwg, &plan, map);
-  for (BITCODE_BL j = 0; j < list.count; j++)
-    if (state[j])
+  apply_moves (dwg, &ev.plan, map);
+  apply_turns (dwg, &ev.plan, map);
+  for (BITCODE_BL j = 0; j < ev.list.count; j++)
+    if (ev.state[j])
       {
         error = apply_visibility (
-            dwg, handle_object (dwg, list.params[j].handle), state[j] - 1,
-            map);
+            dwg, handle_object (dwg, ev.list.params[j].handle),
+            ev.state[j] - 1, map);
         if (error)
           goto done;
       }
@@ -3781,11 +4144,87 @@ done:
     set_reason (reason, reason_size, "error 0x%x", (unsigned)error);
   free_hash (copies);
   dwg_copy_map_free (map);
-  free_plan (&plan);
-  free (handles);
-  free (state);
-  free (number);
-  dwg_dynblock_free_params (list.params, list.count);
+  free_evaluation (&ev);
+  return error;
+}
+
+void
+dynblock_free_state (Dynblock_State *state)
+{
+  if (!state)
+    return;
+  free (state->nodes);
+  free (state->deltas);
+  memset (state, 0, sizeof (*state));
+}
+
+/* Adds the whole moves of the definition's ATTDEFs in plan to state, one
+   delta for each ATTDEF. */
+static int
+add_attdef_deltas (const Dynblock_Plan *plan, Dynblock_State *state)
+{
+  state->deltas = (Dynblock_Entity_Delta *)calloc (
+      plan->num_moves + 1, sizeof (Dynblock_Entity_Delta));
+  if (!state->deltas)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; i < plan->num_moves; i++)
+    {
+      const Dynblock_Move *m = &plan->moves[i];
+      const Dwg_Object *obj = handle_object (plan->dwg, m->entity);
+      BITCODE_BL j;
+      if (m->point >= 0 || !obj || obj->fixedtype != DWG_TYPE_ATTDEF)
+        continue;
+      for (j = 0; j < state->num_deltas; j++)
+        if (state->deltas[j].entity == m->entity)
+          break;
+      if (j == state->num_deltas)
+        state->deltas[state->num_deltas++].entity = m->entity;
+      add_delta (&state->deltas[j].delta, &m->delta);
+    }
+  return 0;
+}
+
+int
+dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
+                          const Dwg_DynValue *values,
+                          const BITCODE_BL num_values, Dynblock_State *state,
+                          char *reason, const size_t reason_size)
+{
+  Dynblock_Evaluation ev;
+  int error;
+  memset (state, 0, sizeof (*state));
+  error = plan_evaluation (dwg, def_handle, values, num_values, &ev, reason,
+                           reason_size);
+  if (!error && ev.plan.unknown[0])
+    {
+      set_reason (reason, reason_size, "%s", ev.plan.unknown);
+      error = DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (!error)
+    {
+      state->nodes = (Dynblock_Node_State *)calloc (
+          ev.plan.num_nodes + 1, sizeof (Dynblock_Node_State));
+      error = state->nodes ? add_attdef_deltas (&ev.plan, state)
+                           : DWG_ERR_OUTOFMEM;
+    }
+  for (BITCODE_BL i = 0; !error && i < ev.plan.num_nodes; i++)
+    {
+      const Dynblock_Node_State *s = &ev.plan.states[i];
+      for (BITCODE_BL j = 0; j < s->num_points; j++)
+        if (!is_finite_3d (&s->points[j]))
+          {
+            set_reason (reason, reason_size,
+                        "the actions would move a point of %s " FORMAT_HV
+                        " beyond what a double holds",
+                        ev.plan.nodes[i]->name, s->handle);
+            error = DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+          }
+      if (s->num_points)
+        state->nodes[state->num_nodes++] = *s;
+    }
+  free_evaluation (&ev);
+  if (error)
+    dynblock_free_state (state);
   return error;
 }
 
