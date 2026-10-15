@@ -1921,6 +1921,24 @@ added (Dwg_Data *dwg, const Dwg_Object_Entity *ent, const BITCODE_BL n,
   return a;
 }
 
+/* Whether text b, a copy of a TEXT, ATTDEF or ATTRIB a, moved by dx, dy:
+   its insertion point, and the alignment point of text that isn't
+   left-aligned on the baseline, with dataflags 0x02 set only for an
+   alignment point of (0,0), as AutoCAD writes it. Left-aligned text keeps
+   its alignment point and flag. */
+#define IS_MOVED_TEXT(a, b, dx, dy)                                           \
+  (is_point ((b)->ins_pt.x, (b)->ins_pt.y, (a)->ins_pt.x + (dx),              \
+             (a)->ins_pt.y + (dy))                                            \
+   && ((a)->horiz_alignment || (a)->vert_alignment                            \
+           ? is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,              \
+                       (a)->alignment_pt.x + (dx), (a)->alignment_pt.y + (dy)) \
+                 && !((b)->dataflags & 0x02)                                  \
+                        == ((b)->alignment_pt.x != 0.0                        \
+                            || (b)->alignment_pt.y != 0.0)                    \
+           : is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,              \
+                       (a)->alignment_pt.x, (a)->alignment_pt.y)              \
+                 && ((b)->dataflags & 0x02) == ((a)->dataflags & 0x02)))
+
 /* Whether copy, of src, moved by dx, dy in its own coordinates: every
    point of it, and the ATTRIBs of an INSERT. */
 static int
@@ -1975,27 +1993,14 @@ is_moved (Dwg_Data *dwg, const Dwg_Object *src, const Dwg_Object *copy,
         return same;
       }
     case DWG_TYPE_TEXT:
-      {
-        const Dwg_Entity_TEXT *a = src->tio.entity->tio.TEXT;
-        const Dwg_Entity_TEXT *b = copy->tio.entity->tio.TEXT;
-        // the alignment point only when the text has one
-        const double ax = a->dataflags & 0x02 ? 0.0 : dx;
-        const double ay = a->dataflags & 0x02 ? 0.0 : dy;
-        return is_point (b->ins_pt.x, b->ins_pt.y, a->ins_pt.x + dx,
-                         a->ins_pt.y + dy)
-               && is_point (b->alignment_pt.x, b->alignment_pt.y,
-                            a->alignment_pt.x + ax, a->alignment_pt.y + ay);
-      }
+      return IS_MOVED_TEXT (src->tio.entity->tio.TEXT,
+                            copy->tio.entity->tio.TEXT, dx, dy);
     case DWG_TYPE_ATTDEF:
-      return is_point (copy->tio.entity->tio.ATTDEF->ins_pt.x,
-                       copy->tio.entity->tio.ATTDEF->ins_pt.y,
-                       src->tio.entity->tio.ATTDEF->ins_pt.x + dx,
-                       src->tio.entity->tio.ATTDEF->ins_pt.y + dy);
+      return IS_MOVED_TEXT (src->tio.entity->tio.ATTDEF,
+                            copy->tio.entity->tio.ATTDEF, dx, dy);
     case DWG_TYPE_ATTRIB:
-      return is_point (copy->tio.entity->tio.ATTRIB->ins_pt.x,
-                       copy->tio.entity->tio.ATTRIB->ins_pt.y,
-                       src->tio.entity->tio.ATTRIB->ins_pt.x + dx,
-                       src->tio.entity->tio.ATTRIB->ins_pt.y + dy);
+      return IS_MOVED_TEXT (src->tio.entity->tio.ATTRIB,
+                            copy->tio.entity->tio.ATTRIB, dx, dy);
     case DWG_TYPE_MTEXT:
       return is_point (copy->tio.entity->tio.MTEXT->ins_pt.x,
                        copy->tio.entity->tio.MTEXT->ins_pt.y,
@@ -2143,15 +2148,20 @@ test_stretch_whole (Dwg_Data *dwg)
   elliptical_arc->start_angle = 0.0;
   elliptical_arc->end_angle = M_PI;
   spline->scenario = 2;
-  // as the decoder leaves a left-aligned text, with no alignment point
+  // left-aligned, as AutoCAD writes it: alignment point (0,0), not stored.
+  // It stays so in the copy.
   text->dataflags = 0x02;
+  attdef->dataflags = 0x02;
   centred->horiz_alignment = 1;
   centred->alignment_pt.x = 35.5;
   centred->alignment_pt.y = 22.0;
-  // centred, but with no alignment point stored, as AutoCAD writes one at
-  // its insertion point: the decoder leaves it 0, and so does the copy
+  // centred on (0,0), which AutoCAD doesn't store (dataflags 0x02): the
+  // copy's alignment point moves with it, and is then stored
   unstored->horiz_alignment = 1;
   unstored->dataflags = 0x02;
+  // the same for a middle-aligned ATTRIB, moved with its INSERT
+  attrib->horiz_alignment = 4;
+  attrib->dataflags = 0x02;
 
   list[n++] = added (dwg, line->parent, 2, "LINE");
   list[n++] = added (dwg, arc->parent, 2, "ARC");
@@ -2341,12 +2351,15 @@ test_move (Dwg_Data *dwg)
   Dwg_Object_BLOCK_HEADER *def = block_header (dwg, DOOR);
   Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
   dwg_point_3d pt = { 10.0, -2.0, 0.0 };
-  Dwg_Entity_TEXT *text;
+  const dwg_point_3d mc_pt = { -2.3, -1.25, 0.0 },
+                     ml_pt = { 0.0, -1.25, 0.0 },
+                     aligned_pt = { 1.0, 1.0, 0.0 };
+  Dwg_Entity_TEXT *text, *centred, *middle_left, *aligned;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_POINT *point;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
-  BITCODE_RLL h_text, h_insert;
+  BITCODE_RLL h_text, h_centred, h_middle_left, h_aligned, h_insert;
   int failures = 0;
   memset (&v, 0, sizeof (v));
   if (!def || !move)
@@ -2355,20 +2368,42 @@ test_move (Dwg_Data *dwg)
       return 1;
     }
   text = dwg_add_TEXT (def, "caption", &pt, 1.0);
+  centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
+  middle_left = dwg_add_TEXT (def, "ML", &ml_pt, 2.5);
+  aligned = dwg_add_TEXT (def, "aligned", &aligned_pt, 1.0);
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
-  if (!text || !insert || !point)
+  if (!text || !centred || !middle_left || !aligned || !insert || !point)
     {
       fail ("move: could not add the entities");
       return 1;
     }
   text->dataflags = 0x02;
+  // middle-centred on the block's base point, as AutoCAD writes it: the
+  // alignment point (0,0) isn't stored
+  centred->horiz_alignment = 1;
+  centred->vert_alignment = 2;
+  centred->dataflags = 0x3f;
+  // aligned only vertically, middle-left on the block's base point
+  middle_left->vert_alignment = 2;
+  middle_left->dataflags = 0x7f;
+  // aligned between its two points, the second stored
+  aligned->horiz_alignment = 3;
+  aligned->alignment_pt.x = 6.0;
+  aligned->alignment_pt.y = 1.0;
+  aligned->dataflags = 0xbd;
   h_text = entity_handle (dwg, text->parent);
+  h_centred = entity_handle (dwg, centred->parent);
+  h_middle_left = entity_handle (dwg, middle_left->parent);
+  h_aligned = entity_handle (dwg, aligned->parent);
   h_insert = entity_handle (dwg, insert->parent);
   if (!add_move_entity (dwg, move, h_text)
+      || !add_move_entity (dwg, move, h_centred)
+      || !add_move_entity (dwg, move, h_middle_left)
+      || !add_move_entity (dwg, move, h_aligned)
       || !add_move_entity (dwg, move, h_insert))
     {
       fail ("move: out of memory");
@@ -2386,6 +2421,37 @@ test_move (Dwg_Data *dwg)
   else
     {
       fail ("move: the TEXT and the INSERT don't move by -0.5");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_centred),
+                   copy_of (dwg, def, rep, h_centred), 0.0, -0.5))
+    OK ("move: the TEXT centred on (0,0) moves its alignment point by -0.5, "
+        "then stored");
+  else
+    {
+      fail ("move: the TEXT centred on (0,0) doesn't move its alignment "
+            "point by -0.5, stored");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_middle_left),
+                   copy_of (dwg, def, rep, h_middle_left), 0.0, -0.5))
+    OK ("move: the TEXT middle-left on (0,0) moves its alignment point by "
+        "-0.5, then stored");
+  else
+    {
+      fail ("move: the TEXT middle-left on (0,0) doesn't move its alignment "
+            "point by -0.5, stored");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_aligned),
+                   copy_of (dwg, def, rep, h_aligned), 0.0, -0.5))
+    OK ("move: the aligned TEXT moves both its points by -0.5");
+  else
+    {
+      fail ("move: the aligned TEXT doesn't move both its points by -0.5");
       failures++;
     }
   if (add_move_entity (dwg, move, entity_handle (dwg, point->parent)))
@@ -2662,15 +2728,21 @@ ocs_sign (const BITCODE_BE *extrusion)
 }
 
 /* Whether a TEXT or ATTRIB b is a turned by angle: its insertion point,
-   its alignment point when it has one, and its rotation, which dataflags
-   says is stored unless it is 0. */
+   the alignment point of text that isn't left-aligned on the baseline,
+   with dataflags 0x02 set only for an alignment point of (0,0), and its
+   rotation, which dataflags says is stored unless it is 0. Left-aligned
+   text keeps its alignment point and flag. */
 #define IS_TURNED_TEXT(b, a, angle)                                           \
   (TURNED_2D ((b)->ins_pt, (a)->ins_pt, ocs_sign (&(a)->extrusion), angle)    \
-   && ((a)->dataflags & 0x02                                                  \
-           ? is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,             \
+   && ((a)->horiz_alignment || (a)->vert_alignment                            \
+           ? TURNED_2D ((b)->alignment_pt, (a)->alignment_pt,                 \
+                        ocs_sign (&(a)->extrusion), angle)                    \
+                 && !((b)->dataflags & 0x02)                                  \
+                        == ((b)->alignment_pt.x != 0.0                        \
+                            || (b)->alignment_pt.y != 0.0)                    \
+           : is_point ((b)->alignment_pt.x, (b)->alignment_pt.y,              \
                        (a)->alignment_pt.x, (a)->alignment_pt.y)              \
-           : TURNED_2D ((b)->alignment_pt, (a)->alignment_pt,                \
-                        ocs_sign (&(a)->extrusion), angle))                   \
+                 && ((b)->dataflags & 0x02) == ((a)->dataflags & 0x02))       \
    && is_angle ((b)->rotation,                                                \
                 (a)->rotation + ocs_sign (&(a)->extrusion) * (angle))         \
    && is_normal ((b)->rotation)                                               \
@@ -3231,6 +3303,152 @@ test_turn_whole (Dwg_Data *dwg)
     OK ("turn whole: the Toilet evaluates again");
   else
     failures++;
+  return failures;
+}
+
+/* 'Rotate Plan' turning texts about a base point that isn't the origin:
+   the Toilet's Angle parameter moved by (2, 3). A TEXT middle-centred on
+   (0,0), whose alignment point AutoCAD leaves out (dataflags 0x02), turns
+   its alignment point too, which is then stored, and so does one
+   middle-left on (0,0); a left-aligned TEXT keeps its alignment point
+   (0,0). */
+static int
+test_turn_text_anchor (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCK_HEADER *def = block_header (dwg, TOILET);
+  Dwg_Object_BLOCKROTATEACTION *act
+      = rotate_action (dwg, TOILET, "Rotate Plan");
+  Dwg_Object *param_obj = dwg_resolve_handle (dwg, TOILET_ANGLE);
+  Dwg_Object_BLOCKROTATIONPARAMETER *param
+      = param_obj && param_obj->fixedtype == DWG_TYPE_BLOCKROTATIONPARAMETER
+            ? param_obj->tio.object->tio.BLOCKROTATIONPARAMETER
+            : NULL;
+  const dwg_point_3d mc_pt = { -2.25, -1.25, 0.0 }, left_pt = { 6.0, 1.0, 0.0 },
+                     ml_pt = { 0.0, -1.25, 0.0 };
+  const double dx = 2.0, dy = 3.0, angle = 1.2;
+  Dwg_Entity_TEXT *centred, *left, *middle_left;
+  BITCODE_3BD basept, endpt, base_angle_pt;
+  BITCODE_RLL h_centred, h_left, h_middle_left;
+  BITCODE_BL num_deps;
+  Dwg_Object_BLOCK_HEADER *rep;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!def || !act || !param)
+    {
+      fail ("turn text anchor: fixture objects not found");
+      return 1;
+    }
+  centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
+  left = dwg_add_TEXT (def, "left", &left_pt, 1.0);
+  middle_left = dwg_add_TEXT (def, "ML", &ml_pt, 2.5);
+  loglevel = test_loglevel;
+  if (!centred || !left || !middle_left)
+    {
+      fail ("turn text anchor: could not add the TEXTs");
+      return 1;
+    }
+  centred->horiz_alignment = 1;
+  centred->vert_alignment = 2;
+  centred->dataflags = 0x3f;
+  left->dataflags = 0xff;
+  middle_left->vert_alignment = 2;
+  middle_left->dataflags = 0x7f;
+  h_centred = entity_handle (dwg, centred->parent);
+  h_left = entity_handle (dwg, left->parent);
+  h_middle_left = entity_handle (dwg, middle_left->parent);
+  num_deps = act->num_deps;
+  if (!add_dep (dwg, &act->deps, &act->num_deps, h_centred)
+      || !add_dep (dwg, &act->deps, &act->num_deps, h_left)
+      || !add_dep (dwg, &act->deps, &act->num_deps, h_middle_left))
+    {
+      fail ("turn text anchor: out of memory");
+      return 1;
+    }
+  basept = param->def_basept;
+  endpt = param->def_endpt;
+  base_angle_pt = param->def_base_angle_pt;
+  param->def_basept.x += dx;
+  param->def_basept.y += dy;
+  param->def_endpt.x += dx;
+  param->def_endpt.y += dy;
+  param->def_base_angle_pt.x += dx;
+  param->def_base_angle_pt.y += dy;
+
+  v.name = (char *)"Angle";
+  v.value = angle;
+  rep = evaluate (dwg, TOILET, &v, 1, "turn text anchor");
+  if (rep)
+    {
+      const double cx = param->def_basept.x, cy = param->def_basept.y;
+      const double c = cos (angle), s = sin (angle);
+      const Dwg_Object *a = copy_of (dwg, def, rep, h_centred);
+      const Dwg_Object *b = copy_of (dwg, def, rep, h_left);
+      const Dwg_Entity_TEXT *ca
+          = a && a->fixedtype == DWG_TYPE_TEXT ? a->tio.entity->tio.TEXT : NULL;
+      const Dwg_Entity_TEXT *cb
+          = b && b->fixedtype == DWG_TYPE_TEXT ? b->tio.entity->tio.TEXT : NULL;
+      const Dwg_Object *m = copy_of (dwg, def, rep, h_middle_left);
+      const Dwg_Entity_TEXT *cm
+          = m && m->fixedtype == DWG_TYPE_TEXT ? m->tio.entity->tio.TEXT : NULL;
+      // (0,0) turned about (cx, cy)
+      const double ax = cx - cx * c + cy * s, ay = cy - cx * s - cy * c;
+      if (ca && is_point (ca->alignment_pt.x, ca->alignment_pt.y, ax, ay)
+          && is_point (ca->ins_pt.x, ca->ins_pt.y,
+                       cx + (mc_pt.x - cx) * c - (mc_pt.y - cy) * s,
+                       cy + (mc_pt.x - cx) * s + (mc_pt.y - cy) * c)
+          && !(ca->dataflags & 0x02))
+        OK ("turn text anchor: the TEXT centred on (0,0) turns its alignment "
+            "point to (%g, %g), then stored",
+            ca->alignment_pt.x, ca->alignment_pt.y);
+      else
+        {
+          fail ("turn text anchor: the TEXT centred on (0,0) has its "
+                "alignment point at (%g, %g), dataflags 0x%x, expected "
+                "(%g, %g) stored",
+                ca ? ca->alignment_pt.x : -1.0, ca ? ca->alignment_pt.y : -1.0,
+                ca ? (unsigned)ca->dataflags : 0u, ax, ay);
+          failures++;
+        }
+      if (cb && cb->alignment_pt.x == 0.0 && cb->alignment_pt.y == 0.0
+          && cb->dataflags & 0x02
+          && is_point (cb->ins_pt.x, cb->ins_pt.y,
+                       cx + (left_pt.x - cx) * c - (left_pt.y - cy) * s,
+                       cy + (left_pt.x - cx) * s + (left_pt.y - cy) * c))
+        OK ("turn text anchor: the left-aligned TEXT turns, its alignment "
+            "point stays (0,0), not stored");
+      else
+        {
+          fail ("turn text anchor: the left-aligned TEXT's alignment point "
+                "(%g, %g), dataflags 0x%x",
+                cb ? cb->alignment_pt.x : -1.0, cb ? cb->alignment_pt.y : -1.0,
+                cb ? (unsigned)cb->dataflags : 0u);
+          failures++;
+        }
+      if (cm && is_point (cm->alignment_pt.x, cm->alignment_pt.y, ax, ay)
+          && is_point (cm->ins_pt.x, cm->ins_pt.y,
+                       cx + (ml_pt.x - cx) * c - (ml_pt.y - cy) * s,
+                       cy + (ml_pt.x - cx) * s + (ml_pt.y - cy) * c)
+          && !(cm->dataflags & 0x02))
+        OK ("turn text anchor: the TEXT middle-left on (0,0) turns its "
+            "alignment point to (%g, %g), then stored",
+            cm->alignment_pt.x, cm->alignment_pt.y);
+      else
+        {
+          fail ("turn text anchor: the TEXT middle-left on (0,0) has its "
+                "alignment point at (%g, %g), dataflags 0x%x, expected "
+                "(%g, %g) stored",
+                cm ? cm->alignment_pt.x : -1.0, cm ? cm->alignment_pt.y : -1.0,
+                cm ? (unsigned)cm->dataflags : 0u, ax, ay);
+          failures++;
+        }
+    }
+  else
+    failures++;
+  param->def_basept = basept;
+  param->def_endpt = endpt;
+  param->def_base_angle_pt = base_angle_pt;
+  act->num_deps = num_deps;
   return failures;
 }
 
@@ -5161,6 +5379,7 @@ test_rotation_all (Dwg_Data *dwg)
   int failures = test_rotation (dwg);
   failures += test_rotation_graft (dwg);
   failures += test_turn_whole (dwg);
+  failures += test_turn_text_anchor (dwg);
   return failures;
 }
 

@@ -4631,6 +4631,130 @@ test_copy_block_matching (void)
   return numfailed ();
 }
 
+/* An attribute definition copied into a document built with the add API
+   and written as r2004 keeps its alignment point, which the encoder of
+   such a document stores or leaves out (dataflags 0x02) as AutoCAD does:
+   left out only when it is (0,0). The test centres the left-aligned
+   attribute definition of example_2004.dwg's block bloko before copying
+   it: on its insertion point, which is then also its alignment point, or,
+   with on_base_point, middle-centred on the block's base point, with the
+   alignment point (0,0). */
+static int
+test_copy_block_text_alignment (const int on_base_point)
+{
+  const char *what = on_base_point ? "copy text centred on the base point"
+                                   : "copy text centred at its insertion point";
+  const char *file = "copy_text_alignment.dwg";
+  char path[256];
+  Dwg_Data src, readback;
+  Dwg_Data *dst = NULL;
+  const Dwg_Object_BLOCK_HEADER *blk = NULL;
+  Dwg_Entity_ATTDEF *attdef = NULL;
+  Dwg_Copy_Map *map = NULL;
+  BITCODE_RLL h_attdef = 0;
+  BITCODE_2DPOINT ins_pt, alignment_pt;
+  int error;
+
+  failed = 0;
+  if (!test_file ("example_2004.dwg", path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: example_2004.dwg read failed", what);
+      return 1;
+    }
+  for (BITCODE_BL i = 0; i < src.num_objects && !blk; i++)
+    if (src.object[i].fixedtype == DWG_TYPE_BLOCK_HEADER
+        && same_cstr (src.object[i].tio.object->tio.BLOCK_HEADER->name,
+                      "bloko"))
+      blk = src.object[i].tio.object->tio.BLOCK_HEADER;
+  for (BITCODE_BL i = 0; blk && i < blk->num_owned && !attdef; i++)
+    {
+      Dwg_Object *obj = dwg_resolve_handle (&src, ref_target (blk->entities[i]));
+      if (obj && obj->fixedtype == DWG_TYPE_ATTDEF)
+        {
+          attdef = obj->tio.entity->tio.ATTDEF;
+          h_attdef = obj->handle.value;
+        }
+    }
+  if (!attdef || attdef->horiz_alignment || attdef->vert_alignment
+      || !(attdef->dataflags & 0x02))
+    {
+      FAIL ("%s: bloko's left-aligned attribute definition not found", what);
+      free_dwg (&src);
+      return 1;
+    }
+  attdef->horiz_alignment = 1;
+  if (on_base_point)
+    {
+      attdef->vert_alignment = 2;
+      attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
+    }
+  else
+    {
+      attdef->alignment_pt = attdef->ins_pt;
+      attdef->dataflags &= ~0x02;
+    }
+  ins_pt = attdef->ins_pt;
+  alignment_pt = attdef->alignment_pt;
+
+  dst = dwg_new_Document (R_2004, 0, tracelevel);
+  map = dwg_copy_map_new ();
+  loglevel = tracelevel;
+  error = 0;
+  if (!dst || !map || !copy_block (dst, &src, blk, map, &error) || error)
+    {
+      loglevel = test_loglevel;
+      FAIL ("%s: copy error 0x%x", what, (unsigned)error);
+      free_dwg (&src);
+      goto done;
+    }
+  loglevel = test_loglevel;
+  h_attdef = dwg_copy_map_get (map, h_attdef);
+  free_dwg (&src);
+
+  memset (&readback, 0, sizeof (readback));
+  loglevel = tracelevel;
+  error = write_dwg (file, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (file, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    FAIL ("%s: write or read back error 0x%x", what, (unsigned)error);
+  else
+    {
+      const Dwg_Object *obj = dwg_resolve_handle (&readback, h_attdef);
+      const Dwg_Entity_ATTDEF *b = obj && obj->fixedtype == DWG_TYPE_ATTDEF
+                                       ? obj->tio.entity->tio.ATTDEF
+                                       : NULL;
+      if (b && b->ins_pt.x == ins_pt.x && b->ins_pt.y == ins_pt.y
+          && b->alignment_pt.x == alignment_pt.x
+          && b->alignment_pt.y == alignment_pt.y
+          && !(b->dataflags & 0x02) == !on_base_point)
+        OK ("%s: read back at its alignment point (%g, %g), dataflags 0x%x",
+            what, b->alignment_pt.x, b->alignment_pt.y,
+            (unsigned)b->dataflags);
+      else if (b)
+        FAIL ("%s: read back with alignment point (%g, %g), insertion point "
+              "(%g, %g), dataflags 0x%x; expected (%g, %g), (%g, %g)",
+              what, b->alignment_pt.x, b->alignment_pt.y, b->ins_pt.x,
+              b->ins_pt.y, (unsigned)b->dataflags, alignment_pt.x,
+              alignment_pt.y, ins_pt.x, ins_pt.y);
+      else
+        FAIL ("%s: the copy " FORMAT_HV " not read back", what, h_attdef);
+    }
+  free_dwg (&readback);
+  if (!numfailed ())
+    unlink (file);
+
+done:
+  dwg_copy_map_free (map);
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -4701,5 +4825,7 @@ main (int argc, char *argv[])
   error += test_copy_block_colours ();
   error += test_copy_block_refused ();
   error += test_copy_block_matching ();
+  error += test_copy_block_text_alignment (0);
+  error += test_copy_block_text_alignment (1);
   return error ? 1 : 0;
 }
