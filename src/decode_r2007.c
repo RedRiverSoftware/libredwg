@@ -37,7 +37,7 @@
 /* The logging level for the read (decode) path.  */
 
 /* the current version per spec block */
-static unsigned int cur_ver = 0;
+static DWG_THREAD_LOCAL unsigned int cur_ver = 0;
 
 #define DWG_LOGLEVEL loglevel
 #include "logging.h"
@@ -1683,7 +1683,7 @@ read_2007_section_handles (Bit_Chain *dat, Bit_Chain *hdl,
                            r2007_section *restrict sections_map,
                            r2007_page *restrict pages_map)
 {
-  static Bit_Chain obj_dat = { 0 }, hdl_dat = { 0 };
+  static DWG_THREAD_LOCAL Bit_Chain obj_dat = { 0 }, hdl_dat = { 0 };
   BITCODE_RS section_size = 0;
   size_t endpos;
   int error;
@@ -1838,7 +1838,7 @@ read_2007_section_summary (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
                            r2007_section *restrict sections_map,
                            r2007_page *restrict pages_map)
 {
-  static Bit_Chain old_dat, sec_dat = { 0 };
+  static DWG_THREAD_LOCAL Bit_Chain old_dat, sec_dat = { 0 };
   // Bit_Chain *str_dat;
   Dwg_SummaryInfo *_obj = &dwg->summaryinfo;
   Dwg_Object *obj = NULL;
@@ -2320,7 +2320,7 @@ read_2007_section_preview (Bit_Chain *restrict dat, Dwg_Data *restrict dwg,
                            r2007_section *restrict sections_map,
                            r2007_page *restrict pages_map)
 {
-  static Bit_Chain sec_dat = { 0 };
+  static DWG_THREAD_LOCAL Bit_Chain sec_dat = { 0 };
   int error;
   BITCODE_RL size;
   BITCODE_RC type;

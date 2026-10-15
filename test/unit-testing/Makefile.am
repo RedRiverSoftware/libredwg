@@ -77,6 +77,7 @@ dynapi_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/bits.lo
 dxf_test_LDADD = $(LDADD) \
 	$(top_builddir)/src/dynapi.lo
+threads_test_LDADD = $(LDADD) $(PTHREAD_LIBS)
 
 testobjects = \
 	jump \
@@ -410,7 +411,8 @@ check_minimal = \
 	common_test$(EXEEXT) \
 	hash_test$(EXEEXT) \
 	dynapi_test$(EXEEXT) \
-	dxf_test$(EXEEXT)
+	dxf_test$(EXEEXT) \
+	threads_test$(EXEEXT)
 if USE_WRITE
 check_minimal += add_test$(EXEEXT)
 check_minimal += dynblocks_test$(EXEEXT)
