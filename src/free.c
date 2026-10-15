@@ -43,9 +43,9 @@ static int env_var_checked_p;
 #include "logging.h"
 
 /* the current version per spec block */
-static unsigned int cur_ver = 0;
-static Bit_Chain pdat = { 0 };
-static BITCODE_BL rcount1, rcount2;
+static DWG_THREAD_LOCAL unsigned int cur_ver = 0;
+static DWG_THREAD_LOCAL Bit_Chain pdat = { 0 };
+static DWG_THREAD_LOCAL BITCODE_BL rcount1, rcount2;
 
 /*--------------------------------------------------------------------------------
  * MACROS

@@ -57,8 +57,8 @@
 #include "free.h"
 
 /* the current version per spec block */
-static Dwg_Version_Type cur_ver = R_INVALID;
-static BITCODE_BL rcount1 = 0, rcount2 = 0;
+static DWG_THREAD_LOCAL Dwg_Version_Type cur_ver = R_INVALID;
+static DWG_THREAD_LOCAL BITCODE_BL rcount1 = 0, rcount2 = 0;
 
 #define DWG_LOGLEVEL loglevel
 

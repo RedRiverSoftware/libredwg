@@ -397,6 +397,17 @@ EXPORT int my_strcasecmp (const char *a, const char *b);
 #  define ATTRIBUTE_NORETURN
 #endif
 
+/* For mutable static state that must not be shared between threads, such as
+   the loop counters of the generated read and free functions: each thread
+   gets its own copy, so documents can be read and freed on several threads at
+   once. MSVC's default C mode has no _Thread_local; __declspec(thread) gives
+   the same storage. */
+#if defined(_MSC_VER) && !defined(__clang__)
+#  define DWG_THREAD_LOCAL __declspec (thread)
+#else
+#  define DWG_THREAD_LOCAL _Thread_local
+#endif
+
 #ifndef __counted_by
 #  ifdef HAVE_FUNC_ATTRIBUTE_COUNTED_BY
 #    define __counted_by(x) __attribute__ ((__counted_by__ (x)))
