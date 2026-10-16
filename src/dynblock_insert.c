@@ -757,6 +757,17 @@ att_width (const Dwg_AttValue *atts, const BITCODE_BL num_atts,
   return 0.0;
 }
 
+/* The product of finite a, b and c, which is infinite only when it is
+   beyond what a double holds: their exponents are added apart from their
+   mantissas, so that no partial product overflows. */
+static double
+product3 (const double a, const double b, const double c)
+{
+  int ea, eb, ec;
+  const double m = frexp (a, &ea) * frexp (b, &eb) * frexp (c, &ec);
+  return ldexp (m, ea + eb + ec);
+}
+
 /* Moves *pt, the insertion point of attdef's ATTRIB placed by p, aligned
    at *align, to where AutoCAD starts text of the given width (as
    Dwg_AttValue has it) that is centred, right-aligned or middle: back
@@ -785,9 +796,9 @@ start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
   across = (pt->y - align->y) * c - (pt->x - align->x) * s;
   // AutoCAD's width factor is positive; the add API leaves it 0
   width_factor = attdef->width_factor > 0.0 ? attdef->width_factor : 1.0;
-  along = width * attdef->height * p->scale * width_factor;
-  if (h != 2)
-    along /= 2.0;
+  // the ATTRIB's height, which check_attributes () finds finite
+  along = product3 (width, (h == 2 ? 1.0 : 0.5) * width_factor,
+                    attdef->height * p->scale);
   if (!(attdef->generation & 2))
     along = -along;
   pt->x = align->x + along * c - across * s;

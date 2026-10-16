@@ -2787,6 +2787,30 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
 
 /* Places def in dwg's model space with the given values, which must
    succeed. */
+/* Places def at the origin at scale with atts, and gets the insertion
+   point of its only ATTRIB into *x and *y. Returns 0 when it is placed. */
+static int
+attrib_start (Dwg_Data *dwg, Dwg_Object_BLOCK_HEADER *def, const double scale,
+              const Dwg_AttValue *atts, const BITCODE_BL natts, double *x,
+              double *y)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  int error = 0;
+  const Dwg_Entity_INSERT *ins;
+  const Dwg_Object *att = NULL;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dwg), def, &pt, scale, 0.0, NULL, 0,
+                             atts, natts, &error);
+  loglevel = test_loglevel;
+  if (ins && !error && ins->num_owned == 1)
+    att = object (dwg, ref (ins->attribs[0]));
+  if (!att || att->fixedtype != DWG_TYPE_ATTRIB)
+    return 1;
+  *x = att->tio.entity->tio.ATTRIB->ins_pt.x;
+  *y = att->tio.entity->tio.ATTRIB->ins_pt.y;
+  return 0;
+}
+
 static int
 test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
                const Dwg_DynValue *values, const BITCODE_BL n,
@@ -3004,28 +3028,59 @@ test_definition_refusals (Dwg_Data *src)
                                   REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                   "an attribute started beyond a double by "
                                   "its width");
-        // left-aligned, the same width doesn't move it
-        attdef->horiz_alignment = 0;
+        // centred, starts that a double holds, though a product on the
+        // way to them doesn't: aligned at the origin, half the width at
+        // the ATTRIB's height back
+        attdef->alignment_pt.x = at.x;
+        attdef->alignment_pt.y = at.y;
         {
-          int err = 0;
-          const Dwg_Entity_INSERT *ins;
-          const Dwg_Object *att = NULL;
-          loglevel = tracelevel;
-          ins = dwg_dynblock_insert (model_space (dst), def, &pt, 10.0, 0.0,
-                                     NULL, 0, a, 1, &err);
-          loglevel = test_loglevel;
-          if (ins && !err && ins->num_owned == 1)
-            att = object (dst, ref (ins->attribs[0]));
-          if (att && att->fixedtype == DWG_TYPE_ATTRIB
-              && att->tio.entity->tio.ATTRIB->ins_pt.x == pt.x
-              && att->tio.entity->tio.ATTRIB->ins_pt.y == pt.y)
-            OK ("insert accepts the same width on left-aligned text, which "
-                "starts where its definition does");
+          double x = 0.0, y = 1.0;
+          // the ATTRIB 1e306 high, 10 wide
+          attdef->height = 1e308;
+          a[0].width = 10.0;
+          if (!attrib_start (dst, def, 0.01, a, 1, &x, &y)
+              && fabs (x + 5e306) <= 5e294 && y == 0.0)
+            OK ("insert starts a 1e306 high attribute value 10 wide at %g",
+                x);
           else
             {
-              FAIL ("insert of the same width on left-aligned text: 0x%x, "
-                    "its ATTRIB %s",
-                    err, att ? "moved" : "missing");
+              FAIL ("insert of a 1e306 high attribute value 10 wide: (%g, "
+                    "%g), expected (-5e306, 0)",
+                    x, y);
+              failures++;
+            }
+          // 2 high, 1e308 wide
+          attdef->height = 2.0;
+          a[0].width = 1e308;
+          x = 0.0;
+          y = 1.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308) <= 1e296 && y == 0.0)
+            OK ("insert starts a 2 high attribute value 1e308 wide at %g",
+                x);
+          else
+            {
+              FAIL ("insert of a 2 high attribute value 1e308 wide: (%g, "
+                    "%g), expected (-1e308, 0)",
+                    x, y);
+              failures++;
+            }
+          attdef->height = 1.0;
+        }
+        attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
+        // left-aligned, a width doesn't move it
+        attdef->horiz_alignment = 0;
+        {
+          double x = 1.0, y = 1.0;
+          if (!attrib_start (dst, def, 10.0, a, 1, &x, &y) && x == pt.x
+              && y == pt.y)
+            OK ("insert accepts a width on left-aligned text, which starts "
+                "where its definition does");
+          else
+            {
+              FAIL ("insert of a width on left-aligned text: its ATTRIB at "
+                    "(%g, %g), expected (%g, %g)",
+                    x, y, pt.x, pt.y);
               failures++;
             }
         }
