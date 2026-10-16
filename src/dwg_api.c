@@ -24769,40 +24769,33 @@ dwg_add_u8_input (Dwg_Data *restrict dwg, const char *restrict u8str)
     }
   else
     {
-      // Encode UTF-8 to the target codepage via bit_utf8_to_TV, escaping
-      // characters unrepresentable in that codepage as \U+XXXX, the same
-      // way AutoCAD itself encodes them.
-      size_t len = strlen (u8str);
-      size_t size = (len * 4) + 8;
-      char *dest = (char *)malloc (size);
       char *tgt;
-      if (!dest)
+      // Documents imported from JSON or built with the add API keep 8-bit
+      // strings in UTF-8, and bit_write_TV () converts them to the codepage.
+      // Others are written as they are, so encode UTF-8 to the codepage
+      // here, escaping characters unrepresentable in it as \U+XXXX, the
+      // same way AutoCAD itself encodes them.
+      if (dwg->opts & DWG_OPTS_INJSON)
+        tgt = strdup (u8str);
+      else
+        tgt = bit_utf8_to_TV_alloc (u8str, strlen (u8str), 0,
+                                    dwg->header.codepage);
+      if (!tgt)
         {
           LOG_ERROR ("%s: Out of memory", __FUNCTION__);
           return NULL;
-        }
-      tgt = bit_utf8_to_TV (dest, (const unsigned char *)u8str, size, len, 0,
-                            dwg->header.codepage);
-      while (!tgt)
-        {
-          char *tmp;
-          size *= 2;
-          tmp = (char *)realloc (dest, size);
-          if (!tmp)
-            {
-              LOG_ERROR ("%s: Out of memory", __FUNCTION__);
-              free (dest);
-              return NULL;
-            }
-          dest = tmp;
-          tgt = bit_utf8_to_TV (dest, (const unsigned char *)u8str, size, len,
-                                0, dwg->header.codepage);
         }
       if (dwg->header.version <= R_12 && strlen (tgt) < 32)
         {
           // those old names are usually 32byte, and bit_write_TF
           // might heap-overflow then.
           char *buf = (char *)malloc (33);
+          if (!buf)
+            {
+              LOG_ERROR ("%s: Out of memory", __FUNCTION__);
+              free (tgt);
+              return NULL;
+            }
           strncpy (buf, tgt, 32);
           buf[32] = '\0';
           free (tgt);
@@ -31034,6 +31027,8 @@ dwg_add_PDFUNDERLAY (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
     // name = "dxf - 1";
     // search/register in NOD
     base = split_filepath (filename, &ext);
+    if (!base)
+      return NULL;
     snprintf (name, 80, "%d", i);
     snprintf (base_1, 80, "%s - %d", base, i);
     defsref = dwg_find_dictionary (dwg, "ACAD_PDFDEFINITIONS");
@@ -31081,6 +31076,7 @@ dwg_add_PDFUNDERLAY (Dwg_Object_BLOCK_HEADER *restrict blkhdr,
         if (!def) // matching def + dict not found, add entry
           dwg_add_DICTIONARY_item (_dict, base_1, 0);
       }
+    free (base);
     if (!def)
       {
         API_ADD_OBJECT (PDFDEFINITION);

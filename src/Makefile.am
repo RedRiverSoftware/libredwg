@@ -123,6 +123,7 @@ EXTRA_HEADERS = \
 	dec_macros.h \
 	free.h \
 	copy.h \
+	dynblock.h \
 	print.h \
 	logging.h \
 	reedsolomon.h \

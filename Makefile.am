@@ -31,6 +31,9 @@ SUBDIRS += doc
 endif
 endif
 AM_DISTCHECK_CONFIGURE_FLAGS = --enable-release
+# The perl bindings install into perl's own directories, outside the prefix
+# distcheck installs into.
+AM_DISTCHECK_CONFIGURE_FLAGS += --with-perl-install=no
 if DISABLE_BINDINGS
 AM_DISTCHECK_CONFIGURE_FLAGS += --disable-bindings
 endif
@@ -84,7 +87,9 @@ shell_sources = dwg.in dxf.in dxf-allcvt.sh test-dxf.sh dxf-check dxfb-check \
 	unknown regen-unknown full-regen-unknown regen-gperf regen-dynapi \
 	maintainer-clean-local distuninstallcheck dist-hook
 
-dist-hook: regen-dynapi
+# Run make regen-dynapi before make dist: dist-hook runs after the files
+# are copied into distdir, and under distcheck the source tree is read-only.
+dist-hook:
 	echo dist-hook distdir="$(distdir)"
 	echo $(VERSION) > $(distdir)/.tarball-version
 	test -f $(distdir)/test/xmlsuite/Makefile.in
@@ -142,7 +147,7 @@ endif
 endif
 
 regen-dynapi: $(srcdir)/src/gen-dynapi.pl $(srcdir)/include/dwg.h
-	-$(PERL) $(srcdir)/src/gen-dynapi.pl
+	$(PERL) $(srcdir)/src/gen-dynapi.pl
 # $(MAKE) -C src $(abs_top_srcdir)/src/dxfclasses.c
 regen-gperf:
 	-cd $(abs_top_srcdir) && \

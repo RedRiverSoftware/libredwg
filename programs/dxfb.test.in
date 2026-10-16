@@ -27,13 +27,7 @@ elif [ -n "$TESTS_ENVIRONMENT" ]; then
 else
     TESTPROG="@LTEXEC@"
 fi
-# shellcheck disable=SC2157
-if [ -n "@HAVE_ASAN@" ]
-then
-    DXF2DWG="env ASAN_OPTIONS=detect_leaks=0 $TESTPROG ./dxf2dwg${EXEEXT}"
-else
-    DXF2DWG="$TESTPROG ./dxf2dwg${EXEEXT}"
-fi
+DXF2DWG="$TESTPROG ./dxf2dwg${EXEEXT}"
 HAVE_ODA="@HAVE_ODA@"
 ODAFileConverter="@ODAFILECONVERTER@"
 if [ -n "$HAVE_ODA" ]; then
@@ -80,10 +74,14 @@ check_roundtrip() {
             echo "dwg2dxf $dwg failed"
             exit 1
         fi
-        if ! $DXF2DWG -y -v0 -o "$tgt" "$dxf" 2>/dev/null >/dev/null; then
-            echo "$DXF2DWG -y -v0 -o $tgt $dxf failed with $?"
+        $DXF2DWG -y -v0 -o "$tgt" "$dxf" 2>"$tgt.dxf2dwg.log" >/dev/null
+        ret=$?
+        if [ "$ret" -ne 0 ]; then
+            echo "$DXF2DWG -y -v0 -o $tgt $dxf failed with $ret"
+            tail -n 40 "$tgt.dxf2dwg.log"
             exit 1
         fi
+        rm -f "$tgt.dxf2dwg.log"
         if ! $TESTPROG "./dwgread${EXEEXT}" -v2 "$tgt" 2>"$log2" >/dev/null; then
             echo "dwgread $tgt failed with $?"
             exit 1

@@ -15,9 +15,10 @@
    test-data/2004/Dynblocks.dwg, whose placements AutoCAD 2027 set and
    computed, are copied into a new r2004 document and placed there: as
    AutoCAD's own placements are, whose stored values the new ones must
-   repeat, and at the definitions' values and at other visibility states.
-   The document is written and read back, and the evaluator's check of every
-   placement against its representation block must match. */
+   repeat, at changed lengths and angles too, and at the definitions' values
+   and at other visibility states. The document is written and read back,
+   and the evaluator's check of every placement against its representation
+   block must match. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,11 +35,12 @@ static int test_loglevel;
 #  include <unistd.h>
 #endif
 #include "dwg.h"
+#include "bits.h"
 #include "tests_common.h"
 #include "dwg_api.h"
 #include "dwg_dynblock_api.h"
 
-#define OK(...)                                                               \
+#define OK(...)                                                              \
   do                                                                          \
     {                                                                         \
       loglevel = test_loglevel;                                               \
@@ -56,10 +58,13 @@ static int test_loglevel;
 #define FIXTURE "test/test-data/2004/Dynblocks.dwg"
 #define WRITTEN "dynblock_insert_test.dwg"
 #define WRITTEN_ATTRIBS "dynblock_insert_test_attribs.dwg"
+#define WRITTEN_NON_ASCII "dynblock_insert_test_non_ascii.dwg"
+#define WRITTEN_ATTRIBUTE_TEXT "dynblock_insert_test_attribute_text.dwg"
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
 #define WRITTEN_R11 "dynblock_insert_test_r11.dwg"
+#define WRITTEN_WIDTHS "dynblock_insert_test_widths.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -75,16 +80,29 @@ static int test_loglevel;
 /* A refusal: DWG_ERR_INVALIDDWG with the bit for the reason. */
 #define REFUSED(bit) (DWG_ERR_INVALIDDWG | (bit))
 
-/* AutoCAD's placements whose values the evaluator supports: two at the
-   definition's values, which AutoCAD stores as representation blocks too,
-   and the others at a visibility state. */
+/* AutoCAD's placements whose values the evaluator supports, all of them but
+   the Door's at another Door Size, which drives a scale action, and Door
+   Elevation's, which is constraint-based: two at the definition's values,
+   which AutoCAD stores as representation blocks too, eight at a visibility
+   state only, and eleven at changed lengths or angles, whose records hold
+   the parameters' points as the evaluation moves them. The Window at other
+   widths and heights (C8D0-C8D3), the Door at another Wall Thickness, which
+   moves its flip parameter 'swing' (C8D5, C8D6, C8D8), and the Toilet at
+   other Angles, which turn its alignment parameter (C8DB-C8DE). */
 static const BITCODE_RLL autocad_placements[]
-    = { 0xBFD0, 0xBFD8, 0xC145, 0xC14C, 0xC17F,
-        0xC8D7, 0xC8DA, 0xC8E0, 0xC8E1, 0xC8E2 };
+    = { 0xBFD0, 0xBFD8, 0xC145, 0xC14C, 0xC17F, 0xC8D0, 0xC8D1,
+        0xC8D2, 0xC8D3, 0xC8D5, 0xC8D6, 0xC8D7, 0xC8D8, 0xC8DA,
+        0xC8DB, 0xC8DC, 0xC8DD, 0xC8DE, 0xC8E0, 0xC8E1, 0xC8E2 };
 
-/* The visibility states each definition is placed at besides. Door's other
-   states have a character outside ASCII, which a document built with the
-   add API loses when written (runbook task P3-06, tested in copy_test). */
+/* How far an evaluated point of ours may be from AutoCAD's: AutoCAD's turns
+   leave residues such as 3e-14 for 0, and signed zeros. */
+#define RECORD_TOLERANCE 1e-9
+
+/* The visibility states each definition is placed at besides. Door's
+   "Open 45\xC2\xBA" and "Open 90\xC2\xBA" have a character outside ASCII,
+   in UTF-8 in the document built with the add API, as in the API, and in
+   codepage 1252 in the fixture and the read back. Its own state, placed
+   at its values, is "Open 30\xC2\xBA". */
 typedef struct
 {
   BITCODE_RLL def;
@@ -102,7 +120,9 @@ static const Test_States test_states[] = {
   { TOILET,
     "Type (view)",
     { "Round (Plan)", "Pullchain (Plan)", NULL, NULL } },
-  { DOOR, "Opening Angle", { "Closed", NULL, NULL, NULL } },
+  { DOOR,
+    "Opening Angle",
+    { "Closed", "Open 45\xC2\xBA", "Open 90\xC2\xBA", NULL } },
 };
 
 static char fixture[512];
@@ -268,24 +288,54 @@ typedef struct
   BITCODE_RLL def;
   BITCODE_RLL autocad; /* the fixture's placement it repeats, or 0 */
   int at_defaults;
+  /* a LINEAR or ROTATION value differs from the definition's: the records
+     hold evaluated points, which compare within RECORD_TOLERANCE */
+  int evaluated;
   Dwg_DynValue values[8];
   BITCODE_BL num_values;
 } Placement;
 
-#define MAX_PLACEMENTS 40
+#define MAX_PLACEMENTS 48
 
 static Placement placements[MAX_PLACEMENTS];
 static unsigned num_placements;
 
-/* Two XRECORDs hold the same items. */
+/* An XRECORD string of a document that holds its codepage, in UTF-8, as a
+   document built with the add API holds it: a new allocation of *lenp
+   bytes, or NULL. */
+static char *
+xrecord_string_utf8 (const Dwg_Resbuf *r, size_t *lenp)
+{
+  char *s = (char *)malloc ((size_t)r->value.str.size + 1);
+  char *u;
+  if (!s)
+    return NULL;
+  memcpy (s, r->value.str.u.data, r->value.str.size);
+  s[r->value.str.size] = '\0';
+  u = bit_TV_to_utf8 (s, r->value.str.codepage);
+  if (u != s)
+    free (s);
+  if (u)
+    *lenp = strlen (u);
+  return u;
+}
+
+/* Two XRECORDs hold the same items: the same bytes, or with a tolerance
+   the reals and points within it, which *exactp then says aren't all the
+   same bytes. With b_utf8, b is in a document that holds UTF-8 and a in
+   one that holds its codepage: b's strings are a's in UTF-8, and b's
+   xdata_size is a's and the bytes that adds. */
 static int
 same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
+              const int b_utf8, const double tolerance, int *exactp,
               char *what, const size_t size)
 {
   const Dwg_Resbuf *ra = a->xdata, *rb = b->xdata;
   unsigned i = 0;
-  if (a->num_xdata != b->num_xdata || a->xdata_size != b->xdata_size
-      || a->cloning != b->cloning)
+  size_t utf8_extra = 0;
+  *exactp = 1;
+  if (a->num_xdata != b->num_xdata || a->cloning != b->cloning
+      || (!b_utf8 && a->xdata_size != b->xdata_size))
     {
       snprintf (what, size, "%u items of %u bytes, cloning %u: AutoCAD's %u "
                 "of %u, cloning %u",
@@ -301,15 +351,41 @@ same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
         switch (dwg_resbuf_value_type (ra->type))
           {
           case DWG_VT_STRING:
-            same = ra->value.str.size == rb->value.str.size
-                   && !memcmp (ra->value.str.u.data, rb->value.str.u.data,
-                               ra->value.str.size);
+            if (b_utf8 && ra->value.str.u.data)
+              {
+                size_t len = 0;
+                char *u = xrecord_string_utf8 (ra, &len);
+                same = u && rb->value.str.size == len
+                       && !memcmp (u, rb->value.str.u.data, len);
+                if (u && len > ra->value.str.size)
+                  utf8_extra += len - ra->value.str.size;
+                free (u);
+              }
+            else
+              same = ra->value.str.size == rb->value.str.size
+                     && !memcmp (ra->value.str.u.data, rb->value.str.u.data,
+                                 ra->value.str.size);
             break;
           case DWG_VT_POINT3D:
             same = !memcmp (ra->value.pt, rb->value.pt, sizeof (ra->value.pt));
+            if (!same && tolerance > 0.0)
+              {
+                *exactp = 0;
+                same = 1;
+                for (int k = 0; k < 3; k++)
+                  if (!(fabs (ra->value.pt[k] - rb->value.pt[k])
+                        <= tolerance))
+                    same = 0;
+              }
             break;
           case DWG_VT_REAL:
-            same = ra->value.dbl == rb->value.dbl;
+            same = !memcmp (&ra->value.dbl, &rb->value.dbl,
+                            sizeof (ra->value.dbl));
+            if (!same && tolerance > 0.0)
+              {
+                *exactp = 0;
+                same = fabs (ra->value.dbl - rb->value.dbl) <= tolerance;
+              }
             break;
           case DWG_VT_INT16:
             same = ra->value.i16 == rb->value.i16;
@@ -323,24 +399,47 @@ same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
           }
       if (!same)
         {
-          snprintf (what, size, "item %u (code %d) differs", i, rb->type);
+          if (dwg_resbuf_value_type (rb->type) == DWG_VT_POINT3D)
+            snprintf (what, size,
+                      "item %u (code %d) is (%.17g, %.17g, %.17g), AutoCAD's "
+                      "(%.17g, %.17g, %.17g)",
+                      i, rb->type, rb->value.pt[0], rb->value.pt[1],
+                      rb->value.pt[2], ra->value.pt[0], ra->value.pt[1],
+                      ra->value.pt[2]);
+          else
+            snprintf (what, size, "item %u (code %d) differs", i, rb->type);
           return 0;
         }
+    }
+  if (b_utf8 && b->xdata_size != a->xdata_size + utf8_extra)
+    {
+      snprintf (what, size, "%u bytes in UTF-8: AutoCAD's %u and %u for its "
+                "strings in UTF-8",
+                (unsigned)b->xdata_size, (unsigned)a->xdata_size,
+                (unsigned)utf8_extra);
+      return 0;
     }
   return 1;
 }
 
 /* The ACAD_ENHANCEDBLOCKDATA of placement ours, in dwg, has the records
    that AutoCAD stored for its placement theirs, in fixture: the same
-   names, in the same order, each XRECORD with the same items. */
+   names, in the same order, each XRECORD with the same items, their bytes
+   the same, or with a tolerance the reals and points within it. A
+   document built with the add API holds the strings in UTF-8, and writes
+   them in the codepage. */
 static int
 check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
-               const Dwg_Data *fixture_dwg, const Dwg_Object *theirs)
+               const Dwg_Data *fixture_dwg, const Dwg_Object *theirs,
+               const double tolerance)
 {
   const Dwg_Object *a = enhanced_block_data (fixture_dwg, theirs);
   const Dwg_Object *b = enhanced_block_data (dwg, ours);
   const Dwg_Object_DICTIONARY *da, *db;
-  char why[256] = "";
+  const int b_utf8 = (dwg->opts & DWG_OPTS_INJSON)
+                     && !(fixture_dwg->opts & DWG_OPTS_INJSON);
+  unsigned exact = 0;
+  char why[512] = "";
   if (!a || !b)
     {
       FAIL ("%s: ACAD_ENHANCEDBLOCKDATA %s", what,
@@ -360,18 +459,28 @@ check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
     {
       const Dwg_Object *xa = object (fixture_dwg, ref (da->itemhandles[i]));
       const Dwg_Object *xb = object (dwg, ref (db->itemhandles[i]));
+      int same_bytes = 0;
       if (strcmp (da->texts[i], db->texts[i]) || !xa || !xb
           || xa->fixedtype != DWG_TYPE_XRECORD
           || xb->fixedtype != DWG_TYPE_XRECORD
           || !same_xrecord (xa->tio.object->tio.XRECORD,
-                            xb->tio.object->tio.XRECORD, why, sizeof (why)))
+                            xb->tio.object->tio.XRECORD, b_utf8, tolerance,
+                            &same_bytes, why, sizeof (why)))
         {
           FAIL ("%s: record '%s' differs from AutoCAD's record '%s': %s",
                 what, db->texts[i], da->texts[i], why);
           return 1;
         }
+      exact += same_bytes;
     }
-  OK ("%s: its %u records are AutoCAD's", what, (unsigned)da->numitems);
+  if (exact == da->numitems)
+    OK ("%s: its %u records are AutoCAD's, byte for byte%s", what,
+        (unsigned)da->numitems, b_utf8 ? ", strings in UTF-8" : "");
+  else
+    OK ("%s: its %u records are AutoCAD's, %u byte for byte and the others "
+        "within %g%s",
+        what, (unsigned)da->numitems, exact, tolerance,
+        b_utf8 ? ", strings in UTF-8" : "");
   return 0;
 }
 
@@ -706,9 +815,73 @@ copy_of (BITCODE_RLL map[][2], const unsigned num_map, const BITCODE_RLL def)
   return 0;
 }
 
-/* The fixture's definitions placed as AutoCAD placed them, at their own
-   values, and at other visibility states, scaled and rotated; and their
-   checks, before and after a write and read back. */
+/* Places in dst, at AutoCAD's values for its placement autocad of src,
+   the copy of its definition, at ins_pt, scale and rotation, or, with
+   ins_pt NULL, where AutoCAD placed it. The records, which are in the
+   block's coordinates, must be AutoCAD's either way. */
+static int
+repeat_placement (Dwg_Data *dst, Dwg_Data *src, BITCODE_RLL map[][2],
+                  const unsigned num_map, const BITCODE_RLL autocad,
+                  const BITCODE_3BD *ins_pt, const double scale,
+                  const double rotation)
+{
+  const Dwg_Object *ins = object (src, autocad);
+  const Dwg_Entity_INSERT *_ins;
+  Dwg_Object_BLOCK_HEADER *def = NULL;
+  Dwg_DynValue *values = NULL;
+  BITCODE_BL count = 0;
+  Dwg_DynParam *params = NULL;
+  BITCODE_BL num_params = 0;
+  const unsigned n = num_placements;
+  int at_defaults = 1, evaluated = 0, failures = 0, error;
+  char what[256];
+  if (!ins || ins->fixedtype != DWG_TYPE_INSERT)
+    {
+      FAIL ("AutoCAD's placement " FORMAT_HV " not found", autocad);
+      return 1;
+    }
+  _ins = ins->tio.entity->tio.INSERT;
+  error = dwg_dynblock_get_values (_ins, &def, &values, &count);
+  error |= dwg_dynblock_get_params (def, &params, &num_params);
+  loglevel = test_loglevel;
+  for (BITCODE_BL j = 0; !error && j < count; j++)
+    if (values[j].state ? strcmp (values[j].state, params[j].default_state)
+                        : fabs (values[j].value - params[j].default_value)
+                              > 1e-9)
+      {
+        at_defaults = 0;
+        evaluated |= params[j].kind == DWG_DYNPARAM_LINEAR
+                     || params[j].kind == DWG_DYNPARAM_ROTATION;
+      }
+  if (ins_pt)
+    snprintf (what, sizeof (what),
+              "AutoCAD's placement " FORMAT_HV " at scale %g, rotation %g",
+              autocad, scale, rotation);
+  else
+    snprintf (what, sizeof (what), "AutoCAD's placement " FORMAT_HV,
+              autocad);
+  if (error)
+    {
+      FAIL ("%s: its values: 0x%x", what, error);
+      failures++;
+    }
+  else
+    failures += place (dst, copy_of (map, num_map, handle_of (src, def)),
+                       autocad, ins_pt ? ins_pt : &_ins->ins_pt,
+                       ins_pt ? scale : _ins->scale.x,
+                       ins_pt ? rotation : _ins->rotation, values, count,
+                       at_defaults, what);
+  if (num_placements > n)
+    placements[n].evaluated = evaluated;
+  dwg_dynblock_free_values (values, count);
+  dwg_dynblock_free_params (params, num_params);
+  return failures;
+}
+
+/* The fixture's definitions placed as AutoCAD placed them, as AutoCAD did
+   and elsewhere, scaled and rotated; at their own values; and at other
+   visibility states, scaled and rotated; and their checks, before and
+   after a write and read back. */
 static int
 test_placements (Dwg_Data *src)
 {
@@ -729,38 +902,18 @@ test_placements (Dwg_Data *src)
   // AutoCAD's placements, repeated
   for (size_t i = 0; i < sizeof (autocad_placements) / sizeof (BITCODE_RLL);
        i++)
-    {
-      const Dwg_Object *ins = object (src, autocad_placements[i]);
-      const Dwg_Entity_INSERT *_ins = ins->tio.entity->tio.INSERT;
-      Dwg_Object_BLOCK_HEADER *def = NULL;
-      Dwg_DynValue *values = NULL;
-      BITCODE_BL count = 0;
-      Dwg_DynParam *params = NULL;
-      BITCODE_BL num_params = 0;
-      int at_defaults = 1;
-      error = dwg_dynblock_get_values (_ins, &def, &values, &count);
-      error |= dwg_dynblock_get_params (def, &params, &num_params);
-      loglevel = test_loglevel;
-      for (BITCODE_BL j = 0; !error && j < count; j++)
-        if (values[j].state ? strcmp (values[j].state, params[j].default_state)
-                            : fabs (values[j].value - params[j].default_value)
-                                  > 1e-9)
-          at_defaults = 0;
-      snprintf (what, sizeof (what), "AutoCAD's placement " FORMAT_HV,
-                autocad_placements[i]);
-      if (error)
-        {
-          FAIL ("%s: its values: 0x%x", what, error);
-          failures++;
-        }
-      else
-        failures += place (dst, copy_of (map, num_map, handle_of (src, def)),
-                           autocad_placements[i], &_ins->ins_pt,
-                           _ins->scale.x, _ins->rotation, values, count,
-                           at_defaults, what);
-      dwg_dynblock_free_values (values, count);
-      dwg_dynblock_free_params (params, num_params);
-    }
+    failures += repeat_placement (dst, src, map, num_map,
+                                  autocad_placements[i], NULL, 1.0, 0.0);
+  // and some at changed lengths and angles elsewhere, scaled and rotated
+  {
+    const BITCODE_3BD at = { -300.0, 250.0, 0.0 };
+    failures += repeat_placement (dst, src, map, num_map, 0xC8D3, &at, 2.5,
+                                  M_PI / 3);
+    failures += repeat_placement (dst, src, map, num_map, 0xC8D8, &at, 0.5,
+                                  -M_PI / 2);
+    failures += repeat_placement (dst, src, map, num_map, 0xC8DB, &at, 3.0,
+                                  2.0);
+  }
   // at the definitions' values, with no values given
   for (unsigned i = 0; i < num_map; i++)
     {
@@ -793,7 +946,8 @@ test_placements (Dwg_Data *src)
       failures += check_values (what, dst, pl);
       if (pl->autocad && !pl->at_defaults)
         failures += check_records (what, dst, object (dst, pl->insert), src,
-                                   object (src, pl->autocad));
+                                   object (src, pl->autocad),
+                                   pl->evaluated ? RECORD_TOLERANCE : 0.0);
     }
   failures += check_inserts ("placements", dst);
   failures += check_refs ("placements", dst);
@@ -825,9 +979,10 @@ test_placements (Dwg_Data *src)
           failures += check_structure (what, &readback, pl);
           failures += check_values (what, &readback, pl);
           if (pl->autocad && !pl->at_defaults)
-            failures += check_records (what, &readback,
-                                       object (&readback, pl->insert), src,
-                                       object (src, pl->autocad));
+            failures += check_records (
+                what, &readback, object (&readback, pl->insert), src,
+                object (src, pl->autocad),
+                pl->evaluated ? RECORD_TOLERANCE : 0.0);
         }
       failures += check_inserts ("read back", &readback);
       failures += check_refs ("read back", &readback);
@@ -895,6 +1050,162 @@ test_refusal (Dwg_Data *dwg, Dwg_Object_BLOCK_HEADER *owner,
         insert ? "an INSERT" : "NULL", error, expected,
         (unsigned)(dwg->num_objects - num_objects));
   return 1;
+}
+
+static int test_accepted (Dwg_Data *dwg, const BITCODE_RLL def,
+                          const double scale, const Dwg_DynValue *values,
+                          const BITCODE_BL n, const char *what);
+static Dwg_Object *graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
+                               const Dwg_Object_Type type, BITCODE_BL *indexp);
+
+/* A LINEAR or ROTATION value other than the definition's that its value
+   set doesn't allow is refused, as AutoCAD would move it to one it allows
+   on its next edit: Window Width 14, not in its list (12, 24, 30, ...),
+   while 24 is; and, with the value set changed, a Window Width below its
+   minimum, above its maximum or off its increment, and an Angle off its
+   increment of 30 degrees, around the circle too. */
+static int
+test_value_sets (Dwg_Data *dst, BITCODE_RLL map[][2], const unsigned num_map)
+{
+  const BITCODE_RLL window = copy_of (map, num_map, WINDOW);
+  const BITCODE_RLL toilet = copy_of (map, num_map, TOILET);
+  Dwg_Object *width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER,
+                                  NULL);
+  Dwg_Object *angle
+      = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  Dwg_BLOCKPARAMVALUESET kept, *vs;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!width || !angle)
+    {
+      FAIL ("value sets: the Window's or the Toilet's parameter not found");
+      return 1;
+    }
+  // the Window's first linear parameter is Window Width
+  vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+  v.name = (char *)"Window Width";
+  v.value = 14.0;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value not in its value set's list");
+  v.value = 24.0;
+  failures += test_accepted (dst, window, 1.0, &v, 1,
+                             "a linear value in its value set's list");
+  // found again, as the placement added objects
+  width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+  vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+  kept = *vs;
+  vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_MAXIMUM
+              | DWG_DYNPARAM_HAS_INCREMENT;
+  vs->minimum = 12.0;
+  vs->maximum = 60.0;
+  vs->increment = 6.0;
+  v.value = 6.0;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value below its minimum");
+  v.value = 66.0;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value above its maximum");
+  v.value = 20.0;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value off its increment");
+  v.value = 18.0;
+  failures += test_accepted (dst, window, 1.0, &v, 1,
+                             "a linear value on its increment, from its "
+                             "minimum");
+  // a huge value a quarter off an increment of 1, or off the one value of
+  // a list: the tolerance stays far below the spacing
+  width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+  vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+  vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_INCREMENT;
+  vs->minimum = 0.0;
+  vs->increment = 1.0;
+  v.value = 1e9 + 0.25;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, window), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a huge linear value off its increment");
+  v.value = 1e9;
+  failures += test_accepted (dst, window, 1.0, &v, 1,
+                             "a huge linear value on its increment");
+  {
+    double one[1] = { 1e9 };
+    width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+    vs = &width->tio.object->tio.BLOCKLINEARPARAMETER->value_set;
+    vs->flags = DWG_DYNPARAM_HAS_LIST;
+    vs->valuelist = one;
+    vs->num_valuelist = 1;
+    v.value = 1e9 + 0.25;
+    failures += test_refusal (dst, model_space (dst),
+                              block_header (dst, window), &pt, 1.0, 0.0, &v,
+                              1, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a huge linear value a quarter off its list's");
+    v.value = 1e9;
+    failures += test_accepted (dst, window, 1.0, &v, 1,
+                               "a huge linear value in its list");
+    width = graph_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, NULL);
+    width->tio.object->tio.BLOCKLINEARPARAMETER->value_set = kept;
+  }
+
+  // found again, as the placements added objects
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  vs = &angle->tio.object->tio.BLOCKROTATIONPARAMETER->angle_value_set;
+  kept = *vs;
+  vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_MAXIMUM
+              | DWG_DYNPARAM_HAS_INCREMENT;
+  vs->minimum = 0.0;
+  vs->maximum = 2.0 * M_PI;
+  vs->increment = M_PI / 6;
+  v.name = (char *)"Angle";
+  v.value = 0.3;
+  failures += test_refusal (dst, model_space (dst),
+                            block_header (dst, toilet), &pt, 1.0, 0.0, &v, 1,
+                            NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a rotation value off its increment");
+  v.value = M_PI / 3 + 4.0 * M_PI;
+  failures += test_accepted (dst, toilet, 1.0, &v, 1,
+                             "a rotation value on its increment, two turns "
+                             "on");
+  v.value = -M_PI / 6;
+  failures += test_accepted (dst, toilet, 1.0, &v, 1,
+                             "a rotation value on its increment, below 0");
+  // with limits pi/2 to 2 pi and the Toilet's Angle made pi, 2 pi is at
+  // the maximum, though it is 0 reduced, and pi/4 is below the minimum
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  {
+    Dwg_Object_BLOCKROTATIONPARAMETER *_angle
+        = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+    const BITCODE_3BD endpt = _angle->def_endpt;
+    _angle->def_endpt.x = 2.0 * _angle->def_basept.x
+                          - _angle->def_base_angle_pt.x;
+    _angle->def_endpt.y = 2.0 * _angle->def_basept.y
+                          - _angle->def_base_angle_pt.y;
+    vs = &_angle->angle_value_set;
+    vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_MAXIMUM;
+    vs->minimum = M_PI / 2;
+    vs->maximum = 2.0 * M_PI;
+    v.value = 2.0 * M_PI;
+    failures += test_accepted (dst, toilet, 1.0, &v, 1,
+                               "a rotation value at its maximum of 2 pi");
+    v.value = M_PI / 4;
+    failures += test_refusal (dst, model_space (dst),
+                              block_header (dst, toilet), &pt, 1.0, 0.0, &v,
+                              1, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a rotation value below its minimum");
+    _angle->def_endpt = endpt;
+  }
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  angle->tio.object->tio.BLOCKROTATIONPARAMETER->angle_value_set = kept;
+  return failures;
 }
 
 static int
@@ -985,16 +1296,7 @@ test_refusals (Dwg_Data *src)
                             0, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a rotation that isn't finite");
 
-  v[0].name = (char *)"Window Width";
-  v[0].value = 12.0;
-  failures += test_refusal (dst, ms, window, &pt, 1.0, 0.0, v, 1, NULL, 0,
-                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                            "a changed linear value");
-  v[0].name = (char *)"Angle";
-  v[0].value = M_PI / 6;
-  failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
-                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                            "a changed rotation value");
+  // the evaluation doesn't flip
   v[0].name = (char *)"Flip view";
   v[0].value = 1.0;
   failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
@@ -1003,6 +1305,13 @@ test_refusals (Dwg_Data *src)
   failures += test_refusal (dst, ms, toilet, &pt, 1.0, 0.0, v, 1, NULL, 0,
                             REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                             "a flip value of 0.5");
+  // a value the evaluation refuses
+  v[0].name = (char *)"Window Width";
+  v[0].value = -1.0;
+  failures += test_refusal (dst, ms, window, &pt, 1.0, 0.0, v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value below 0");
+  failures += test_value_sets (dst, map, num_map);
   v[0].name = (char *)"Window Width";
   v[0].value = (double)NAN;
   failures += test_refusal (dst, ms, window, &pt, 1.0, 0.0, v, 1, NULL, 0,
@@ -1452,6 +1761,35 @@ check_attrib_links (const char *what, const Dwg_Data *dwg,
   return failures;
 }
 
+/* Appends n EED items to entity ent, each with zeroed data, the first
+   starting a group of the APPID with handle appid that takes size bytes in
+   a file. Returns the first, or NULL. */
+static Dwg_Eed *
+append_eed (Dwg_Object_Entity *ent, const BITCODE_RLL appid,
+            const BITCODE_BS size, const BITCODE_BL n)
+{
+  const BITCODE_BL first = ent->num_eed;
+  Dwg_Eed *eed
+      = (Dwg_Eed *)realloc (ent->eed, (first + n) * sizeof (Dwg_Eed));
+  if (!eed)
+    return NULL;
+  ent->eed = eed;
+  memset (&eed[first], 0, n * sizeof (Dwg_Eed));
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      eed[first + i].data = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data));
+      if (!eed[first + i].data)
+        return NULL;
+      ent->num_eed++;
+    }
+  eed[first].size = size;
+  eed[first].handle.code = 5;
+  for (BITCODE_RLL v = appid; v; v >>= 8)
+    eed[first].handle.size++;
+  eed[first].handle.value = appid;
+  return &eed[first];
+}
+
 /* Gives entity ent the AcDbBlockRepETag EED AutoCAD gives the entities of
    a dynamic block definition: 1070 1, the index, and a 1005 handle, of 0
    on an ATTDEF. */
@@ -1461,19 +1799,9 @@ add_etag (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RL index)
   BITCODE_H appid
       = dwg_find_tablehandle (dwg, "AcDbBlockRepETag", "APPID");
   const BITCODE_RLL zero = 0;
-  Dwg_Eed *eed = (Dwg_Eed *)calloc (3, sizeof (Dwg_Eed));
-  if (!appid || !eed || ent->num_eed)
-    {
-      free (eed);
-      return 1;
-    }
-  eed[0].size = 3 + 5 + 9;
-  eed[0].handle.code = 5;
-  eed[0].handle.size = 2;
-  eed[0].handle.value = appid->absolute_ref;
-  for (int i = 0; i < 3; i++)
-    eed[i].data = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data));
-  if (!eed[0].data || !eed[1].data || !eed[2].data)
+  Dwg_Eed *eed
+      = appid ? append_eed (ent, appid->absolute_ref, 3 + 5 + 9, 3) : NULL;
+  if (!eed)
     return 1;
   eed[0].data->code = 70;
   eed[0].data->u.eed_70.rs = 1;
@@ -1482,16 +1810,85 @@ add_etag (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RL index)
   memcpy (&eed[1].data->u.eed_71.rl, &index, sizeof (index));
   eed[2].data->code = 5;
   memcpy (&eed[2].data->u.eed_5.entity, &zero, sizeof (zero));
-  ent->eed = eed;
-  ent->num_eed = 3;
   return 0;
 }
 
-/* An expected ATTRIB: its tag and value. */
+/* Gives entity ent an AcDbAttr EED group, adding its APPID to dwg when
+   dwg has none: 1070 0, then an item with the given code, 70 (1070) or 71
+   (1071), and value. AutoCAD 2007 and later write 1070 0, 1070 1 there for
+   an attribute whose position is locked, in files before r2007. */
+static int
+add_attr_eed (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RC code,
+              const BITCODE_RS value)
+{
+  BITCODE_H found = dwg_find_tablehandle (dwg, "AcDbAttr", "APPID");
+  BITCODE_RLL appid = found ? found->absolute_ref : 0;
+  const BITCODE_RS zero = 0;
+  const BITCODE_RL value71 = value;
+  Dwg_Eed *eed;
+  if (!appid)
+    {
+      Dwg_Object_APPID *_appid = dwg_add_APPID (dwg, "AcDbAttr");
+      if (!_appid)
+        return 1;
+      appid = handle_of (dwg, _appid);
+    }
+  // a 1070 takes 3 bytes in a file, a 1071 5
+  eed = append_eed (ent, appid, code == 71 ? 8 : 6, 2);
+  if (!eed)
+    return 1;
+  eed[0].data->code = 70;
+  // Dwg_Eed_Data is packed
+  memcpy (&eed[0].data->u.eed_70.rs, &zero, sizeof (zero));
+  eed[1].data->code = code;
+  if (code == 71)
+    memcpy (&eed[1].data->u.eed_71.rl, &value71, sizeof (value71));
+  else
+    memcpy (&eed[1].data->u.eed_70.rs, &value, sizeof (value));
+  return 0;
+}
+
+/* The values of obj's AcDbAttr EED group, of 1070 items, into values, up
+   to two of them. Returns how many items the group has, -1 when obj has
+   no such group, or -2 when it has two, or an item that isn't a 1070. */
+static int
+attr_eed (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RS values[2])
+{
+  const Dwg_Eed *eed = obj->tio.entity->eed;
+  int n = -1, in_group = 0;
+  for (BITCODE_BL i = 0; eed && i < obj->tio.entity->num_eed; i++)
+    {
+      if (eed[i].size)
+        {
+          const Dwg_Object *appid = object (dwg, eed[i].handle.value);
+          in_group = appid && appid->fixedtype == DWG_TYPE_APPID
+                     && !strcmp (appid->tio.object->tio.APPID->name,
+                                 "AcDbAttr");
+          if (in_group && n >= 0)
+            return -2;
+          if (in_group)
+            n = 0;
+        }
+      if (!in_group)
+        continue;
+      if (!eed[i].data || eed[i].data->code != 70)
+        return -2;
+      if (n < 2)
+        // Dwg_Eed_Data is packed
+        memcpy (&values[n], &eed[i].data->u.eed_70.rs, sizeof (values[n]));
+      n++;
+    }
+  return n;
+}
+
+/* An expected ATTRIB: its tag and value, and whether it has an AcDbAttr
+   EED group, 1070 0 and 1070 lock. */
 typedef struct
 {
   const char *tag;
   const char *value;
+  int has_attr_eed;
+  BITCODE_RS lock;
 } Expected_Attrib;
 
 /* The ATTRIBs of placement insert, placed at ins_pt, scale and rotation in
@@ -1501,7 +1898,8 @@ typedef struct
    ATTRIB keeps it (0, 0) and doesn't store it (dataflags 0x02), as
    AutoCAD's don't. Other ATTRIBs are aligned at their definition's
    alignment point, placed; dataflags 0x02 stands for an alignment point of
-   (0, 0), as AutoCAD reads it. */
+   (0, 0), as AutoCAD reads it. Each has the AcDbAttr EED group expected,
+   which its definition has too, or neither has one. */
 static int
 check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
@@ -1596,10 +1994,31 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                 fmod (d->rotation + rotation, 2.0 * M_PI), etags);
           failures++;
         }
+      // the definition's AcDbAttr group, copied
+      {
+        BITCODE_RS av[2] = { 9, 9 }, dv[2] = { 9, 9 };
+        const int an = attr_eed (dwg, attobj, av);
+        const int dn = attr_eed (dwg, defobj, dv);
+        const int want = expected[k].has_attr_eed ? 2 : -1;
+        if (an != want || dn != want
+            || (want == 2
+                && (av[0] != 0 || av[1] != expected[k].lock || dv[0] != 0
+                    || dv[1] != expected[k].lock)))
+          {
+            FAIL ("%s: ATTRIB %s has %d AcDbAttr items (%u, %u), its "
+                  "definition %d (%u, %u), expected %d (0, %u)",
+                  what, a->tag, an, (unsigned)av[0], (unsigned)av[1], dn,
+                  (unsigned)dv[0], (unsigned)dv[1], want,
+                  (unsigned)expected[k].lock);
+            failures++;
+          }
+      }
       k++;
     }
   if (!failures)
-    OK ("%s: %u ATTRIBs, as their definitions placed by the INSERT", what, k);
+    OK ("%s: %u ATTRIBs, as their definitions placed by the INSERT, each "
+        "with the AcDbAttr EED expected",
+        what, k);
   return failures;
 }
 
@@ -1637,14 +2056,320 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
   return 1;
 }
 
+/* An attribute definition for test_attribute_widths and the value placed
+   for it. The offsets are where text starts, its insertion point, from its
+   alignment point, along and across its baseline, in text heights: where
+   AutoCAD 2027 starts TEXT in Arial at a height of 2.5, unless said
+   otherwise. A width is as a caller measures it: the sum of the value's
+   Arial advance widths over the height of Arial's A, 1466 units. AutoCAD
+   centres text on its first character's outline where that starts left of
+   the text's start, as Arial's A does by 3 units (overhang), which a width
+   doesn't hold: such a centred value starts half the overhang further
+   back than AutoCAD's, or further forward for backward text. */
+typedef struct
+{
+  const char *tag;
+  BITCODE_BS horiz, vert, generation;
+  double rotation, oblique, width_factor;
+  const char *dflt;               // the definition's default value
+  double dflt_along, dflt_across; // where the definition's text starts
+  const char *value;              // NULL for none given
+  double width;
+  double along, across; // where the ATTRIB starts, but for the overhang
+  double overhang;      // of the value's first character, in font units
+  int vertical;         // in a vertical text style
+} Width_Case;
+
+static const Width_Case width_cases[] = {
+  // centred on the middle, a longer value
+  { "CENTRED", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJKLMNOPQRST-0001", 32548.0 / 1466.0, -11.0999317872, -0.5, 3.0,
+    0 },
+  // centred on the baseline, a shorter value without an overhang
+  { "SHORT", 1, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, 0.0, "iii",
+    1365.0 / 1466.0, -0.4655525239, 0.0, 0.0, 0 },
+  // right on the top, turned, at a width factor of 0.8, a shorter value
+  { "RIGHT", 2, 3, 0, 0.3, 0.0, 0.8, "ABCDEFGHIJ", -7.0788540246, -1.0, "AB",
+    2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
+  // the same, oblique by 15 degrees, as AutoCAD lays it out turned 0.5
+  { "OBLIQUE", 2, 3, 0, 0.5, 0.2617993878, 0.8, "ABCDEFGHIJ", -7.0788540246,
+    -1.0, "AB", 2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
+  // middle, a longer value of capitals
+  { "MIDDLE", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -4.4232605730, -0.5, 3.0, 0 },
+  // middle, a value with descenders: AutoCAD's across is -0.3530013642,
+  // the middle of its characters; the definition's is kept
+  { "LOW", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABgy",
+    4895.0 / 1466.0, -1.6684856753, -0.5, 3.0, 0 },
+  // centred and backward
+  { "BACKWARD", 1, 0, 2, 0.0, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
+    4895.0 / 1466.0, 1.6684856753, 0.0, 3.0, 0 },
+  // right-aligned and backward: forward of its alignment point by the
+  // whole width
+  { "RIGHTBACK", 2, 0, 2, 0.0, 0.0, 1.0, "AB", 1.8635743520, 0.0, "ABgy",
+    4895.0 / 1466.0, 3.3390177353, 0.0, 0.0, 0 },
+  // no width: the definition's start, though the value is longer
+  { "NOWIDTH", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 0.0, -0.9307639836, -0.5, 0.0, 0 },
+  // no value: the definition's default and start
+  { "DEFAULT", 2, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0, NULL, 0.0,
+    -1.8635743516, 0.0, 0.0, 0 },
+  // left on the middle, aligned (spanning the definition's advance width)
+  // and in a vertical style, they start where the definitions do
+  { "LEFTMID", 0, 2, 0, 0.0, 0.0, 1.0, "AB", 0.0, -0.5, "ABCDEFGHIJ",
+    12972.0 / 1466.0, 0.0, -0.5, 0.0, 0 },
+  { "ALIGNED", 3, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -1.8635743516, 0.0, 0.0, 0 },
+  { "VERTICAL", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -0.9307639836, -0.5, 0.0, 1 },
+};
+#define NUM_WIDTH_CASES (sizeof (width_cases) / sizeof (width_cases[0]))
+
+/* The ATTRIBs of placement insert, at ins_pt, scale and rotation in block,
+   holding width_cases' definitions at height 2.5: each aligned at its
+   definition's alignment point placed, with its value, and starting where
+   the case says. */
+static int
+check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
+              const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
+              const double scale, const double rotation)
+{
+  const Dwg_Object *insobj = object (dwg, insert);
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
+  const Dwg_Entity_INSERT *_ins;
+  const double c = cos (rotation), s = sin (rotation);
+  const double height = 2.5 * scale;
+  int failures = 0;
+  if (!insobj || insobj->fixedtype != DWG_TYPE_INSERT || !blk)
+    {
+      FAIL ("%s: no INSERT " FORMAT_HV " or block " FORMAT_HV, what, insert,
+            block);
+      return 1;
+    }
+  _ins = insobj->tio.entity->tio.INSERT;
+  if (_ins->num_owned != NUM_WIDTH_CASES)
+    {
+      FAIL ("%s: %u ATTRIBs, expected %u", what, (unsigned)_ins->num_owned,
+            (unsigned)NUM_WIDTH_CASES);
+      return 1;
+    }
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      const Dwg_Entity_ATTDEF *d = NULL;
+      const Dwg_Entity_ATTRIB *a = NULL;
+      const double r = wc->rotation + rotation;
+      // a width alone starts text half the overhang back, or forward when
+      // backward
+      const double along
+          = wc->along
+            + (wc->generation & 2 ? 0.5 : -0.5) * wc->overhang / 1466.0
+                  * wc->width_factor;
+      double ax, ay, x, y;
+      for (BITCODE_BL i = 0; !d && i < blk->num_owned; i++)
+        {
+          const Dwg_Object *ent = object (dwg, ref (blk->entities[i]));
+          if (ent && ent->fixedtype == DWG_TYPE_ATTDEF
+              && !strcmp (ent->tio.entity->tio.ATTDEF->tag, wc->tag))
+            d = ent->tio.entity->tio.ATTDEF;
+        }
+      for (BITCODE_BL i = 0; !a && i < _ins->num_owned; i++)
+        {
+          const Dwg_Object *att = object (dwg, ref (_ins->attribs[i]));
+          if (att && att->fixedtype == DWG_TYPE_ATTRIB
+              && !strcmp (att->tio.entity->tio.ATTRIB->tag, wc->tag))
+            a = att->tio.entity->tio.ATTRIB;
+        }
+      if (!d || !a)
+        {
+          FAIL ("%s: %s has no %s", what, wc->tag,
+                d ? "ATTRIB" : "attribute definition");
+          failures++;
+          continue;
+        }
+      ax = ins_pt->x
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * c
+                    - (d->alignment_pt.y - blk->base_pt.y) * s);
+      ay = ins_pt->y
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * s
+                    + (d->alignment_pt.y - blk->base_pt.y) * c);
+      x = ax + height * (along * cos (r) - wc->across * sin (r));
+      y = ay + height * (along * sin (r) + wc->across * cos (r));
+      // AutoCAD's offsets have 10 decimals
+      if (strcmp (a->text_value, wc->value ? wc->value : wc->dflt)
+          || fabs (a->alignment_pt.x - ax) > 1e-9
+          || fabs (a->alignment_pt.y - ay) > 1e-9
+          || fabs (a->ins_pt.x - x) > 1e-8 || fabs (a->ins_pt.y - y) > 1e-8
+          || fabs (a->height - height) > 1e-9
+          || a->generation != wc->generation
+          || a->horiz_alignment != wc->horiz || a->vert_alignment != wc->vert)
+        {
+          FAIL ("%s: %s '%s' starts at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g, expected '%s' at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g",
+                what, wc->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
+                a->alignment_pt.x, a->alignment_pt.y, a->height,
+                wc->value ? wc->value : wc->dflt, x, y, ax, ay, height);
+          failures++;
+        }
+    }
+  if (!failures)
+    OK ("%s: %u ATTRIBs start where AutoCAD starts them for their widths, "
+        "or where their definitions do",
+        what, (unsigned)NUM_WIDTH_CASES);
+  return failures;
+}
+
+/* Attribute values given with their widths start where AutoCAD starts
+   them: centred, right-aligned, middle, and backward text centred or
+   right-aligned, long and short
+   values, turned definitions, oblique and with a width factor; without a
+   width, without a value, left on the middle, aligned or in a vertical
+   style, where the definition's text starts; on a copy of Trees, placed at
+   its values, unscaled, and at Shrub (Plan), scaled and turned, and read
+   back. */
+static int
+test_attribute_widths (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def;
+  Dwg_Object_STYLE *vertical;
+  Dwg_AttValue given[NUM_WIDTH_CASES];
+  BITCODE_BL num_given = 0;
+  const BITCODE_3BD at1 = { 10.0, 20.0, 0.0 }, at2 = { -30.0, 15.0, 0.0 };
+  Dwg_DynValue v;
+  Dwg_Entity_INSERT *ins1, *ins2;
+  BITCODE_RLL h1, h2, block2;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("attribute widths: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  vertical = def ? dwg_add_STYLE (dst, "VERTICAL") : NULL;
+  if (!vertical)
+    {
+      FAIL ("attribute widths: %s failed",
+            def ? "adding a text style" : "finding the copy of Trees");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  vertical->is_vertical = 1;
+  memset (given, 0, sizeof (given));
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      // each aligned at a point of its own, in a column
+      const double ax = def->base_pt.x + 5.0, ay = def->base_pt.y - 10.0 * k;
+      const double c = cos (wc->rotation), s = sin (wc->rotation);
+      const dwg_point_3d ins
+          = { ax + 2.5 * (wc->dflt_along * c - wc->dflt_across * s),
+              ay + 2.5 * (wc->dflt_along * s + wc->dflt_across * c), 0.0 };
+      Dwg_Entity_ATTDEF *attdef = dwg_add_ATTDEF (def, 2.5, 0, "Prompt", &ins,
+                                                  wc->tag, wc->dflt);
+      if (!attdef)
+        {
+          FAIL ("attribute widths: adding %s failed", wc->tag);
+          free_dwg (dst);
+          free (dst);
+          return 1;
+        }
+      attdef->horiz_alignment = wc->horiz;
+      attdef->vert_alignment = wc->vert;
+      attdef->generation = wc->generation;
+      attdef->rotation = wc->rotation;
+      attdef->oblique_angle = wc->oblique;
+      attdef->width_factor = wc->width_factor;
+      attdef->alignment_pt.x = ax;
+      attdef->alignment_pt.y = ay;
+      if (wc->vertical)
+        attdef->style
+            = dwg_add_handleref (dst, 5, handle_of (dst, vertical), NULL);
+      if (wc->value)
+        {
+          given[num_given].tag = (char *)wc->tag;
+          given[num_given].value = (char *)wc->value;
+          given[num_given].width = wc->width;
+          num_given++;
+        }
+    }
+
+  loglevel = tracelevel;
+  ins1 = dwg_dynblock_insert (model_space (dst), def, &at1, 1.0, 0.0, NULL, 0,
+                              given, num_given, &error);
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  if (ins1 && !error)
+    ins2 = dwg_dynblock_insert (model_space (dst), def, &at2, 2.0, 0.5, &v, 1,
+                                given, num_given, &error);
+  else
+    ins2 = NULL;
+  loglevel = test_loglevel;
+  if (!ins1 || !ins2 || error)
+    {
+      FAIL ("attribute widths: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  h1 = handle_of (dst, ins1);
+  h2 = handle_of (dst, ins2);
+  if (!object (dst, h2))
+    {
+      FAIL ("attribute widths: the INSERT at Shrub (Plan) not found");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  block2 = ref (object (dst, h2)->tio.entity->tio.INSERT->block_header);
+  failures += check_widths ("attribute widths at the definition's values",
+                            dst, h1, def_h, &at1, 1.0, 0.0);
+  failures += check_widths ("attribute widths at Shrub (Plan)", dst, h2,
+                            block2, &at2, 2.0, 0.5);
+
+  error = write_dwg (WRITTEN_WIDTHS, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_WIDTHS, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("attribute widths: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      failures += check_widths ("read back attribute widths at the "
+                                "definition's values",
+                                &readback, h1, def_h, &at1, 1.0, 0.0);
+      failures += check_widths ("read back attribute widths at Shrub (Plan)",
+                                &readback, h2, block2, &at2, 2.0, 0.5);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_WIDTHS);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
 /* Attributes, on a copy of Trees given attribute definitions: a plain one,
    left-aligned with no alignment point stored (dataflags 0x02), as AutoCAD
    stores one; a constant one, which gets no ATTRIB; one centred, rotated,
    on a layer of its own and shown in the first visibility state only; one
    left-aligned as dwg_add_ATTDEF () makes it, with an alignment point of
    0 and dataflags 0; and one centred at (0, 0), which it doesn't store
-   (dataflags 0x02). Placed at the definition's values and at another
-   state, scaled and rotated, with one value given. */
+   (dataflags 0x02). The plain one has AcDbAttr EED of 1070 0 and 1070 1
+   (locked) before its AcDbBlockRepETag, and the rotated one 1070 0 and
+   1070 0 after it, which their ATTRIBs copy as they are; the others have
+   none, nor do their ATTRIBs. Placed at the definition's values and at
+   another state, scaled and rotated, with one value given. */
 static int
 test_attributes (Dwg_Data *src)
 {
@@ -1657,15 +2382,15 @@ test_attributes (Dwg_Data *src)
   Dwg_Entity_ATTDEF *number, *constant, *centred, *label, *mark;
   Dwg_Object_LAYER *layer;
   const BITCODE_3BD at1 = { 50.0, 60.0, 0.0 }, at2 = { -20.0, 10.0, 5.0 };
-  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7" } };
-  const Expected_Attrib expected1[] = { { "NUMBER", "EL-7" },
-                                        { "RATING", "10W" },
-                                        { "LABEL", "L1" },
-                                        { "MARK", "M" } };
-  const Expected_Attrib expected2[] = { { "NUMBER", "#" },
-                                        { "RATING", "10W" },
-                                        { "LABEL", "L1" },
-                                        { "MARK", "M" } };
+  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7", 0.0 } };
+  const Expected_Attrib expected1[] = { { "NUMBER", "EL-7", 1, 1 },
+                                        { "RATING", "10W", 1, 0 },
+                                        { "LABEL", "L1", 0, 0 },
+                                        { "MARK", "M", 0, 0 } };
+  const Expected_Attrib expected2[] = { { "NUMBER", "#", 1, 1 },
+                                        { "RATING", "10W", 1, 0 },
+                                        { "LABEL", "L1", 0, 0 },
+                                        { "MARK", "M", 0, 0 } };
   Dwg_DynValue v;
   Dwg_Entity_INSERT *ins1, *ins2;
   BITCODE_RLL h1, h2, block2;
@@ -1689,7 +2414,12 @@ test_attributes (Dwg_Data *src)
            = dwg_add_ATTDEF (def, 1.5, 0, "Rating", &p3, "RATING", "10W"))
       || !(label = dwg_add_ATTDEF (def, 1.0, 0, "Label", &p4, "LABEL", "L1"))
       || !(mark = dwg_add_ATTDEF (def, 1.0, 0, "Mark", &p5, "MARK", "M"))
-      || add_etag (dst, number->parent, 1001))
+      // AcDbAttr before and after another group, which its copy mustn't
+      // take in
+      || add_attr_eed (dst, number->parent, 70, 1)
+      || add_etag (dst, number->parent, 1001)
+      || add_etag (dst, centred->parent, 1002)
+      || add_attr_eed (dst, centred->parent, 70, 0))
     {
       FAIL ("attributes: adding the definitions failed");
       free_dwg (dst);
@@ -1844,6 +2574,311 @@ test_attributes (Dwg_Data *src)
     }
   if (!failures)
     unlink (WRITTEN_ATTRIBS);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
+/* Attribute definitions whose default values have characters outside
+   ASCII, in a document built with the add API, which holds them in UTF-8,
+   placed at their defaults: one added to Trees in a fixture of its own,
+   which holds it in codepage 1252, and copied with Trees, the other added
+   to the copy with dwg_add_ATTDEF (). The ATTRIBs hold the defaults as
+   given in UTF-8, and the r2004 file written holds them in codepage
+   1252. */
+static int
+test_attribute_text (void)
+{
+  static const char dflt[] = "30\xC2\xB0 caf\xC3\xA9";
+  static const char dflt_1252[] = "30\xB0 caf\xE9";
+  static const char state[] = "Open 30\xC2\xBA";
+  static const char state_1252[] = "Open 30\xBA";
+  // the add API gives neither definition an AcDbAttr group
+  const Expected_Attrib utf8[]
+      = { { "SIZE", dflt, 0, 0 }, { "STATE", state, 0, 0 } };
+  const Expected_Attrib cp1252[]
+      = { { "SIZE", dflt_1252, 0, 0 }, { "STATE", state_1252, 0, 0 } };
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 };
+  const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
+  Dwg_Data src, readback;
+  Dwg_Data *dst = NULL;
+  BITCODE_RLL def_h = 0, h;
+  const Dwg_Object *defobj = NULL;
+  Dwg_Object_BLOCK_HEADER *def;
+  Dwg_Entity_ATTDEF *attdef, *added;
+  Dwg_Entity_INSERT *ins;
+  int error, failures = 0;
+
+  error = read_dwg (fixture, &src);
+  if (error & ~KNOWN_ERRORS)
+    {
+      FAIL ("attribute text: dwg_read_file 0x%x", error);
+      free_dwg (&src);
+      return 1;
+    }
+  attdef = dwg_add_ATTDEF (block_header (&src, TREES), 2.5, 0, "Size", &p1,
+                           "SIZE", dflt);
+  loglevel = test_loglevel;
+  if (!attdef || !attdef->default_value
+      || strcmp (attdef->default_value, dflt_1252))
+    {
+      FAIL ("attribute text: the definition not added in codepage 1252");
+      free_dwg (&src);
+      return 1;
+    }
+  // the add API leaves the width factor 0
+  attdef->width_factor = 1.0;
+  dst = document_with (&src, TREES, &def_h);
+  if (!dst)
+    {
+      FAIL ("attribute text: copying Trees failed");
+      free_dwg (&src);
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  // the copy of the definition, the block's last entity
+  if (def->num_owned && def->entities)
+    defobj = object (dst, ref (def->entities[def->num_owned - 1]));
+  if (defobj && defobj->fixedtype == DWG_TYPE_ATTDEF
+      && !strcmp (defobj->tio.entity->tio.ATTDEF->default_value, dflt))
+    OK ("attribute text: the definition copied in UTF-8");
+  else
+    {
+      FAIL ("attribute text: the definition not copied in UTF-8");
+      failures++;
+    }
+  added = dwg_add_ATTDEF (def, 2.5, 0, "State", &p2, "STATE", state);
+  loglevel = test_loglevel;
+  if (added && added->default_value && !strcmp (added->default_value, state))
+    {
+      OK ("attribute text: a definition added to the copy in UTF-8");
+      added->width_factor = 1.0;
+    }
+  else
+    {
+      FAIL ("attribute text: the definition not added to the copy in "
+            "UTF-8");
+      free_dwg (dst);
+      free (dst);
+      free_dwg (&src);
+      return failures + 1;
+    }
+
+  error = 0;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!ins || error)
+    {
+      FAIL ("attribute text: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      free_dwg (&src);
+      return failures + 1;
+    }
+  h = handle_of (dst, ins);
+  failures += check_attribs ("attribute text, in UTF-8", dst, h, def_h, &at,
+                             1.0, 0.0, utf8, 2, 1);
+
+  error = write_dwg (WRITTEN_ATTRIBUTE_TEXT, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ATTRIBUTE_TEXT, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("attribute text: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      if (readback.header.codepage != CP_ANSI_1252)
+        {
+          FAIL ("attribute text: read back with codepage %u",
+                (unsigned)readback.header.codepage);
+          failures++;
+        }
+      failures += check_attribs ("read back attribute text, in codepage "
+                                 "1252",
+                                 &readback, h, def_h, &at, 1.0, 0.0, cp1252,
+                                 2, 1);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_ATTRIBUTE_TEXT);
+  free_dwg (dst);
+  free (dst);
+  free_dwg (&src);
+  return failures;
+}
+
+/* Attribute values given in UTF-8 with characters outside ASCII, one ending
+   in a character whose codepage 1252 byte, 0xE9, starts a 3-byte UTF-8
+   sequence. The document built with the add API keeps them in UTF-8, and
+   the r2004 file written holds them in codepage 1252. */
+static int
+test_attributes_non_ascii (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def;
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 };
+  Dwg_Entity_ATTDEF *cable, *note;
+  const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
+  const Dwg_AttValue given[]
+      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9", 0.0 },
+          { (char *)"NOTE",
+            (char *)"30\xC2\xB0 Stra\xC3\x9F"
+                    "e \xE2\x82\xAC 5",
+            0.0 } };
+  const Expected_Attrib utf8[]
+      = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9", 0, 0 },
+          { "NOTE",
+            "30\xC2\xB0 Stra\xC3\x9F"
+            "e \xE2\x82\xAC 5",
+            0, 0 } };
+  const Expected_Attrib cp1252[] = { { "CABLE", "10 mm\xB2 caf\xE9", 0, 0 },
+                                     { "NOTE",
+                                       "30\xB0 Stra\xDF"
+                                       "e \x80 5",
+                                       0, 0 } };
+  Dwg_Entity_INSERT *ins;
+  BITCODE_RLL h;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("non-ASCII attributes: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  if (!(cable = dwg_add_ATTDEF (def, 2.5, 0, "Cable", &p1, "CABLE", "#"))
+      || !(note = dwg_add_ATTDEF (def, 2.5, 0, "Note", &p2, "NOTE", "-")))
+    {
+      FAIL ("non-ASCII attributes: adding the definitions failed");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  // the add API leaves the width factor 0
+  cable->width_factor = note->width_factor = 1.0;
+
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             given, 2, &error);
+  loglevel = test_loglevel;
+  if (!ins || error)
+    {
+      FAIL ("non-ASCII attributes: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  h = handle_of (dst, ins);
+  failures += check_attribs ("non-ASCII attributes, in UTF-8", dst, h, def_h,
+                             &at, 1.0, 0.0, utf8, 2, 1);
+
+  error = write_dwg (WRITTEN_NON_ASCII, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_NON_ASCII, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("non-ASCII attributes: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      if (readback.header.codepage != CP_ANSI_1252)
+        {
+          FAIL ("non-ASCII attributes: read back with codepage %u",
+                (unsigned)readback.header.codepage);
+          failures++;
+        }
+      failures += check_attribs ("read back non-ASCII attributes, in "
+                                 "codepage 1252",
+                                 &readback, h, def_h, &at, 1.0, 0.0, cp1252,
+                                 2, 1);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_NON_ASCII);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
+/* An AcDbAttr EED group that isn't all 1070 items, or whose items don't
+   hold all the bytes read for it, is left out of its ATTRIB, with
+   DWG_ERR_INVALIDEED and the INSERT returned, and the ATTRIBs after it
+   still get theirs: on a copy of Trees given three attribute definitions,
+   with 1070 0 and 1071 1, with 1070 0 and 1070 1, and with 1070 0 and
+   1070 1 read from 7 bytes, placed at the definition's values. */
+static int
+test_attr_eed_left_out (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def = dst ? block_header (dst, def_h) : NULL;
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { 1.0, -2.0, 0.0 },
+                     p3 = { 1.0, -6.0, 0.0 };
+  const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
+  const char *const tags[3] = { "BAD", "GOOD", "SHORT" };
+  const int want[3] = { -1, 2, -1 };
+  Dwg_Entity_ATTDEF *bad = NULL, *good = NULL, *cut = NULL;
+  Dwg_Entity_INSERT *ins;
+  int failures = 0, error = 0;
+
+  if (!def || !(bad = dwg_add_ATTDEF (def, 2.5, 0, "Bad", &p1, "BAD", "B"))
+      || !(good = dwg_add_ATTDEF (def, 2.5, 0, "Good", &p2, "GOOD", "G"))
+      || !(cut = dwg_add_ATTDEF (def, 2.5, 0, "Short", &p3, "SHORT", "S"))
+      || add_attr_eed (dst, bad->parent, 71, 1)
+      || add_attr_eed (dst, good->parent, 70, 1)
+      || add_attr_eed (dst, cut->parent, 70, 1)
+      // as read from a file, with a byte more than its items hold
+      || !(cut->parent->eed[0].raw = (BITCODE_TF)calloc (7, 1)))
+    {
+      FAIL ("AcDbAttr left out: adding the definitions failed");
+      if (dst)
+        {
+          free_dwg (dst);
+          free (dst);
+        }
+      return 1;
+    }
+  cut->parent->eed[0].size = 7;
+
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!ins || error != DWG_ERR_INVALIDEED || ins->num_owned != 3)
+    {
+      FAIL ("AcDbAttr left out: 0x%x, %u ATTRIBs, expected 0x%x and 3",
+            error, ins ? (unsigned)ins->num_owned : 0u,
+            (unsigned)DWG_ERR_INVALIDEED);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  for (unsigned k = 0; k < 3; k++)
+    {
+      const Dwg_Object *att = object (dst, ref (ins->attribs[k]));
+      BITCODE_RS v[2] = { 9, 9 };
+      const int n = att && att->fixedtype == DWG_TYPE_ATTRIB
+                        ? attr_eed (dst, att, v)
+                        : -3;
+      if (n == want[k] && (n != 2 || (v[0] == 0 && v[1] == 1))
+          && !strcmp (att->tio.entity->tio.ATTRIB->tag, tags[k]))
+        OK ("AcDbAttr left out: ATTRIB %s has %s", tags[k],
+            n == 2 ? "1070 0, 1070 1" : "no AcDbAttr group");
+      else
+        {
+          FAIL ("AcDbAttr left out: ATTRIB %u (%s) has %d AcDbAttr items "
+                "(%u, %u), expected %d",
+                k, tags[k], n, (unsigned)v[0], (unsigned)v[1], want[k]);
+          failures++;
+        }
+    }
   free_dwg (dst);
   free (dst);
   return failures;
@@ -2401,6 +3436,30 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
   return NULL;
 }
 
+/* Places def at the origin at scale with atts, and gets the insertion
+   point of its only ATTRIB into *x and *y. Returns 0 when it is placed. */
+static int
+attrib_start (Dwg_Data *dwg, Dwg_Object_BLOCK_HEADER *def, const double scale,
+              const Dwg_AttValue *atts, const BITCODE_BL natts, double *x,
+              double *y)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  int error = 0;
+  const Dwg_Entity_INSERT *ins;
+  const Dwg_Object *att = NULL;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dwg), def, &pt, scale, 0.0, NULL, 0,
+                             atts, natts, &error);
+  loglevel = test_loglevel;
+  if (ins && !error && ins->num_owned == 1)
+    att = object (dwg, ref (ins->attribs[0]));
+  if (!att || att->fixedtype != DWG_TYPE_ATTRIB)
+    return 1;
+  *x = att->tio.entity->tio.ATTRIB->ins_pt.x;
+  *y = att->tio.entity->tio.ATTRIB->ins_pt.y;
+  return 0;
+}
+
 /* Places def in dwg's model space with the given values, which must
    succeed. */
 static int
@@ -2434,14 +3493,96 @@ free_document (Dwg_Data *dwg)
     }
 }
 
+/* Places the Toilet def, its Angle's end point turned 1 from its base
+   angle point, at Angle 2 pi 2^60, a turn of 0, with the n values v: its
+   rotation parameter's record holds the end point turned back onto the
+   base angle point's direction, and the Angle reads back as 0. */
+static int
+test_huge_rotation (Dwg_Data *dwg, const BITCODE_RLL def,
+                    const Dwg_DynValue *v, const BITCODE_BL n,
+                    const char *what)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  const Dwg_Object *obj
+      = graph_node (dwg, def, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  const Dwg_Object_BLOCKROTATIONPARAMETER *rotation;
+  BITCODE_RLL param;
+  BITCODE_BL nodeid;
+  BITCODE_3BD base, base_angle;
+  Dwg_Entity_INSERT *insert;
+  Dwg_Object_BLOCK_HEADER *read_def = NULL;
+  Dwg_DynValue *values = NULL;
+  BITCODE_BL count = 0;
+  const Dwg_Object *data, *xrec;
+  const Dwg_Resbuf *rb;
+  char key[16];
+  double angle = -1.0;
+  int error = 0;
+  if (!obj)
+    {
+      FAIL ("insert %s: the rotation parameter not found", what);
+      return 1;
+    }
+  rotation = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+  param = obj->handle.value;
+  nodeid = rotation->evalexpr.nodeid;
+  base = rotation->def_basept;
+  base_angle = rotation->def_base_angle_pt;
+  loglevel = tracelevel;
+  insert = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def),
+                                &pt, 1.0, 0.0, v, n, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!insert || error)
+    {
+      FAIL ("insert %s: 0x%x", what, error);
+      return 1;
+    }
+  data = enhanced_block_data (dwg, object (dwg, handle_of (dwg, insert)));
+  snprintf (key, sizeof (key), "%u", (unsigned)nodeid);
+  xrec = dict_item (dwg, data, key);
+  // 1071, 1071, 70, 70, then the base and end points
+  rb = xrec && xrec->fixedtype == DWG_TYPE_XRECORD
+           ? xrec->tio.object->tio.XRECORD->xdata
+           : NULL;
+  for (int i = 0; rb && i < 5; i++)
+    rb = rb->nextrb;
+  if (!dwg_dynblock_get_values (insert, &read_def, &values, &count))
+    for (BITCODE_BL i = 0; i < count; i++)
+      if (!strcmp (values[i].name, "Angle"))
+        angle = values[i].value;
+  dwg_dynblock_free_values (values, count);
+  loglevel = test_loglevel;
+  // the end point is the base angle point, as both are as far from the
+  // base point
+  if (rb && rb->type == 10
+      && fabs (rb->value.pt[0] - base_angle.x) <= 1e-9
+      && fabs (rb->value.pt[1] - base_angle.y) <= 1e-9
+      && fabs (fmin (angle, 2.0 * M_PI - angle)) <= 1e-9)
+    {
+      OK ("insert %s: the end point turns onto the base angle point's "
+          "direction, and the Angle reads back as 0",
+          what);
+      return 0;
+    }
+  FAIL ("insert %s: the end point is (%g, %g), the base angle point (%g, "
+        "%g) about (%g, %g); the Angle reads back as %g (parameter " FORMAT_HV
+        ")",
+        what, rb ? rb->value.pt[0] : 0.0, rb ? rb->value.pt[1] : 0.0,
+        base_angle.x, base_angle.y, base.x, base.y, angle, param);
+  return 1;
+}
+
 /* Refusals of what a definition holds, each on a copy of the definition
    in a document of its own: a rotate or scale action whose base point is
    not (0, 0, 0), a graph node of a class whose stored value is not known,
    and a DIMENSION, which draws a block of its own, all only at other
    values than the definition's; and attribute definitions off the XY
-   plane, attribute values given twice or without a tag or value, and
-   scales at which an attribute's placed point, height or thickness is
-   beyond what a double holds. */
+   plane, attribute values given twice or without a tag or value, widths
+   that are negative or aren't finite, a width that starts the text beyond
+   what a double holds, and scales at which an attribute's placed point,
+   height or thickness is beyond what a double holds. Accepted besides:
+   widths whose starts a double holds though a product on the way to them
+   doesn't, and a width on left-aligned text, which doesn't move it. */
 static int
 test_definition_refusals (Dwg_Data *src)
 {
@@ -2596,6 +3737,107 @@ test_definition_refusals (Dwg_Data *src)
                                   NULL, 0, a, 1,
                                   REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                   "an attribute without a value");
+        a[0].value = (char *)"1";
+        a[0].width = -1.0;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a negative width");
+        a[0].width = (double)NAN;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a width that isn't a number");
+        a[0].width = (double)INFINITY;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an infinite width");
+        // centred, a width that starts the text beyond a double
+        attdef->horiz_alignment = 1;
+        a[0].width = 1e308;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 10.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute started beyond a double by "
+                                  "its width");
+        // centred, starts that a double holds, though a product on the
+        // way to them doesn't: aligned at the origin, half the width at
+        // the ATTRIB's height back
+        attdef->alignment_pt.x = at.x;
+        attdef->alignment_pt.y = at.y;
+        {
+          double x = 0.0, y = 1.0;
+          // the ATTRIB 1e306 high, 10 wide
+          attdef->height = 1e308;
+          a[0].width = 10.0;
+          if (!attrib_start (dst, def, 0.01, a, 1, &x, &y)
+              && fabs (x + 5e306) <= 5e294 && y == 0.0)
+            OK ("insert starts a 1e306 high attribute value 10 wide at %g",
+                x);
+          else
+            {
+              FAIL ("insert of a 1e306 high attribute value 10 wide: (%g, "
+                    "%g), expected (-5e306, 0)",
+                    x, y);
+              failures++;
+            }
+          // 2 high, 1e308 wide
+          attdef->height = 2.0;
+          a[0].width = 1e308;
+          x = 0.0;
+          y = 1.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308) <= 1e296 && y == 0.0)
+            OK ("insert starts a 2 high attribute value 1e308 wide at %g",
+                x);
+          else
+            {
+              FAIL ("insert of a 2 high attribute value 1e308 wide: (%g, "
+                    "%g), expected (-1e308, 0)",
+                    x, y);
+              failures++;
+            }
+          // right-aligned and turned 45 degrees, 2 high and 1e308 wide:
+          // the offset, 2e308, isn't held, but each coordinate is
+          attdef->horiz_alignment = 2;
+          attdef->rotation = M_PI / 4.0;
+          x = y = 0.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308 * (2.0 * cos (M_PI / 4.0))) <= 2e296
+              && fabs (y + 1e308 * (2.0 * sin (M_PI / 4.0))) <= 2e296)
+            OK ("insert starts a turned 2 high attribute value 1e308 wide "
+                "at (%g, %g)",
+                x, y);
+          else
+            {
+              FAIL ("insert of a turned 2 high attribute value 1e308 wide: "
+                    "(%g, %g), expected (-1.4142e308, -1.4142e308)",
+                    x, y);
+              failures++;
+            }
+          attdef->horiz_alignment = 1;
+          attdef->rotation = 0.0;
+          attdef->height = 1.0;
+        }
+        attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
+        // left-aligned, a width doesn't move it
+        attdef->horiz_alignment = 0;
+        {
+          double x = 1.0, y = 1.0;
+          if (!attrib_start (dst, def, 10.0, a, 1, &x, &y) && x == pt.x
+              && y == pt.y)
+            OK ("insert accepts a width on left-aligned text, which starts "
+                "where its definition does");
+          else
+            {
+              FAIL ("insert of a width on left-aligned text: its ATTRIB at "
+                    "(%g, %g), expected (%g, %g)",
+                    x, y, pt.x, pt.y);
+              failures++;
+            }
+        }
+        a[0].width = 0.0;
 
         // at a scale of 1e300, a point 1e10 from the base point
         attdef->ins_pt.x = at.x + 1e10;
@@ -2638,7 +3880,8 @@ test_definition_refusals (Dwg_Data *src)
 
   // A rotation given as a huge angle, against a default of 1: the Toilet's
   // Angle, its end point turned 1 from the base angle point. 2 pi 2^60 is
-  // a turn of 0, so a change; 1 + 4 pi is the default.
+  // a turn of 0, so a change, which turns the end point back onto the base
+  // angle point's direction; 1 + 4 pi is the default.
   dst = document_with (src, TOILET, &def_h);
   {
     Dwg_Object *obj
@@ -2660,20 +3903,14 @@ test_definition_refusals (Dwg_Data *src)
         memset (rv, 0, sizeof (rv));
         rv[0].name = (char *)"Angle";
         rv[0].value = ldexp (2.0 * M_PI, 60);
-        failures += test_refusal (dst, model_space (dst),
-                                  block_header (dst, def_h), &pt, 1.0, 0.0,
-                                  rv, 1, NULL, 0,
-                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                                  "a rotation of 2 pi 2^60, from a default "
-                                  "of 1");
+        failures += test_huge_rotation (dst, def_h, rv, 1,
+                                        "a rotation of 2 pi 2^60, from a "
+                                        "default of 1");
         rv[1].name = (char *)"Type (view)";
         rv[1].state = (char *)"Round (Plan)";
-        failures += test_refusal (dst, model_space (dst),
-                                  block_header (dst, def_h), &pt, 1.0, 0.0,
-                                  rv, 2, NULL, 0,
-                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                                  "a rotation of 2 pi 2^60, from a default "
-                                  "of 1, at another state");
+        failures += test_huge_rotation (dst, def_h, rv, 2,
+                                        "a rotation of 2 pi 2^60, from a "
+                                        "default of 1, at another state");
         rv[0].value = 1.0 + 4.0 * M_PI;
         failures += test_accepted (dst, def_h, 1.0, rv, 1,
                                    "a rotation of 1 + 4 pi, the default of "
@@ -2817,6 +4054,970 @@ test_minsert (Dwg_Data *src)
   return failures;
 }
 
+/*--------------------------------------------------------------------------------
+ * Changed lengths and angles: the parameters' points the records hold
+ */
+
+/* The node of def's evaluation graph of class type with the given name. */
+static Dwg_Object *
+named_node (const Dwg_Data *dwg, const BITCODE_RLL def,
+            const Dwg_Object_Type type, const char *name)
+{
+  const Dwg_Object_EVALUATION_GRAPH *g = evaluation_graph (dwg, def);
+  for (BITCODE_BL i = 0; g && g->nodes && i < g->num_nodes; i++)
+    {
+      Dwg_Object *node = object (dwg, ref (g->nodes[i].evalexpr));
+      // every node starts with BLOCKELEMENT_fields, and so with its name
+      if (node && node->fixedtype == type
+          && node->tio.object->tio.BLOCKMOVEACTION->name
+          && !strcmp (node->tio.object->tio.BLOCKMOVEACTION->name, name))
+        return node;
+    }
+  return NULL;
+}
+
+static BITCODE_BL
+nodeid_of (const Dwg_Object *node)
+{
+  // every node starts with BLOCKELEMENT_fields
+  return node->tio.object->tio.BLOCKMOVEACTION->evalexpr.nodeid;
+}
+
+/* Appends to stretch action a the parameter with node id nodeid, with the
+   n stretch points indexes. Returns 0 when memory runs out. */
+static int
+add_stretch_code (Dwg_Object_BLOCKSTRETCHACTION *a, const BITCODE_BL nodeid,
+                  const BITCODE_BL *indexes, const BITCODE_BS n)
+{
+  Dwg_BLOCKSTRETCHACTION_codes *codes, *c;
+  codes = (Dwg_BLOCKSTRETCHACTION_codes *)realloc (
+      a->codes, (a->num_codes + 1) * sizeof (Dwg_BLOCKSTRETCHACTION_codes));
+  if (!codes)
+    return 0;
+  a->codes = codes;
+  c = &codes[a->num_codes];
+  memset (c, 0, sizeof (*c));
+  c->parent = a;
+  c->bl95 = nodeid;
+  c->indexes = (BITCODE_BL *)malloc (n * sizeof (BITCODE_BL));
+  if (!c->indexes)
+    return 0;
+  memcpy (c->indexes, indexes, n * sizeof (BITCODE_BL));
+  c->num_indexes = n;
+  a->num_codes++;
+  return 1;
+}
+
+/* Removes the parameter add_stretch_code () appended last. */
+static void
+pop_stretch_code (Dwg_Object_BLOCKSTRETCHACTION *a)
+{
+  a->num_codes--;
+  free (a->codes[a->num_codes].indexes);
+  a->codes[a->num_codes].indexes = NULL;
+}
+
+/* Appends an entity to the list of stretch action a, with the n stretch
+   points indexes. Returns 0 when memory runs out. */
+static int
+add_stretch_entity (Dwg_Data *dwg, Dwg_Object_BLOCKSTRETCHACTION *a,
+                    const BITCODE_RLL handle, const BITCODE_BL *indexes,
+                    const BITCODE_BS n)
+{
+  Dwg_BLOCKSTRETCHACTION_handles *hdls, *h;
+  hdls = (Dwg_BLOCKSTRETCHACTION_handles *)realloc (
+      a->hdls, (a->num_hdls + 1) * sizeof (Dwg_BLOCKSTRETCHACTION_handles));
+  if (!hdls)
+    return 0;
+  a->hdls = hdls;
+  h = &hdls[a->num_hdls];
+  memset (h, 0, sizeof (*h));
+  h->parent = a;
+  h->hdl = dwg_add_handleref (dwg, 4, handle, NULL);
+  h->indexes = (BITCODE_BL *)malloc (n * sizeof (BITCODE_BL));
+  if (!h->indexes)
+    return 0;
+  memcpy (h->indexes, indexes, n * sizeof (BITCODE_BL));
+  h->num_indexes = n;
+  a->num_hdls++;
+  return 1;
+}
+
+/* Appends handle to the selection *deps of *num_deps objects of an
+   action, or node id nodeid to its list *actions of *num_actions. */
+static int
+add_dep (Dwg_Data *dwg, BITCODE_H **deps, BITCODE_BL *num_deps,
+         const BITCODE_RLL handle)
+{
+  BITCODE_H *more
+      = (BITCODE_H *)realloc (*deps, (*num_deps + 1) * sizeof (BITCODE_H));
+  if (!more)
+    return 0;
+  *deps = more;
+  more[(*num_deps)++] = dwg_add_handleref (dwg, 4, handle, NULL);
+  return 1;
+}
+
+static int
+add_action (BITCODE_BL **actions, BITCODE_BL *num_actions,
+            const BITCODE_BL nodeid)
+{
+  BITCODE_BL *more = (BITCODE_BL *)realloc (
+      *actions, (*num_actions + 1) * sizeof (BITCODE_BL));
+  if (!more)
+    return 0;
+  *actions = more;
+  more[(*num_actions)++] = nodeid;
+  return 1;
+}
+
+/* dwg_dynblock_insert () refuses def at the n values v, as the stored
+   state of a placement at them is not known, adding nothing, while
+   dwg_dynblock_evaluate () evaluates them. */
+static int
+test_unknown (Dwg_Data *dwg, const BITCODE_RLL def, const Dwg_DynValue *v,
+              const BITCODE_BL n, const char *what)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  int failures, error = 0;
+  failures = test_refusal (dwg, model_space (dwg), block_header (dwg, def),
+                           &pt, 1.0, 0.0, v, n, NULL, 0,
+                           REFUSED (DWG_ERR_NOTYETSUPPORTED), what);
+  loglevel = tracelevel;
+  if (dwg_dynblock_evaluate (block_header (dwg, def), v, n, &error)
+      && error < DWG_ERR_CRITICAL)
+    OK ("%s: evaluated all the same: 0x%x", what, error);
+  else
+    {
+      FAIL ("%s: not evaluated: 0x%x", what, error);
+      failures++;
+    }
+  loglevel = test_loglevel;
+  return failures;
+}
+
+/* The Toilet's rotation parameter, and with with_action its rotate action
+   'Rotate Plan', moved into the Window's evaluation graph under node ids
+   it doesn't use, the action turning only the Window's LINE turned, as
+   in dynblock_eval_test. */
+typedef struct
+{
+  Dwg_Object_EVALUATION_GRAPH *graph;
+  BITCODE_BL num_nodes;
+  Dwg_Object_BLOCKROTATIONPARAMETER *param;
+  Dwg_Object_BLOCKROTATEACTION *action;
+  BITCODE_BL param_id, action_id;
+  BITCODE_BL codes[3];
+  BITCODE_H *deps;
+  BITCODE_BL num_deps;
+  BITCODE_BL *actions;
+  BITCODE_BL num_actions;
+  BITCODE_H line;
+  BITCODE_BL action_list[1];
+} Graft;
+
+#define GRAFT_PARAM 905
+#define GRAFT_ACTION 920
+#define GRAFT_BASEPOINT 930
+
+static int
+graft_rotation (Dwg_Data *dwg, const BITCODE_RLL window,
+                const BITCODE_RLL toilet, const BITCODE_RLL turned,
+                const int with_action, Graft *g)
+{
+  Dwg_Object *param = graph_node (dwg, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER,
+                                  NULL);
+  Dwg_Object *action
+      = named_node (dwg, toilet, DWG_TYPE_BLOCKROTATEACTION, "Rotate Plan");
+  Dwg_EVAL_Node *nodes;
+  memset (g, 0, sizeof (*g));
+  g->graph = evaluation_graph (dwg, window);
+  if (!param || !action || !g->graph)
+    return 0;
+  nodes = (Dwg_EVAL_Node *)realloc (
+      g->graph->nodes, (g->graph->num_nodes + 2) * sizeof (Dwg_EVAL_Node));
+  if (!nodes)
+    return 0;
+  g->graph->nodes = nodes;
+  memset (&nodes[g->graph->num_nodes], 0, 2 * sizeof (Dwg_EVAL_Node));
+  g->num_nodes = g->graph->num_nodes;
+  nodes[g->graph->num_nodes++].evalexpr
+      = dwg_add_handleref (dwg, 5, param->handle.value, NULL);
+  if (with_action)
+    nodes[g->graph->num_nodes++].evalexpr
+        = dwg_add_handleref (dwg, 5, action->handle.value, NULL);
+  g->param = param->tio.object->tio.BLOCKROTATIONPARAMETER;
+  g->action = action->tio.object->tio.BLOCKROTATEACTION;
+  g->param_id = g->param->evalexpr.nodeid;
+  g->action_id = g->action->evalexpr.nodeid;
+  g->param->evalexpr.nodeid = GRAFT_PARAM;
+  g->action->evalexpr.nodeid = GRAFT_ACTION;
+  for (int i = 0; i < 3; i++)
+    {
+      g->codes[i] = g->action->conn_pts[i].code;
+      g->action->conn_pts[i].code = GRAFT_PARAM;
+    }
+  g->deps = g->action->deps;
+  g->num_deps = g->action->num_deps;
+  g->actions = g->action->actions;
+  g->num_actions = g->action->num_actions;
+  g->line = dwg_add_handleref (dwg, 4, turned, NULL);
+  g->action->deps = &g->line;
+  g->action->num_deps = 1;
+  g->action->actions = g->action_list;
+  g->action->num_actions = 0;
+  return 1;
+}
+
+static void
+ungraft_rotation (Graft *g)
+{
+  g->graph->num_nodes = g->num_nodes;
+  g->param->evalexpr.nodeid = g->param_id;
+  g->action->evalexpr.nodeid = g->action_id;
+  for (int i = 0; i < 3; i++)
+    g->action->conn_pts[i].code = g->codes[i];
+  g->action->deps = g->deps;
+  g->action->num_deps = g->num_deps;
+  g->action->actions = g->actions;
+  g->action->num_actions = g->num_actions;
+}
+
+/* The copy, in dst, of the fixture's entity handle of definition def. */
+static BITCODE_RLL
+entity_copy (const Dwg_Data *dst, const Dwg_Data *src, const BITCODE_RLL def,
+             const BITCODE_RLL copy, const BITCODE_RLL handle)
+{
+  const Dwg_Object_BLOCK_HEADER *a = block_header (src, def);
+  const Dwg_Object_BLOCK_HEADER *b = block_header (dst, copy);
+  for (BITCODE_BL i = 0; a && b && i < a->num_owned && i < b->num_owned; i++)
+    if (ref (a->entities[i]) == handle)
+      return ref (b->entities[i]);
+  return 0;
+}
+
+/* Placements whose stored state AutoCAD's placements have not shown, on
+   copies of the fixture's definitions changed for the purpose: an action
+   listing its own parameter among those it moves; a parameter an action
+   selects without listing it; a stretch point a parameter's record
+   doesn't hold, or one listed twice; a rotation parameter that another
+   action moves; a base point parameter that a stretch, move or rotate
+   action moves; and a parameter that a rotate action turns and another
+   action moves. dwg_dynblock_insert () refuses each with nothing added,
+   while dwg_dynblock_evaluate () evaluates the geometry, which doesn't
+   depend on them. */
+static int
+test_unknown_states (Dwg_Data *src)
+{
+  Dwg_Data *dst = dwg_new_Document (R_2004, 0, tracelevel);
+  BITCODE_RLL map[8][2];
+  unsigned num_map;
+  BITCODE_RLL window, door, toilet;
+  Dwg_Object *width, *height, *wall, *swing, *angle, *basept, *obj;
+  Dwg_Object_BLOCKSTRETCHACTION *stretch_width = NULL, *stretch_wall = NULL;
+  Dwg_Object_BLOCKMOVEACTION *move_swing = NULL;
+  Dwg_Object_BLOCKROTATEACTION *rotate_plan = NULL;
+  Dwg_Object_BLOCKBASEPOINTPARAMETER *_basept;
+  Dwg_DynValue v[2];
+  BITCODE_BL width_id, height_id, wall_id, swing_id, angle_id, basept_id;
+  BITCODE_RLL height_h, basept_h;
+  Graft g;
+  int failures;
+
+  loglevel = test_loglevel;
+  failures = copy_definitions (dst, src, map, &num_map);
+  window = copy_of (map, num_map, WINDOW);
+  door = copy_of (map, num_map, DOOR);
+  toilet = copy_of (map, num_map, TOILET);
+  width = named_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, "winwidth");
+  height
+      = named_node (dst, window, DWG_TYPE_BLOCKLINEARPARAMETER, "winheight");
+  wall = named_node (dst, door, DWG_TYPE_BLOCKLINEARPARAMETER, "wall");
+  swing = named_node (dst, door, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  // which no action of the fixture moves
+  basept = graph_node (dst, door, DWG_TYPE_BLOCKBASEPOINTPARAMETER, NULL);
+  if ((obj = named_node (dst, window, DWG_TYPE_BLOCKSTRETCHACTION,
+                         "Stretch Width")))
+    stretch_width = obj->tio.object->tio.BLOCKSTRETCHACTION;
+  if ((obj = named_node (dst, door, DWG_TYPE_BLOCKSTRETCHACTION, "Stretch")))
+    stretch_wall = obj->tio.object->tio.BLOCKSTRETCHACTION;
+  if ((obj = named_node (dst, door, DWG_TYPE_BLOCKMOVEACTION, "MoveSwing")))
+    move_swing = obj->tio.object->tio.BLOCKMOVEACTION;
+  if ((obj = named_node (dst, toilet, DWG_TYPE_BLOCKROTATEACTION,
+                         "Rotate Plan")))
+    rotate_plan = obj->tio.object->tio.BLOCKROTATEACTION;
+  if (!width || !height || !wall || !swing || !angle || !basept
+      || !stretch_width || !stretch_wall || !move_swing || !rotate_plan)
+    {
+      FAIL ("unknown states: fixture objects not found");
+      free_document (dst);
+      return failures + 1;
+    }
+  // the objects may move as placements and evaluations add objects
+  width_id = nodeid_of (width);
+  height_id = nodeid_of (height);
+  wall_id = nodeid_of (wall);
+  swing_id = nodeid_of (swing);
+  angle_id = nodeid_of (angle);
+  basept_id = nodeid_of (basept);
+  height_h = height->handle.value;
+  basept_h = basept->handle.value;
+  _basept = basept->tio.object->tio.BLOCKBASEPOINTPARAMETER;
+  memset (v, 0, sizeof (v));
+
+  // the Window at Window Width 24, which 'Stretch Width' takes
+  v[0].name = (char *)"Window Width";
+  v[0].value = 24.0;
+  {
+    const BITCODE_BL end = 1;
+    if (add_stretch_code (stretch_width, width_id, &end, 1))
+      {
+        failures += test_unknown (dst, window, v, 1,
+                                  "a stretch listing its own parameter");
+        pop_stretch_code (stretch_width);
+      }
+    else
+      failures++;
+  }
+  {
+    const BITCODE_BL twice[2] = { 1, 1 };
+    if (add_stretch_code (stretch_width, height_id, twice, 2))
+      {
+        failures += test_unknown (dst, window, v, 1,
+                                  "a stretch listing a point of a linear "
+                                  "parameter twice");
+        pop_stretch_code (stretch_width);
+      }
+    else
+      failures++;
+  }
+  if (add_dep (dst, &stretch_width->deps, &stretch_width->num_deps,
+               height_h))
+    {
+      failures += test_unknown (dst, window, v, 1,
+                                "a stretch selecting, not listing, another "
+                                "parameter");
+      stretch_width->num_deps--;
+    }
+  else
+    failures++;
+
+  // the Door at Wall Thickness 6, which 'Stretch' and MoveSwing take
+  v[0].name = (char *)"Wall Thickness";
+  v[0].value = 6.0;
+  {
+    const BITCODE_BL beyond = 2, twice[2] = { 1, 1 };
+    if (add_stretch_code (stretch_wall, swing_id, &beyond, 1))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch of a third point of a flip "
+                                  "parameter");
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
+    if (add_stretch_code (stretch_wall, swing_id, twice, 2))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch listing a point twice");
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
+    // the same point, in two entries
+    if (add_stretch_code (stretch_wall, swing_id, &twice[0], 1)
+        && add_stretch_code (stretch_wall, swing_id, &twice[1], 1))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch listing a parameter in two "
+                                  "entries");
+        pop_stretch_code (stretch_wall);
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
+  }
+  // MoveSwing lists swing already
+  if (add_action (&move_swing->actions, &move_swing->num_actions, swing_id))
+    {
+      failures += test_unknown (dst, door, v, 1,
+                                "a move listing a parameter twice");
+      move_swing->num_actions--;
+    }
+  else
+    failures++;
+  if (add_action (&move_swing->actions, &move_swing->num_actions, wall_id))
+    {
+      failures += test_unknown (dst, door, v, 1,
+                                "a move listing its own parameter");
+      move_swing->num_actions--;
+    }
+  else
+    failures++;
+  // the Door's base point parameter, whose one point is its point 0
+  {
+    const BITCODE_BL point = 0;
+    if (add_stretch_code (stretch_wall, basept_id, &point, 1))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch moving a base point parameter");
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
+  }
+  if (add_action (&move_swing->actions, &move_swing->num_actions, basept_id))
+    {
+      failures += test_unknown (dst, door, v, 1,
+                                "a move moving a base point parameter");
+      move_swing->num_actions--;
+    }
+  else
+    failures++;
+
+  // the Toilet at Angle 1.2, which 'Rotate Plan' takes
+  v[0].name = (char *)"Angle";
+  v[0].value = 1.2;
+  if (add_action (&rotate_plan->actions, &rotate_plan->num_actions,
+                  angle_id))
+    {
+      failures += test_unknown (dst, toilet, v, 1,
+                                "a rotate action listing its own parameter");
+      rotate_plan->num_actions--;
+    }
+  else
+    failures++;
+  // the Toilet's Angle with its end point at its base point, which no turn
+  // moves, so that the record would read back as another angle
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  if (angle)
+    {
+      Dwg_Object_BLOCKROTATIONPARAMETER *_angle
+          = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+      const BITCODE_3BD endpt = _angle->def_endpt;
+      _angle->def_endpt = _angle->def_basept;
+      failures += test_unknown (dst, toilet, v, 1,
+                                "a rotation parameter with its end point at "
+                                "its base point");
+      _angle->def_endpt = endpt;
+    }
+  else
+    {
+      FAIL ("unknown states: the Toilet's rotation parameter not found");
+      failures++;
+    }
+  // the Door's base point parameter in the Toilet's graph, under a node id
+  // the Toilet doesn't use, turned by 'Rotate Plan'
+  {
+    Dwg_Object_EVALUATION_GRAPH *graph = evaluation_graph (dst, toilet);
+    Dwg_EVAL_Node *nodes
+        = graph ? (Dwg_EVAL_Node *)realloc (graph->nodes,
+                                            (graph->num_nodes + 1)
+                                                * sizeof (Dwg_EVAL_Node))
+                : NULL;
+    if (nodes)
+      {
+        graph->nodes = nodes;
+        memset (&nodes[graph->num_nodes], 0, sizeof (Dwg_EVAL_Node));
+        nodes[graph->num_nodes++].evalexpr
+            = dwg_add_handleref (dst, 5, basept_h, NULL);
+        _basept->evalexpr.nodeid = GRAFT_BASEPOINT;
+        if (add_action (&rotate_plan->actions, &rotate_plan->num_actions,
+                        GRAFT_BASEPOINT))
+          {
+            failures += test_unknown (dst, toilet, v, 1,
+                                      "a rotate action turning a base point "
+                                      "parameter");
+            rotate_plan->num_actions--;
+          }
+        else
+          failures++;
+        _basept->evalexpr.nodeid = basept_id;
+        graph->num_nodes--;
+      }
+    else
+      {
+        FAIL ("unknown states: grafting the Door's base point parameter "
+              "failed");
+        failures++;
+      }
+  }
+
+  // the Toilet's Angle in the Window's graph, 'Stretch Width' moving its
+  // base point, at Window Width 24 and no Angle
+  v[0].name = (char *)"Window Width";
+  v[0].value = 24.0;
+  if (graft_rotation (dst, window, toilet,
+                      entity_copy (dst, src, WINDOW, window, 0xBBD5), 0, &g))
+    {
+      const BITCODE_BL base = 0;
+      if (add_stretch_code (stretch_width, GRAFT_PARAM, &base, 1))
+        {
+          failures += test_unknown (dst, window, v, 1,
+                                    "a stretch moving a rotation parameter");
+          pop_stretch_code (stretch_width);
+        }
+      else
+        failures++;
+      ungraft_rotation (&g);
+    }
+  else
+    {
+      FAIL ("unknown states: grafting the Toilet's Angle failed");
+      failures++;
+    }
+
+  // and 'Rotate Plan', turning the Window's LINE BBD5 and Window Height's
+  // parameter, whose end point 'Stretch Width' moves, at Angle 1.2
+  v[1].name = (char *)"Angle";
+  v[1].value = 1.2;
+  if (graft_rotation (dst, window, toilet,
+                      entity_copy (dst, src, WINDOW, window, 0xBBD5), 1, &g))
+    {
+      const BITCODE_BL end = 1;
+      g.action_list[0] = height_id;
+      g.action->num_actions = 1;
+      if (test_accepted (dst, window, 1.0, &v[1], 1,
+                         "the grafted Angle, turning Window Height's "
+                         "parameter")
+          == 0
+          && add_stretch_code (stretch_width, height_id, &end, 1))
+        {
+          failures += test_unknown (dst, window, v, 2,
+                                    "a parameter moved by a stretch and "
+                                    "turned by a rotate action");
+          pop_stretch_code (stretch_width);
+        }
+      else
+        failures++;
+      ungraft_rotation (&g);
+    }
+  else
+    {
+      FAIL ("unknown states: grafting the Toilet's Angle failed");
+      failures++;
+    }
+  free_document (dst);
+  return failures;
+}
+
+/* The point i of the record placement insert stores for the parameter
+   with node id nodeid into *pt. Returns 0 when it has none. */
+static int
+record_point (const Dwg_Data *dwg, const BITCODE_RLL insert,
+              const BITCODE_BL nodeid, const int i, BITCODE_3BD *pt)
+{
+  const Dwg_Object *xrec;
+  const Dwg_Resbuf *rb;
+  char key[16];
+  int n = 0;
+  snprintf (key, sizeof (key), "%u", (unsigned)nodeid);
+  xrec = dict_item (dwg, enhanced_block_data (dwg, object (dwg, insert)),
+                    key);
+  if (!xrec || xrec->fixedtype != DWG_TYPE_XRECORD)
+    return 0;
+  // after 1071, 1071, 70, 70
+  for (rb = xrec->tio.object->tio.XRECORD->xdata; rb; rb = rb->nextrb)
+    if (rb->type == 10 && n++ == i)
+      {
+        pt->x = rb->value.pt[0];
+        pt->y = rb->value.pt[1];
+        pt->z = rb->value.pt[2];
+        return 1;
+      }
+  return 0;
+}
+
+static int
+is_at (const BITCODE_3BD *pt, const double x, const double y, const double z)
+{
+  return fabs (pt->x - x) <= RECORD_TOLERANCE
+         && fabs (pt->y - y) <= RECORD_TOLERANCE
+         && fabs (pt->z - z) <= RECORD_TOLERANCE;
+}
+
+/* A value whose parameter's points after the evaluation round to points
+   that don't hold it: Window Width's points moved to x 1e16 and 1e16 + 36,
+   where a double holds every second integer, so that a width of 1 puts the
+   end point 0 or 2 from the base point, while 24 is held; and the Toilet's
+   Angle with its base point at (1e16, 1e16) and its end point 2 from it,
+   which a turn of 1 puts on the grid's diagonal. Each is refused before
+   anything is added. */
+static int
+test_round_trip (Dwg_Data *src)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, WINDOW, &def_h);
+  Dwg_Object *obj
+      = dst ? named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER,
+                          "winwidth")
+            : NULL;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!obj)
+    {
+      FAIL ("round trip: the Window's Window Width not found");
+      free_document (dst);
+      return 1;
+    }
+  {
+    Dwg_Object_BLOCKLINEARPARAMETER *width
+        = obj->tio.object->tio.BLOCKLINEARPARAMETER;
+    width->value_set.flags = 0;
+    width->def_basept.x = 1e16;
+    width->def_endpt.x = 1e16 + 36.0;
+  }
+  v.name = (char *)"Window Width";
+  v.value = 1.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &pt, 1.0, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value its rounded points don't hold");
+  v.value = 24.0;
+  failures += test_accepted (dst, def_h, 1.0, &v, 1,
+                             "a linear value its points far out hold");
+  free_document (dst);
+
+  dst = document_with (src, TOILET, &def_h);
+  obj = dst ? graph_node (dst, def_h, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL)
+            : NULL;
+  if (!obj)
+    {
+      FAIL ("round trip: the Toilet's Angle not found");
+      free_document (dst);
+      return failures + 1;
+    }
+  {
+    Dwg_Object_BLOCKROTATIONPARAMETER *angle
+        = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+    angle->def_basept.x = angle->def_basept.y = 1e16;
+    angle->def_endpt = angle->def_basept;
+    angle->def_endpt.x += 2.0;
+    angle->def_base_angle_pt = angle->def_endpt;
+  }
+  v.name = (char *)"Angle";
+  v.value = 1.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &pt, 1.0, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a rotation value its rounded points don't hold");
+  free_document (dst);
+  return failures;
+}
+
+/* An ATTDEF at x -2^90 that two of the Window's stretch actions move, by
+   2^90 and then by 2^32 ('Stretch Divider' made to take 2^-58 of the
+   change), at Window Width 2^90 + 36: it ends at 2^32, while the sum of
+   the moves rounds to 2^90 and would put it at 0. Placed at a scale of
+   1e300 it is beyond what a double holds, which is refused before
+   anything is added. */
+static int
+test_attdef_moved_twice (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, WINDOW, &def_h);
+  const BITCODE_3BD origin = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d at = { -ldexp (1.0, 90), 10.0, 0.0 };
+  const BITCODE_BL point = 0;
+  Dwg_Object *width, *obj;
+  Dwg_Object_BLOCKSTRETCHACTION *stretch, *divider;
+  Dwg_Entity_ATTDEF *attdef;
+  BITCODE_RLL attdef_h;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  attdef = dst ? dwg_add_ATTDEF (block_header (dst, def_h), 2.5, 0, "Mark",
+                                 &at, "MARK", "M")
+               : NULL;
+  loglevel = test_loglevel;
+  width = attdef ? named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER,
+                               "winwidth")
+                 : NULL;
+  if (!width)
+    {
+      FAIL ("ATTDEF moved twice: adding an ATTDEF to the Window failed");
+      free_document (dst);
+      return 1;
+    }
+  attdef_h = handle_of (dst, attdef);
+  width->tio.object->tio.BLOCKLINEARPARAMETER->value_set.flags = 0;
+  obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION, "Stretch Width");
+  stretch = obj ? obj->tio.object->tio.BLOCKSTRETCHACTION : NULL;
+  obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
+                    "Stretch Divider");
+  divider = obj ? obj->tio.object->tio.BLOCKSTRETCHACTION : NULL;
+  if (!stretch || !divider
+      || !add_dep (dst, &stretch->deps, &stretch->num_deps, attdef_h)
+      || !add_stretch_entity (dst, stretch, attdef_h, &point, 1)
+      || !add_dep (dst, &divider->deps, &divider->num_deps, attdef_h)
+      || !add_stretch_entity (dst, divider, attdef_h, &point, 1))
+    {
+      FAIL ("ATTDEF moved twice: adding it to the stretch actions failed");
+      free_document (dst);
+      return 1;
+    }
+  divider->action_offset_x = ldexp (1.0, -58);
+  v.name = (char *)"Window Width";
+  v.value = ldexp (1.0, 90) + 36.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &origin, 1e300, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "an ATTDEF moved twice to beyond a double");
+  free_document (dst);
+  return failures;
+}
+
+/* Parameters the fixture's actions don't move, made to: the Door's
+   'Stretch' moving its visibility parameter's point (index 0), and an
+   ATTDEF added to the Window in 'Stretch Width''s frame and selection.
+   At Wall Thickness 6 the visibility parameter's record holds its point
+   moved 1 down, as Wall Thickness's end point moves; at Window Width 24
+   the ATTRIB is where the evaluation moved its ATTDEF, 12 to the left,
+   and, centred with a width given, starts back by half the width from
+   where the evaluation moved its alignment point; and at a huge scale one
+   placed beyond a double is refused before anything is added, while the
+   definition's own place is not. */
+static int
+test_moved_parameters (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, DOOR, &def_h);
+  const BITCODE_3BD at = { 100.0, 200.0, 0.0 };
+  const dwg_point_3d attdef_pt = { 35.0, 10.0, 0.0 };
+  Dwg_Object *obj, *vis;
+  Dwg_Object_BLOCKSTRETCHACTION *stretch;
+  Dwg_Entity_INSERT *insert;
+  Dwg_DynValue v;
+  BITCODE_3BD pt = { 0.0, 0.0, 0.0 }, def_pt;
+  BITCODE_BL vis_id;
+  int failures = 0, error = 0;
+
+  memset (&v, 0, sizeof (v));
+  obj = dst ? named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION, "Stretch")
+            : NULL;
+  vis = dst ? graph_node (dst, def_h, DWG_TYPE_BLOCKVISIBILITYPARAMETER, NULL)
+            : NULL;
+  if (!obj || !vis)
+    {
+      FAIL ("moved parameters: the Door's objects not found");
+      free_document (dst);
+      return 1;
+    }
+  stretch = obj->tio.object->tio.BLOCKSTRETCHACTION;
+  def_pt = vis->tio.object->tio.BLOCKVISIBILITYPARAMETER->def_pt;
+  // the object may move as the placement adds objects
+  vis_id = nodeid_of (vis);
+  {
+    const BITCODE_BL point = 0;
+    if (!add_stretch_code (stretch, vis_id, &point, 1))
+      {
+        free_document (dst);
+        return 1;
+      }
+  }
+  v.name = (char *)"Wall Thickness";
+  v.value = 6.0;
+  loglevel = tracelevel;
+  insert = dwg_dynblock_insert (model_space (dst), block_header (dst, def_h),
+                                &at, 2.0, 1.0, &v, 1, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (insert && !error
+      && record_point (dst, handle_of (dst, insert), vis_id, 0, &pt)
+      && is_at (&pt, def_pt.x, def_pt.y - 1.0, def_pt.z))
+    OK ("moved parameters: the visibility parameter's record holds its "
+        "point moved 1 down");
+  else
+    {
+      FAIL ("moved parameters: the visibility parameter's point: 0x%x, "
+            "(%g, %g), expected (%g, %g)",
+            error, insert ? pt.x : 0.0, insert ? pt.y : 0.0, def_pt.x,
+            def_pt.y - 1.0);
+      failures++;
+    }
+  // the flip parameter 'swing', which MoveSwing moves by half of Wall
+  // Thickness's change, made to lie at y -1.7e308: a Wall Thickness of
+  // 1e308, which the value set is made to allow, would move it beyond what
+  // a double holds, while no entity goes that far
+  {
+    Dwg_Object *swing
+        = named_node (dst, def_h, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
+    Dwg_Object *wall
+        = named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER, "wall");
+    if (swing && wall)
+      {
+        Dwg_Object_BLOCKFLIPPARAMETER *_swing
+            = swing->tio.object->tio.BLOCKFLIPPARAMETER;
+        wall->tio.object->tio.BLOCKLINEARPARAMETER->value_set.flags = 0;
+        _swing->def_basept.y = _swing->def_endpt.y = -1.7e308;
+        v.value = 1e308;
+        failures += test_refusal (dst, model_space (dst),
+                                  block_header (dst, def_h), &at, 1.0, 0.0,
+                                  &v, 1, NULL, 0,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a value moving a parameter's point beyond "
+                                  "a double");
+      }
+    else
+      {
+        FAIL ("moved parameters: the Door's swing or wall not found");
+        failures++;
+      }
+  }
+  free_document (dst);
+
+  dst = document_with (src, WINDOW, &def_h);
+  obj = dst ? named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
+                          "Stretch Width")
+            : NULL;
+  if (obj)
+    {
+      Dwg_Entity_ATTDEF *attdef
+          = dwg_add_ATTDEF (block_header (dst, def_h), 2.5, 0, "Mark",
+                            &attdef_pt, "MARK", "M");
+      const BITCODE_RLL attdef_h = attdef ? handle_of (dst, attdef) : 0;
+      const BITCODE_BL point = 0;
+      const BITCODE_3BD origin = { 0.0, 0.0, 0.0 };
+      loglevel = test_loglevel;
+      // found again, as adding the ATTDEF may have moved the objects
+      obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
+                        "Stretch Width");
+      stretch = obj->tio.object->tio.BLOCKSTRETCHACTION;
+      if (!attdef
+          || !add_dep (dst, &stretch->deps, &stretch->num_deps, attdef_h)
+          || !add_stretch_entity (dst, stretch, attdef_h, &point, 1))
+        {
+          FAIL ("moved parameters: adding an ATTDEF to the Window failed");
+          free_document (dst);
+          return failures + 1;
+        }
+      v.name = (char *)"Window Width";
+      v.value = 24.0;
+      loglevel = tracelevel;
+      insert = dwg_dynblock_insert (model_space (dst),
+                                    block_header (dst, def_h), &at, 1.0, 0.0,
+                                    &v, 1, NULL, 0, &error);
+      loglevel = test_loglevel;
+      if (!block_header (dst, def_h))
+        {
+          FAIL ("moved parameters: the Window's copy not found");
+          free_document (dst);
+          return failures + 1;
+        }
+      {
+        const BITCODE_3BD base = block_header (dst, def_h)->base_pt;
+        const Dwg_Object *attrib
+            = insert && insert->num_owned
+                  ? object (dst, ref (insert->attribs[0]))
+                  : NULL;
+        const Dwg_Entity_ATTRIB *_attrib
+            = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+                  ? attrib->tio.entity->tio.ATTRIB
+                  : NULL;
+        if (_attrib && !error
+            && fabs (_attrib->ins_pt.x
+                     - (at.x + attdef_pt.x - 12.0 - base.x))
+                   <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.y - (at.y + attdef_pt.y - base.y))
+                   <= RECORD_TOLERANCE)
+          OK ("moved parameters: the ATTRIB is where the evaluation moved "
+              "its ATTDEF");
+        else
+          {
+            FAIL ("moved parameters: the ATTRIB at (%g, %g): 0x%x",
+                  _attrib ? _attrib->ins_pt.x : 0.0,
+                  _attrib ? _attrib->ins_pt.y : 0.0, error);
+            failures++;
+          }
+      }
+      // centred and given a width of 2, its ATTRIB is aligned where the
+      // evaluation moved the ATTDEF's alignment point, and starts half the
+      // width at height 2.5 back from it
+      attdef->horiz_alignment = 1;
+      attdef->alignment_pt.x = attdef_pt.x;
+      attdef->alignment_pt.y = attdef_pt.y;
+      {
+        const BITCODE_3BD base = block_header (dst, def_h)->base_pt;
+        const double ax = at.x + attdef_pt.x - 12.0 - base.x;
+        const double ay = at.y + attdef_pt.y - base.y;
+        const Dwg_Object *attrib;
+        const Dwg_Entity_ATTRIB *_attrib;
+        Dwg_AttValue a;
+        memset (&a, 0, sizeof (a));
+        a.tag = (char *)"MARK";
+        a.value = (char *)"MM";
+        a.width = 2.0;
+        loglevel = tracelevel;
+        insert = dwg_dynblock_insert (model_space (dst),
+                                      block_header (dst, def_h), &at, 1.0,
+                                      0.0, &v, 1, &a, 1, &error);
+        loglevel = test_loglevel;
+        attrib = insert && insert->num_owned
+                     ? object (dst, ref (insert->attribs[0]))
+                     : NULL;
+        _attrib = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+                      ? attrib->tio.entity->tio.ATTRIB
+                      : NULL;
+        if (_attrib && !error
+            && fabs (_attrib->alignment_pt.x - ax) <= RECORD_TOLERANCE
+            && fabs (_attrib->alignment_pt.y - ay) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.x - (ax - 2.5)) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.y - ay) <= RECORD_TOLERANCE)
+          OK ("moved parameters: a centred ATTRIB with a width starts back "
+              "from where the evaluation moved its alignment point");
+        else
+          {
+            FAIL ("moved parameters: the centred ATTRIB at (%g, %g) "
+                  "aligned at (%g, %g), expected (%g, %g) aligned at (%g, "
+                  "%g): 0x%x",
+                  _attrib ? _attrib->ins_pt.x : 0.0,
+                  _attrib ? _attrib->ins_pt.y : 0.0,
+                  _attrib ? _attrib->alignment_pt.x : 0.0,
+                  _attrib ? _attrib->alignment_pt.y : 0.0, ax - 2.5, ay, ax,
+                  ay, error);
+            failures++;
+          }
+      }
+      attdef->horiz_alignment = 0;
+      attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
+      // at a scale of 1e300, the ATTDEF's own place is held, and one moved
+      // 1e10 to the right isn't, with Window Width's value set made to
+      // allow that value
+      failures += test_accepted (dst, def_h, 1e300, NULL, 0,
+                                 "an ATTDEF at its own place, at a scale of "
+                                 "1e300");
+      {
+        Dwg_Object *width
+            = named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER,
+                          "winwidth");
+        if (width)
+          width->tio.object->tio.BLOCKLINEARPARAMETER->value_set.flags = 0;
+        else
+          {
+            FAIL ("moved parameters: the Window's Window Width not found");
+            failures++;
+          }
+      }
+      v.value = 36.0 + 1e10;
+      failures += test_refusal (dst, model_space (dst),
+                                block_header (dst, def_h), &origin, 1e300,
+                                0.0, &v, 1, NULL, 0,
+                                REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                "an ATTDEF moved and placed beyond a double");
+    }
+  else
+    {
+      FAIL ("moved parameters: the Window's 'Stretch Width' not found");
+      failures++;
+    }
+  free_document (dst);
+  failures += test_attdef_moved_twice (src);
+  failures += test_round_trip (src);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2843,9 +5044,13 @@ main (int argc, char *argv[])
   failures += test_is_xref_ref (&src);
   failures += test_add_insert_block ();
   failures += test_add_insert_block_r11 ();
+  failures += test_attribute_widths (&src);
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);
+  failures += test_attribute_text ();
+  failures += test_attributes_non_ascii (&src);
+  failures += test_attr_eed_left_out (&src);
   failures += test_image_reactors (&src);
   failures += test_sortents_entries (&src);
   failures += test_sortents_order (&src);
@@ -2853,6 +5058,8 @@ main (int argc, char *argv[])
   failures += test_entity_count (&src);
   failures += test_definition_refusals (&src);
   failures += test_minsert (&src);
+  failures += test_unknown_states (&src);
+  failures += test_moved_parameters (&src);
   free_dwg (&src);
   return failures ? 1 : 0;
 }

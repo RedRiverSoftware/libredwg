@@ -44,7 +44,8 @@
         FIELD_2RD (clone_ins_pt, 12);                                         \
       if (R11OPTS (2))                                                        \
         FIELD_RC (flag, 70);                                                  \
-      if (R11OPTS (4))                                                        \
+      /* the DXF importer sets it without the opts bit */                     \
+      if (R11OPTS (4) || IF_IS_FREE)                                          \
         FIELD_TV (user_text, 1);                                              \
     }                                                                         \
     LATER_VERSIONS                                                            \

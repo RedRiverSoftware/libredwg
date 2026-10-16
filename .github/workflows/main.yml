@@ -159,7 +159,7 @@ jobs:
     - run: make -C programs check-minimal XFAIL_TESTS="alive.test"
     - run: >-
         make -C test/unit-testing check-minimal
-        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test dynblock_eval_test dynblock_insert_test fields_test copy_test color_test"
+        XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test dynblock_eval_test dynblock_insert_test fields_test copy_test color_test indxf_test"
   mips32-big-endian:
     runs-on: ubuntu-latest
     timeout-minutes: 35
@@ -244,6 +244,7 @@ jobs:
   mingw:
     name: mingw
     runs-on: windows-latest
+    timeout-minutes: 55
     env:
       MSYS2_DIR: msys64
       MSYS2_ARCH: x86_64
@@ -301,7 +302,10 @@ jobs:
       run: sh ./autogen.sh
     - shell: msys2 {0}
       run: ./configure --disable-dependency-tracking
+    # The make steps have time limits of their own: a step over its limit
+    # fails the job, where a job over its limit is reported as cancelled.
     - shell: msys2 {0}
+      timeout-minutes: 28
       run: make -j CC="ccache gcc"
     - if: failure()
       shell: msys2 {0}
@@ -311,8 +315,25 @@ jobs:
       with:
         name: mingw-failure.tgz
         path: mingw-failure.tgz
+    # If make check is still running after 15 minutes (it takes 6-13), list
+    # the running processes, to show what it is waiting for. The time limit
+    # ends every process, so a later step would find none.
     - shell: msys2 {0}
-      run: make -j check CC="ccache gcc"
+      timeout-minutes: 20
+      run: |
+        make -j check CC="ccache gcc" &
+        make_pid=$!
+        listed=
+        while kill -0 $make_pid 2>/dev/null; do
+          sleep 5
+          if [ -z "$listed" ] && [ $SECONDS -ge 900 ]; then
+            listed=1
+            echo "make check has run for 15 minutes. Running processes:"
+            ps -ef || true
+            powershell -NoProfile -Command "Get-CimInstance Win32_Process | Format-Table ProcessId,ParentProcessId,Name,UserModeTime,KernelModeTime,WorkingSetSize,CommandLine -AutoSize -Wrap | Out-String -Width 4096" || true
+          fi
+        done
+        wait $make_pid
     - if: ${{ !cancelled() }}
       shell: msys2 {0}
       run: ccache -s

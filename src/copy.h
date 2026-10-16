@@ -96,27 +96,70 @@ typedef struct _dwg_copy_unresolved
    writes no prev_entity and next_entity, so a caller that links a copy
    into a chain clears it.
 
-   The copy walks the specs, and so runs their unguarded statements again,
-   some of which derive fields from others: from r2000, LAYER's frozen, off,
-   frozen_in_new, locked, plotflag, linewt and flag are derived from flag0.
-   The sources need their fields as decoded from a DWG file. A LAYER made
-   with the add API or imported from DXF can have flags its flag0 doesn't
-   hold, and its copy loses them: with flag0 0, frozen, off, frozen_in_new,
-   locked, plotflag and linewt are all 0 in the copy.
+   src and dst may be documents of different kinds: read from a DWG file,
+   imported from DXF or JSON, or built with the add API, whose
+   dwg_add_Document () sets both import flags (DWG_OPTS_IN). The copies
+   keep their sources' values, converted where the encoder takes a kind's
+   values differently:
+   - 8-bit strings are UTF-8 in a document imported from JSON or built with
+     the add API, and in its codepage in the others. They are converted
+     between the two, with \U+XXXX for a character the codepage lacks, as
+     the encoder converts them. An XRECORD's strings are converted with
+     their own codepage, NULs inside them kept, and its xdata_size computed
+     again, as it is too for a copy from an import or a document built
+     with the add API into a document read from a DWG file. An XRECORD
+     string too long once converted is left out, NULL with size 0, with
+     DWG_ERR_VALUEOUTOFBOUNDS: above 0x7FFF bytes in the codepage, the most
+     the decoder reads, or above 0xFFFF in UTF-8, the most its size holds
+     (the encoder converts it, and truncates the result to 0x7FFF). EED
+     strings, which the encoder writes as they are in every kind, are
+     copied as they are. A string that is not UTF-8 in a document whose
+     strings are, or that has a character beyond U+FFFF, which \U+XXXX
+     can't hold, is copied as it is, with DWG_ERR_VALUEOUTOFBOUNDS.
+   - From r2000 a LAYER holds its flags three ways: flag0, the fields
+     frozen, off, frozen_in_new, locked, plotflag and linewt, and the DXF
+     flag with the sign of the colour index. The encoder writes flag0 as it
+     is for a JSON import, from the DXF flag and the colour for a DXF import,
+     plotted, and from the fields for the others. A copy into a document of
+     another kind holds all three as its source stands for them: flag0 from
+     a JSON import, the DXF flag and the colour from a DXF import, and the
+     fields from the others.
+   - The encoder works out the dataflags of a TEXT, ATTRIB or ATTDEF from
+     its values for a DXF import, a document built with the add API, or
+     one of r2000 or older, and writes those of the others as they are,
+     leaving out the values they flag as defaults. A copy into a document
+     whose encoder takes them otherwise than its source's gets them from
+     its values, or, the other way, the values its source's flags leave
+     out at their defaults.
+   The copy walks the specs, which set some fields from others as the
+   decoder needs them (a table record's DXF flag from its bits, LAYER's
+   fields from flag0). Those fields then take their sources' values again.
+   So does a count, when it is no larger than the walk's, which may have
+   copied that many elements (TABLESTYLE's three row styles, IMAGE's two
+   clip vertices of a rectangle).
 
-   src and dst must be r13 to r2004 documents (R_13b1 to R_2004) of the same
-   version and codepage. Objects whose class LibreDWG cannot decode
-   (UNKNOWN_ENT, UNKNOWN_OBJ) are refused, as is a handle that is already in
-   map. A refusal changes nothing.
+   src and dst must be r13 to r2004 documents (R_13b1 to R_2004), and,
+   between documents, of the same version and codepage. A copy is refused
+   with DWG_ERR_INVALIDDWG and a bit for the reason, and the refusal
+   changes nothing:
+   - DWG_ERR_INTERNALERROR: dst, src or map is NULL, or handles is NULL
+     while num_handles isn't 0;
+   - DWG_ERR_NOTYETSUPPORTED: the documents' versions or codepages;
+   - DWG_ERR_INVALIDHANDLE: a handle that is 0, or not in src, or listed
+     twice, or already in map;
+   - DWG_ERR_UNHANDLEDCLASS: an object without data, or of a class LibreDWG
+     cannot decode (UNKNOWN_ENT, UNKNOWN_OBJ) or copy;
+   - DWG_ERR_INVALIDTYPE: an object of a variable type whose class src
+     lacks.
 
-   Returns 0, or DWG_ERR_* bits. From DWG_ERR_CRITICAL up: a refusal, also
-   of a NULL dst, src or map, or of NULL handles when num_handles isn't 0
-   (DWG_ERR_INTERNALERROR); or an allocation failure (DWG_ERR_OUTOFMEM),
-   after which dst keeps the objects added so far, some of them incomplete,
-   but none pointing into src's data, so that both documents can be freed.
-   Below it, the copies are made, with some data left out:
-   DWG_ERR_VALUEOUTOFBOUNDS for an array, or 3DSOLID ACIS data, that could
-   not be copied and is NULL in the copy, and DWG_ERR_INVALIDEED for an EED
+   Returns 0, or DWG_ERR_* bits. From DWG_ERR_CRITICAL up: a refusal, or an
+   allocation failure (DWG_ERR_OUTOFMEM), after which dst keeps the objects
+   added so far, some of them incomplete, but none pointing into src's
+   data, so that both documents can be freed. Below it, the copies are
+   made, with some data left out: DWG_ERR_VALUEOUTOFBOUNDS for an array or
+   binary chunk, or 3DSOLID ACIS data, that could not be copied and is NULL
+   in the copy, among them those the specs don't walk, which a JSON import
+   can set (EXTRUDEDSURFACE's bindata), and DWG_ERR_INVALIDEED for an EED
    group left out of a copy. DWG_ERR_VALUEOUTOFBOUNDS also comes from a
    source whose class_version is above 10 (IMAGE, IMAGEDEF,
    IMAGEDEF_REACTOR, GEODATA, RASTERVARIABLES): the decoder stops reading

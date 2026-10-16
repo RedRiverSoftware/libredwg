@@ -694,8 +694,8 @@ dwg_find_first_type_handle (const Dwg_Data *restrict dwg,
 void dwg_calc_hookline_on (Dwg_Entity_LEADER *_obj);
 
 // <path-to>/dxf.ext => copy of "dxf", "ext"
-// Returns a malloc'ed copy of basename, and
-// sets ext to the char behind the last "." of filepath
+// Returns a malloc'ed copy of basename without extension, for the caller to
+// free, and sets ext to the char behind its last "."
 char *split_filepath (const char *filepath, char **extp) __nonnull_all;
 
 const struct dwg_versions *dwg_version_struct (const Dwg_Version_Type version);

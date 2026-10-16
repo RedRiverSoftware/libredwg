@@ -7273,17 +7273,23 @@ dwg_encode_xdata (Bit_Chain *restrict dat, Dwg_Object_XRECORD *restrict _obj,
                 // do we need to convert UTF-8 to codepage?
                 if (rbuf->value.str.size > 0 && dat->opts & DWG_OPTS_INJSON)
                   {
-                    BITCODE_RS destlen = rbuf->value.str.size * 2;
-                    char *dest = (char *)malloc (destlen);
-                    while (!bit_utf8_to_TV (
-                        dest, (BITCODE_TF)rbuf->value.str.u.data, destlen,
-                        rbuf->value.str.size, 0, rbuf->value.str.codepage))
+                    char *dest = rbuf->value.str.u.data
+                                     ? bit_utf8_to_TV_alloc (
+                                           rbuf->value.str.u.data,
+                                           rbuf->value.str.size, 0,
+                                           rbuf->value.str.codepage)
+                                     : NULL;
+                    size_t destlen = dest ? strlen (dest) : 0;
+                    // dwg_decode_xdata () reads a length above INT16_MAX
+                    // as negative and skips the string
+                    if (destlen > INT16_MAX)
                       {
-                        destlen *= 2;
-                        dest = (char *)realloc (dest, destlen);
+                        LOG_WARN ("xdata[%u]: overlong string truncated "
+                                  "(len=%" PRIuSIZE ")",
+                                  j, destlen);
+                        destlen = INT16_MAX;
                       }
-                    destlen = (BITCODE_RS)strlen (dest);
-                    bit_write_RS (dat, destlen);
+                    bit_write_RS (dat, (BITCODE_RS)destlen);
                     bit_write_RC (dat, rbuf->value.str.codepage);
                     if (dest)
                       bit_write_TF (dat, (BITCODE_TF)dest, destlen);
@@ -8003,6 +8009,14 @@ downconvert_TABLESTYLE (Dwg_Object *restrict obj)
               = _obj->sty.cellstyle.borders[i].visible;
           _obj->rowstyles[0].borders[i].color
               = _obj->sty.cellstyle.borders[i].color;
+        }
+      // the borders go, with their ltype refs. The decoder keeps NULL refs
+      // out of dwg->object_ref, so the field owns those.
+      for (unsigned i = 0; i < _obj->sty.cellstyle.num_borders; i++)
+        {
+          Dwg_Object_Ref *ltype = _obj->sty.cellstyle.borders[i].ltype;
+          if (ltype && !ltype->handleref.is_global)
+            free (ltype);
         }
       free (_obj->sty.cellstyle.borders);
       _obj->sty.cellstyle.borders = NULL;
