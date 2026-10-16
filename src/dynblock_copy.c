@@ -145,15 +145,17 @@ same_cstr (const char *a, const char *b)
   return a && b && same_name (a, strlen (a), b, strlen (b));
 }
 
-/* A name to match, and whether its bytes are UTF-8: a string field of a
-   document imported from JSON or built with the add API holds UTF-8, one
-   of any other document holds its codepage, and so does an EED string in
-   every document, as the object copy leaves them. */
+/* A name to match, whether its bytes are UTF-8, and if not, their
+   codepage: a string field of a document imported from JSON or built with
+   the add API holds UTF-8, one of any other document holds the document's
+   codepage, and an EED string holds its own in every document, as the
+   object copy leaves them. */
 typedef struct _match_name
 {
   const char *str;
   size_t len;
   int utf8;
+  BITCODE_RS codepage;
 } Match_Name;
 
 static Match_Name
@@ -163,19 +165,20 @@ field_name (const Dwg_Data *dwg, const char *str)
   name.str = str;
   name.len = str ? strlen (str) : 0;
   name.utf8 = (dwg->opts & DWG_OPTS_INJSON) != 0;
+  name.codepage = dwg->header.codepage;
   return name;
 }
 
-/* Whether names a and b, of documents of the same codepage, are the same:
-   one in UTF-8 and one in the codepage are compared as UTF-8. Out of
-   memory, *errorp gets DWG_ERR_OUTOFMEM, rather than the names taken to
-   differ. */
+/* Whether names a and b are the same: one in UTF-8 and one in a codepage
+   are compared as UTF-8, with \U+XXXX as the character on both sides, as
+   the encoder writes the \U+XXXX of a UTF-8 name as it is. Out of memory,
+   *errorp gets DWG_ERR_OUTOFMEM, rather than the names taken to differ. */
 static int
 same_match_name (const Match_Name *a, const Match_Name *b,
-                 const BITCODE_RS codepage, int *restrict errorp)
+                 int *restrict errorp)
 {
   const Match_Name *cp, *utf8;
-  char *str, *conv;
+  char *str, *conv, *expanded = NULL;
   int same;
   if (!a->str || !b->str)
     return 0;
@@ -192,10 +195,16 @@ same_match_name (const Match_Name *a, const Match_Name *b,
     }
   memcpy (str, cp->str, cp->len);
   str[cp->len] = '\0';
-  conv = bit_TV_to_utf8 (str, codepage);
-  if (!conv)
+  conv = bit_TV_to_utf8 (str, cp->codepage);
+  // a name in UTF-8 is a field's, which ends in NUL; itself without \U+
+  if (conv)
+    expanded = bit_TV_to_utf8 (utf8->str, CP_UTF8);
+  if (!conv || !expanded)
     *errorp |= DWG_ERR_OUTOFMEM;
-  same = conv && same_name (conv, strlen (conv), utf8->str, utf8->len);
+  same = conv && expanded
+         && same_name (conv, strlen (conv), expanded, strlen (expanded));
+  if (expanded != utf8->str)
+    free (expanded);
   if (conv != str)
     free (conv);
   free (str);
@@ -211,9 +220,12 @@ starts_with (const char *name, const char *prefix)
 
 /* The name of a dynamic block definition: the string of its
    AcDbDynamicBlockTrueName EED, or AcDbDynamicBlockTrueName2 as AutoCAD
-   writes for some, which is not NUL-terminated, or NULL. */
+   writes for some, which is not NUL-terminated, or NULL. Its codepage goes
+   to *codepagep: the string's own, or dwg's for a string that has none
+   (0), as one of a DWG file before r2007 isn't UTF-8. */
 static const char *
-true_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp)
+true_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp,
+           BITCODE_RS *codepagep)
 {
   const Dwg_Object_Object *o = obj->tio.object;
   BITCODE_BL i;
@@ -240,6 +252,8 @@ true_name (const Dwg_Data *dwg, const Dwg_Object *obj, size_t *lenp)
           || !eed->data->u.eed_0.length || !eed->data->u.eed_0.string[0])
         continue;
       *lenp = eed->data->u.eed_0.length;
+      *codepagep = eed->data->u.eed_0.codepage ? eed->data->u.eed_0.codepage
+                                                : dwg->header.codepage;
       return eed->data->u.eed_0.string;
     }
   return NULL;
@@ -254,7 +268,7 @@ block_name (const Dwg_Data *dwg, const Dwg_Object *obj)
   const Dwg_Object_BLOCK_HEADER *blk = obj->tio.object->tio.BLOCK_HEADER;
   Match_Name name;
   name.utf8 = 0;
-  name.str = true_name (dwg, obj, &name.len);
+  name.str = true_name (dwg, obj, &name.len, &name.codepage);
   if (name.str)
     return name;
   if (!blk || blk->anonymous || !blk->name || !*blk->name || *blk->name == '*')
@@ -341,7 +355,7 @@ find_block (const Dwg_Data *dst, const Dwg_Data *src, const Dwg_Object *srcobj,
           || !obj->tio.object->tio.BLOCK_HEADER)
         continue;
       dst_name = block_name (dst, obj);
-      if (same_match_name (&name, &dst_name, src->header.codepage, errorp))
+      if (same_match_name (&name, &dst_name, errorp))
         return obj->handle.value;
       if (*errorp)
         return 0;
@@ -372,7 +386,7 @@ same_record (const Dwg_Object *a, const Dwg_Object *b, int *restrict errorp)
       na = field_name (a->parent, name);
       nb = field_name (b->parent, b->tio.object->tio.APPID->name);
     }
-  return same_match_name (&na, &nb, a->parent->header.codepage, errorp);
+  return same_match_name (&na, &nb, errorp);
 }
 
 /* The record of dst's table named as table record srcobj is in src, or 0,
@@ -450,7 +464,7 @@ dictionary_entry (const Dwg_Data *dwg, const Dwg_Object_DICTIONARY *dict,
   for (i = 0; i < dict->numitems; i++)
     {
       const Match_Name text = field_name (dwg, dict->texts[i]);
-      if (same_match_name (&text, key, dwg->header.codepage, errorp))
+      if (same_match_name (&text, key, errorp))
         return ref_target (dict->itemhandles[i]);
       if (*errorp)
         return 0;

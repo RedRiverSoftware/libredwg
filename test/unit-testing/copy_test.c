@@ -2305,13 +2305,77 @@ cleanup:
 }
 
 #if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
-/* Writes dwg as JSON to file and imports it again into imported. */
+/* The end of the JSON value starting at p, an object or array: after its
+   closing bracket. */
+static char *
+json_value_end (char *p)
+{
+  int depth = 0;
+  for (; *p; p++)
+    {
+      if (*p == '"')
+        {
+          for (p++; *p && *p != '"'; p++)
+            if (*p == '\\' && p[1])
+              p++;
+          if (!*p)
+            return p;
+        }
+      else if (*p == '{' || *p == '[')
+        depth++;
+      else if ((*p == '}' || *p == ']') && --depth == 0)
+        return p + 1;
+    }
+  return p;
+}
+
+/* Cuts each DIMASSOC's "ref" array in the JSON text json to its first 4
+   entries, as other programs and older JSON writers give them; LibreDWG's
+   writes all 6, the last ones empty. Returns how many it cut. */
+static unsigned
+cut_dimassoc_refs (char *json)
+{
+  unsigned cut = 0;
+  char *p = json;
+  while ((p = strstr (p, "\"object\": \"DIMASSOC\"")))
+    {
+      char *ref = strstr (p, "\"ref\": [");
+      char *next = strstr (p + 1, "\"object\": ");
+      char *q, *array_end;
+      unsigned entries = 0;
+      p++;
+      if (!ref || (next && ref > next))
+        continue;
+      q = strchr (ref, '[');
+      array_end = json_value_end (q);
+      for (q++; q < array_end && entries < 4; q++)
+        if (*q == '{')
+          {
+            q = json_value_end (q) - 1;
+            entries++;
+          }
+      if (entries < 4 || q >= array_end - 1)
+        continue;
+      // after the 4th entry: drop the others up to the closing bracket
+      memmove (q, array_end - 1, strlen (array_end - 1) + 1);
+      cut++;
+    }
+  return cut;
+}
+
+/* Writes dwg as JSON to file and imports it again into imported, each
+   DIMASSOC with 4 refs (cut_dimassoc_refs ()), whose number goes to
+   *dimassocsp. */
 static int
-json_round_trip (Dwg_Data *dwg, const char *file, Dwg_Data *imported)
+json_round_trip (Dwg_Data *dwg, const char *file, Dwg_Data *imported,
+                 unsigned *dimassocsp)
 {
   Bit_Chain dat = { 0 };
   int error;
+  char *json;
+  long size;
   memset (imported, 0, sizeof (Dwg_Data));
+  *dimassocsp = 0;
   dat.fh = fopen (file, "wb");
   if (!dat.fh)
     return DWG_ERR_IOERROR;
@@ -2323,6 +2387,33 @@ json_round_trip (Dwg_Data *dwg, const char *file, Dwg_Data *imported)
   fclose (dat.fh);
   if (error >= DWG_ERR_CRITICAL)
     return error;
+  // as other programs write DIMASSOCs
+  dat.fh = fopen (file, "rb");
+  if (!dat.fh)
+    return DWG_ERR_IOERROR;
+  fseek (dat.fh, 0, SEEK_END);
+  size = ftell (dat.fh);
+  fseek (dat.fh, 0, SEEK_SET);
+  json = size > 0 ? (char *)malloc ((size_t)size + 1) : NULL;
+  if (!json || fread (json, 1, (size_t)size, dat.fh) != (size_t)size)
+    {
+      free (json);
+      fclose (dat.fh);
+      return DWG_ERR_IOERROR;
+    }
+  fclose (dat.fh);
+  json[size] = '\0';
+  *dimassocsp = cut_dimassoc_refs (json);
+  dat.fh = fopen (file, "wb");
+  if (!dat.fh || fwrite (json, 1, strlen (json), dat.fh) != strlen (json))
+    {
+      if (dat.fh)
+        fclose (dat.fh);
+      free (json);
+      return DWG_ERR_IOERROR;
+    }
+  fclose (dat.fh);
+  free (json);
   memset (&dat, 0, sizeof (dat));
   imported->opts = tracelevel;
   dat.fh = fopen (file, "rb");
@@ -2406,7 +2497,7 @@ test_copy_kinds (void)
   char path[256];
   Dwg_Data ref, imported;
   Layer_State states[MAX_LAYERS], expected[MAX_LAYERS];
-  unsigned num_states;
+  unsigned num_states, num_dimassocs = 0;
   Dwg_Data *built;
   int found_off = 0;
 
@@ -2420,9 +2511,32 @@ test_copy_kinds (void)
   num_states = layer_states (&ref, states);
 
 #if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
-  // a JSON import holds flag0, and strings in UTF-8
-  if (json_round_trip (&ref, "copy_kinds.json", &imported) < DWG_ERR_CRITICAL)
+  /* A JSON import holds flag0, and strings in UTF-8. Its DIMASSOCs have 4
+     refs in the JSON, and 6 in memory, as every spec action walks 6: the
+     copies would read past 4. */
+  if (json_round_trip (&ref, "copy_kinds.json", &imported, &num_dimassocs)
+      < DWG_ERR_CRITICAL)
     {
+      unsigned padded = 0, dimassocs = 0;
+      const Dwg_DIMASSOC_Ref empty = { 0 };
+      for (BITCODE_BL i = 0; i < imported.num_objects; i++)
+        if (imported.object[i].fixedtype == DWG_TYPE_DIMASSOC)
+          {
+            const Dwg_Object_DIMASSOC *d
+                = imported.object[i].tio.object->tio.DIMASSOC;
+            dimassocs++;
+            if (d->ref && !memcmp (&d->ref[4], &empty, sizeof (empty))
+                && !memcmp (&d->ref[5], &empty, sizeof (empty)))
+              padded++;
+          }
+      if (num_dimassocs && dimassocs == num_dimassocs && padded == dimassocs)
+        OK ("copy between kinds: the %u DIMASSOCs with 4 refs in JSON "
+            "imported with 6, the last 2 empty",
+            dimassocs);
+      else
+        FAIL ("copy between kinds: %u DIMASSOCs cut to 4 refs in JSON, %u "
+              "imported, %u with refs 5 and 6 empty",
+              num_dimassocs, dimassocs, padded);
       clone_into_kind ("example_2004.dwg imported from JSON", &imported,
                        DWG_OPTS_INJSON, states, num_states,
                        "copy_kinds_json_json.dwg");
@@ -6466,13 +6580,15 @@ done:
    ASCII, which dst, a document built with the add API, has already: the
    copies are put on dst's layer, compared as UTF-8, rather than on a copy
    of the source's of the same name. The source is Door - Imperial with its
-   first entity's layer renamed "T\xFCr", as a document read from a DWG
+   first entity's layer renamed src_name, as a document read from a DWG
    file holds it, in codepage 1252. dst's is added as dwg_add_LAYER (dst,
-   "T\xC3\xBCr"), which keeps the UTF-8. */
-static int
-test_copy_block_matching_utf8 (void)
+   dst_name), which keeps the UTF-8. A copy of the source's would be named
+   src_name or utf8_name. */
+static void
+matching_utf8 (const char *src_name, const char *dst_name,
+               const char *utf8_name, const char *label)
 {
-  const char *what = "block copy matching across kinds";
+  char what[128];
   char path[256];
   Dwg_Data src;
   Dwg_Data *dst;
@@ -6484,12 +6600,13 @@ test_copy_block_matching_utf8 (void)
   unsigned layers = 0;
   int error = 0;
 
-  failed = 0;
+  snprintf (what, sizeof (what), "block copy matching across kinds, %s",
+            label);
   if (!test_file (DYNBLOCKS, path, sizeof (path))
       || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
     {
       FAIL ("%s: %s read failed", what, DYNBLOCKS);
-      return 1;
+      return;
     }
   door = dynamic_block (&src, "Door - Imperial");
   blk = door ? door->tio.object->tio.BLOCK_HEADER : NULL;
@@ -6501,16 +6618,16 @@ test_copy_block_matching_utf8 (void)
   dst = dwg_new_Document (R_2004, 0, tracelevel);
   loglevel = test_loglevel;
   if (dst)
-    dst_layer = dwg_add_LAYER (dst, "T\xC3\xBC" "r");
+    dst_layer = dwg_add_LAYER (dst, dst_name);
   loglevel = test_loglevel;
   if (!layerobj || layerobj->fixedtype != DWG_TYPE_LAYER || !dst_layer
-      || !dst_layer->name || strNE (dst_layer->name, "T\xC3\xBC" "r"))
+      || !dst_layer->name || strNE (dst_layer->name, dst_name))
     {
       FAIL ("%s: no layer to rename, or dst's not added in UTF-8", what);
       goto done;
     }
   free (layerobj->tio.object->tio.LAYER->name);
-  layerobj->tio.object->tio.LAYER->name = strdup ("T\xFC" "r");
+  layerobj->tio.object->tio.LAYER->name = strdup (src_name);
   dst_layer_handle = dst->object[dst_layer->parent->objid].handle.value;
 
   loglevel = tracelevel;
@@ -6524,18 +6641,18 @@ test_copy_block_matching_utf8 (void)
   for (BITCODE_BL i = 0; i < dst->num_objects; i++)
     if (dst->object[i].fixedtype == DWG_TYPE_LAYER
         && dst->object[i].tio.object->tio.LAYER->name
-        && (strEQc (dst->object[i].tio.object->tio.LAYER->name,
-                    "T\xC3\xBC" "r")
-            || strEQc (dst->object[i].tio.object->tio.LAYER->name,
-                       "T\xFC" "r")))
+        && (strEQ (dst->object[i].tio.object->tio.LAYER->name, dst_name)
+            || strEQ (dst->object[i].tio.object->tio.LAYER->name, src_name)
+            || strEQ (dst->object[i].tio.object->tio.LAYER->name,
+                      utf8_name)))
       layers++;
   copied = copy->num_owned && copy->entities
                ? dwg_resolve_handle (dst, ref_target (copy->entities[0]))
                : NULL;
   if (layers == 1 && copied && copied->supertype == DWG_SUPERTYPE_ENTITY
       && ref_target (copied->tio.entity->layer) == dst_layer_handle)
-    OK ("%s: the copy's first entity is on dst's layer T\\xC3\\xBCr, which "
-        "is the only one of its name",
+    OK ("%s: the copy's first entity is on dst's layer, the only one of its "
+        "name",
         what);
   else
     FAIL ("%s: %u layers of the name, the copy's first entity on " FORMAT_HV
@@ -6545,6 +6662,93 @@ test_copy_block_matching_utf8 (void)
               ? ref_target (copied->tio.entity->layer)
               : 0,
           dst_layer_handle);
+
+done:
+  if (dst)
+    {
+      free_dwg (dst);
+      free (dst);
+    }
+  free_dwg (&src);
+}
+
+/* matching_utf8 () for "T\xFCr" in codepage 1252, dst's "T\xC3\xBCr"; and
+   for "T\U+0234r", as a document in codepage 1252 holds U+0234, which it
+   lacks, with dst's "T\U+0234r", which the encoder writes as it is, so
+   both stand for the same name. */
+static int
+test_copy_block_matching_utf8 (void)
+{
+  failed = 0;
+  matching_utf8 ("T\xFC" "r", "T\xC3\xBC" "r", "T\xC3\xBC" "r",
+                 "T\\xFCr and T\\xC3\\xBCr");
+  matching_utf8 ("T\\U+0234r", "T\\U+0234r", "T\xC8\xB4" "r",
+                 "T\\U+0234r on both sides");
+  return numfailed ();
+}
+
+/* A dynamic block whose true name, in EED, is in another codepage than its
+   document: Door - Imperial's made "\xC6oor - Imperial" in codepage 1251,
+   where 0xC6 is U+0416, and copied into a document built with the add API
+   that has a block "\xD0\x96oor - Imperial", U+0416 in UTF-8. The copy
+   returns that block and adds nothing, rather than reading the name in
+   codepage 1252, the document's, where 0xC6 is U+00C6. */
+static int
+test_copy_block_true_name_codepage (void)
+{
+  const char *what = "block copy true name in its own codepage";
+  const char *utf8_name = "\xD0\x96oor - Imperial";
+  char path[256];
+  Dwg_Data src;
+  Dwg_Data *dst = NULL;
+  const Dwg_Object *door;
+  Dwg_Object_BLOCK_HEADER *existing = NULL, *copy;
+  Dwg_Eed_Data *data = NULL;
+  BITCODE_BL num_objects;
+  int error = 0;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  door = dynamic_block (&src, "Door - Imperial");
+  for (BITCODE_BL i = 0; door && i < door->tio.object->num_eed && !data;
+       i++)
+    {
+      Dwg_Eed_Data *d = door->tio.object->eed[i].data;
+      if (d && d->code == 0 && !d->u.eed_0.is_tu && d->u.eed_0.length == 15
+          && !memcmp (d->u.eed_0.string, "Door - Imperial", 15))
+        data = d;
+    }
+  if (data)
+    dst = dwg_new_Document (R_2004, 0, tracelevel);
+  if (dst)
+    existing = dwg_add_BLOCK_HEADER (dst, utf8_name);
+  loglevel = test_loglevel;
+  if (!data || src.header.codepage != CP_ANSI_1252 || !existing
+      || !existing->name || strNE (existing->name, utf8_name))
+    {
+      FAIL ("%s: no true name in codepage 1252, or dst's block not added",
+            what);
+      goto done;
+    }
+  data->u.eed_0.string[0] = (char)0xC6;
+  data->u.eed_0.codepage = CP_ANSI_1251;
+
+  num_objects = dst->num_objects;
+  loglevel = tracelevel;
+  copy = dwg_dynblock_copy_block (dst, &src,
+                                  door->tio.object->tio.BLOCK_HEADER, &error);
+  loglevel = test_loglevel;
+  if (copy == existing && !error && dst->num_objects == num_objects)
+    OK ("%s: matched with dst's block, nothing added", what);
+  else
+    FAIL ("%s: error 0x%x, %u objects added, dst's block %s", what,
+          (unsigned)error, (unsigned)(dst->num_objects - num_objects),
+          copy == existing ? "returned" : "not returned");
 
 done:
   if (dst)
@@ -6951,6 +7155,7 @@ main (int argc, char *argv[])
   error += test_copy_block_matching ();
   error += test_copy_dynblock_params ();
   error += test_copy_block_matching_utf8 ();
+  error += test_copy_block_true_name_codepage ();
   error += test_copy_block_out_of_memory ();
   error += test_copy_block_text_alignment (0);
   error += test_copy_block_text_alignment (1);

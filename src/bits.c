@@ -3361,7 +3361,7 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
                   && (wc1 = dwg_codepage_wc ((Dwg_Codepage)codepage, wc)))
                 {
                   if (wc1 > 0xFF)
-                    *dest++ = wc1 >> 4;
+                    *dest++ = wc1 >> 8;
                   *dest++ = wc1 & 0xff;
                 }
               // is representable as byte
@@ -3398,7 +3398,9 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
               if (is_asian_cp
                   && (wc1 = dwg_codepage_wc ((Dwg_Codepage)codepage, wc)))
                 {
-                  *dest++ = wc1 >> 4;
+                  // a double-byte character, or one byte (half-width kana)
+                  if (wc1 > 0xFF)
+                    *dest++ = wc1 >> 8;
                   *dest++ = wc1 & 0xff;
                 }
               else if (!is_asian_cp

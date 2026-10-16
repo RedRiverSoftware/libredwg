@@ -2796,10 +2796,11 @@ _set_struct_field (Bit_Chain *restrict dat, const Dwg_Object *restrict obj,
               o->num_lines = num_elems;
               LOG_TRACE ("MLINE.num_lines = %d\n", num_elems);
             }
-          if (strEQc (subclass, "DIMASSOC_Ref") && num_elems != 4)
+          // every spec action walks 6 refs (REPEAT_CN (6, ref))
+          if (strEQc (subclass, "DIMASSOC_Ref"))
             {
-              elems = (char *)calloc (MAX (4, num_elems), size_elem);
-              LOG_TRACE ("DIMASSOC num_refs = 4\n");
+              elems = (char *)calloc (MAX (6, num_elems), size_elem);
+              LOG_TRACE ("DIMASSOC num_refs = 6\n");
             }
           else
             elems = num_elems ? (char *)calloc (num_elems, size_elem) : NULL;

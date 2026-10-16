@@ -953,12 +953,34 @@ bit_utf8_to_TV_tests (void)
     pass ();
   else
     fail ("bit_utf8_to_TV %s as CP949", p);
+  /* 시 is BD C3 and 험 C7 E8 in CP949: the high byte of a double-byte
+     character is its code >> 8 (it was >> 4, which gave DC C3 7E E8). */
   p = bit_utf8_to_TV (dest, (const unsigned char *)"시험", sizeof (dest),
                       strlen ("시험"), 0, CP_CP949);
-  if (strEQc (p, "\xdc\xc3\x7e\xe8"))
+  if (strEQc (p, "\xbd\xc3\xc7\xe8"))
     pass ();
   else
     fail ("bit_utf8_to_TV %s as CP949", p);
+  // CP932: モノ, 3-byte UTF-8 each; × (U+00D7), 2-byte UTF-8; ｽ (U+FF7D),
+  // half-width, one byte
+  p = bit_utf8_to_TV (dest, (const unsigned char *)"モノ", sizeof (dest),
+                      strlen ("モノ"), 0, CP_ANSI_932);
+  if (p && strEQc (p, "\x83\x82\x83\x6d"))
+    pass ();
+  else
+    fail ("bit_utf8_to_TV モノ as CP932: %s", p ? p : "NULL");
+  p = bit_utf8_to_TV (dest, (const unsigned char *)"\xc3\x97", sizeof (dest),
+                      2, 0, CP_ANSI_932);
+  if (p && strEQc (p, "\x81\x7e"))
+    pass ();
+  else
+    fail ("bit_utf8_to_TV U+00D7 as CP932: %s", p ? p : "NULL");
+  p = bit_utf8_to_TV (dest, (const unsigned char *)"A\xef\xbd\xbdZ",
+                      sizeof (dest), 5, 0, CP_ANSI_932);
+  if (p && strEQc (p, "A\xbdZ"))
+    pass ();
+  else
+    fail ("bit_utf8_to_TV U+FF7D as CP932: %s", p ? p : "NULL");
   p = bit_utf8_to_TV (dest, (const unsigned char *)"█", sizeof (dest),
                       strlen ("█"), 0, CP_CP869);
   if (strEQc (p, "\xdb"))
