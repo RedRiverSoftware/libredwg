@@ -2728,6 +2728,378 @@ test_vertex_links_read (void)
   return numfailed ();
 }
 
+/* Text given to the add API, in UTF-8 but for two. */
+static const struct
+{
+  const char *utf8;
+  const char *cp1252; // as written in codepage 1252
+} non_ascii[] = {
+  { "caf\xC3\xA9", "caf\xE9" },                 // é at the end
+  { "caf\xC3\xA9 au lait", "caf\xE9 au lait" }, // é in the middle
+  { "10 mm\xC2\xB2", "10 mm\xB2" },             // ²
+  { "30\xC2\xB0 Stra\xC3\x9F" "e", "30\xB0 Stra\xDF" "e" }, // °, ß
+  { "\xE2\x82\xAC 5", "\x80 5" },               // € takes 3 bytes in UTF-8
+  { "\xCE\xB4 x", "\\U+03B4 x" },               // δ isn't in codepage 1252
+  { "caf\xE9", "caf\xE9" }, // not UTF-8: a lone 0xE9 at the end is kept
+  { "a\xE1z", "a\xE1z" },   // not UTF-8: a lone 0xE1 in the middle
+  // "Ã©", whose codepage bytes would read as UTF-8 for "é"
+  { "\xC3\x83\xC2\xA9", "\xC3\xA9" },
+};
+
+/* The non_ascii strings of the XRECORD */
+static const int xrecord_strings[] = { 0, 1, 6 };
+
+/* Whether the TEXTs of dwg after the first skip ones hold the non_ascii
+   strings in turn, in UTF-8 or codepage 1252. Returns the number of TEXTs
+   checked. */
+static unsigned
+check_non_ascii_texts (const char *what, const Dwg_Data *dwg,
+                       const unsigned skip, const int utf8)
+{
+  unsigned n = 0, seen = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      const char *expect, *got;
+      if (obj->fixedtype != DWG_TYPE_TEXT || seen++ < skip)
+        continue;
+      if (n >= (unsigned)ARRAY_SIZE (non_ascii))
+        break;
+      expect = utf8 ? non_ascii[n].utf8 : non_ascii[n].cp1252;
+      got = obj->tio.entity->tio.TEXT->text_value;
+      if (!got || strNE (got, expect))
+        fail ("%s: TEXT %u differs", what, n);
+      n++;
+    }
+  return n;
+}
+
+static void
+check_non_ascii_others (const char *what, const Dwg_Data *dwg,
+                        const BITCODE_RLL xrecord, const int utf8)
+{
+  unsigned layers = 0, attribs = 0, strings = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          const char *name = obj->tio.object->tio.LAYER->name;
+          if (name && strEQ (name, utf8 ? non_ascii[1].utf8
+                                        : non_ascii[1].cp1252))
+            layers++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_ATTRIB)
+        {
+          const Dwg_Entity_ATTRIB *_obj = obj->tio.entity->tio.ATTRIB;
+          if (_obj->text_value
+              && strEQ (_obj->text_value,
+                        utf8 ? non_ascii[0].utf8 : non_ascii[0].cp1252))
+            attribs++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_XRECORD
+               && obj->handle.value == xrecord)
+        {
+          for (Dwg_Resbuf *rbuf = obj->tio.object->tio.XRECORD->xdata; rbuf;
+               rbuf = rbuf->nextrb)
+            {
+              const char *expect;
+              if (rbuf->type != 1
+                  || strings >= (unsigned)ARRAY_SIZE (xrecord_strings))
+                {
+                  fail ("%s: XRECORD item %d", what, rbuf->type);
+                  break;
+                }
+              expect = utf8 ? non_ascii[xrecord_strings[strings]].utf8
+                            : non_ascii[xrecord_strings[strings]].cp1252;
+              if (rbuf->value.str.size != strlen (expect)
+                  || memcmp (rbuf->value.str.u.data, expect,
+                             rbuf->value.str.size))
+                fail ("%s: XRECORD string %u differs", what, strings);
+              strings++;
+            }
+        }
+    }
+  if (layers != 1)
+    fail ("%s: %u layers with the non-ASCII name", what, layers);
+  if (attribs != 1)
+    fail ("%s: %u ATTRIBs with the non-ASCII value", what, attribs);
+  if (strings != (unsigned)ARRAY_SIZE (xrecord_strings))
+    fail ("%s: %u XRECORD strings", what, strings);
+}
+
+/* Non-ASCII text, a layer name, an ATTRIB value and XRECORD strings
+   through the add API, written as r2000 or r2004 and read back. A document
+   built with the add API keeps them in UTF-8 and the writer converts them
+   to the codepage once. Text added to a document read from a file is
+   converted when it is added. Bytes that aren't UTF-8 are kept. */
+static int
+test_non_ascii_text (const Dwg_Version_Type version)
+{
+  const char *vername = version >= R_2004 ? "r2004" : "r2000";
+  char file[40], file2[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Entity_INSERT *ins;
+  Dwg_Object_DICTIONARY *dict;
+  Dwg_Object_XRECORD *xrecord;
+  BITCODE_RLL xrecord_handle;
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const unsigned count = (unsigned)ARRAY_SIZE (non_ascii);
+  int error;
+
+  failed = 0;
+  for (int i = 0; i < ARRAY_SIZE (non_ascii); i++)
+    {
+      const dwg_point_3d pt = { 0.0, 5.0 * i, 0.0 };
+      dwg_add_TEXT (ms, non_ascii[i].utf8, &pt, 2.5);
+    }
+  dwg_add_LAYER (dwg, non_ascii[1].utf8);
+  // found by its name in UTF-8
+  blk = dwg_add_BLOCK_HEADER (dwg, non_ascii[2].utf8);
+  dwg_add_BLOCK (blk, non_ascii[2].utf8);
+  dwg_add_ATTDEF (blk, 1.0, 0, "Value", &o, "TAG1", "x");
+  dwg_add_ENDBLK (blk);
+  ins = dwg_add_INSERT (ms, &o, non_ascii[2].utf8, 1.0, 1.0, 1.0, 0.0);
+  if (!ins)
+    fail ("non_ascii %s: no INSERT of the block named in UTF-8", vername);
+  else
+    dwg_add_ATTRIB (ins, 1.0, 0, &o, "TAG1", non_ascii[0].utf8);
+  if (!dwg_find_tablehandle (dwg, non_ascii[1].utf8, "LAYER"))
+    fail ("non_ascii %s: layer not found by its name in UTF-8", vername);
+  dict = dwg_add_DICTIONARY (dwg, "NONASCII", NULL, 0);
+  xrecord = dwg_add_XRECORD (dict, "Strings");
+  for (int i = 0; i < ARRAY_SIZE (xrecord_strings); i++)
+    {
+      const char *str = non_ascii[xrecord_strings[i]].utf8;
+      dwg_add_XRECORD_string (xrecord, 1, (BITCODE_BS)strlen (str), str);
+    }
+  xrecord_handle = dwg_obj_generic_handlevalue (xrecord);
+
+  snprintf (what, sizeof (what), "non_ascii %s: add API", vername);
+  if (check_non_ascii_texts (what, dwg, 0, 1) != count)
+    fail ("%s: TEXTs missing", what);
+  check_non_ascii_others (what, dwg, xrecord_handle, 1);
+
+  snprintf (file, sizeof (file), "add_non_ascii_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  snprintf (what, sizeof (what), "non_ascii %s: written", vername);
+  if (read.header.codepage != CP_ANSI_1252)
+    fail ("%s: codepage %u", what, (unsigned)read.header.codepage);
+  if (check_non_ascii_texts (what, &read, 0, 0) != count)
+    fail ("%s: TEXTs missing", what);
+  check_non_ascii_others (what, &read, xrecord_handle, 0);
+
+  // the document read keeps the codepage: text added now is converted
+  ms = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (&read));
+  for (int i = 0; i < ARRAY_SIZE (non_ascii); i++)
+    {
+      const dwg_point_3d pt = { 50.0, 5.0 * i, 0.0 };
+      dwg_add_TEXT (ms, non_ascii[i].utf8, &pt, 2.5);
+    }
+  snprintf (what, sizeof (what), "non_ascii %s: added to the read",
+            vername);
+  if (check_non_ascii_texts (what, &read, count, 0) != count)
+    fail ("%s: TEXTs missing", what);
+
+  snprintf (file2, sizeof (file2), "add_non_ascii_%s_2.dwg", vername);
+  unlink (file2);
+  error = dwg_write_file (file2, &read);
+  dwg_free (&read);
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  snprintf (what, sizeof (what), "non_ascii %s: written again", vername);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("%s: dwg_write_file 0x%x", what, error);
+  else if ((error = dwg_read_file (file2, &read)) >= DWG_ERR_CRITICAL)
+    fail ("%s: dwg_read_file 0x%x", what, error);
+  else if (check_non_ascii_texts (what, &read, 0, 0)
+               + check_non_ascii_texts (what, &read, count, 0)
+           != 2 * count)
+    fail ("%s: TEXTs missing", what);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("non_ascii %s", vername);
+      unlink (file);
+      unlink (file2);
+    }
+  return numfailed ();
+}
+
+/* Whether dwg has one LAYER and one BLOCK_HEADER named, and one TEXT
+   holding, the non_ascii strings 1, 8 and 0 in codepage 1252. */
+static void
+check_non_ascii_r11 (const char *what, const Dwg_Data *dwg)
+{
+  const char *layer = non_ascii[1].cp1252;
+  const char *block = non_ascii[8].cp1252;
+  const char *value = non_ascii[0].cp1252;
+  unsigned layers = 0, blocks = 0, texts = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          const char *name = obj->tio.object->tio.LAYER->name;
+          if (name && strEQ (name, layer))
+            layers++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER)
+        {
+          const char *name = obj->tio.object->tio.BLOCK_HEADER->name;
+          if (name && strEQ (name, block))
+            blocks++;
+        }
+      else if (obj->fixedtype == DWG_TYPE_TEXT)
+        {
+          const char *text = obj->tio.entity->tio.TEXT->text_value;
+          if (text && strEQ (text, value))
+            texts++;
+        }
+    }
+  if (layers != 1)
+    fail ("%s: %u layers with the non-ASCII name", what, layers);
+  if (blocks != 1)
+    fail ("%s: %u blocks with the non-ASCII name", what, blocks);
+  if (texts != 1)
+    fail ("%s: %u TEXTs with the non-ASCII value", what, texts);
+}
+
+/* r11: table names are fixed-length text. A layer and a block named
+   outside ASCII and a TEXT, through the add API, written as r11 and read
+   back in codepage 1252. Before r13 a document built with the add API
+   converts text to the codepage when it is added, so the writer leaves it
+   as it is: converted again, the block's name "Ã©" would become "é". */
+static int
+test_non_ascii_text_r11 (void)
+{
+  const char *file = "add_non_ascii_r11.dwg";
+  const char *what = "non_ascii r11";
+  Dwg_Data *dwg = dwg_new_Document (R_11, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  Dwg_Object_BLOCK_HEADER *blk;
+  const dwg_point_3d o = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p = { 10.0, 5.0, 0.0 };
+
+  failed = 0;
+  dwg_add_LAYER (dwg, non_ascii[1].utf8);
+  blk = dwg_add_BLOCK_HEADER (dwg, non_ascii[8].utf8);
+  dwg_add_BLOCK (blk, non_ascii[8].utf8);
+  dwg_add_LINE (blk, &o, &p);
+  dwg_add_ENDBLK (blk);
+  dwg_add_TEXT (ms, non_ascii[0].utf8, &p, 2.5);
+  check_non_ascii_r11 ("non_ascii r11: added", dwg);
+
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  if (read.header.codepage != CP_ANSI_1252)
+    fail ("%s: written with codepage %u", what,
+          (unsigned)read.header.codepage);
+  check_non_ascii_r11 ("non_ascii r11: written", &read);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("%s", what);
+      unlink (file);
+    }
+  return numfailed ();
+}
+
+/* An XRECORD string that becomes longer than INT16_MAX bytes in the
+   codepage is truncated to INT16_MAX, the most the reader takes: 9500
+   characters U+0234, 19000 bytes of UTF-8, are 66500 bytes of \U+0234 in
+   codepage 1252. Read back, the records after it are intact. */
+static int
+test_long_xrecord_string (void)
+{
+  const char *file = "add_long_xrecord_string.dwg";
+  const char *what = "long XRECORD string";
+  const int count = 9500;
+  const size_t len = 2 * (size_t)count;
+  Dwg_Data *dwg = dwg_new_Document (R_2004, 0, tracelevel);
+  Dwg_Data read;
+  Dwg_Object_DICTIONARY *dict;
+  Dwg_Object_XRECORD *xrecord;
+  BITCODE_RLL xrecord_handle;
+  char *str = (char *)malloc (len + 1);
+  const Dwg_Object *obj = NULL;
+  Dwg_Resbuf *rbuf;
+
+  failed = 0;
+  for (int i = 0; i < count; i++)
+    {
+      str[2 * i] = '\xC8';
+      str[(2 * i) + 1] = '\xB4';
+    }
+  str[len] = '\0';
+  dict = dwg_add_DICTIONARY (dwg, "LONGSTRING", NULL, 0);
+  xrecord = dwg_add_XRECORD (dict, "Strings");
+  dwg_add_XRECORD_string (xrecord, 1, (BITCODE_BS)len, str);
+  dwg_add_XRECORD_int16 (xrecord, 70, 1234);
+  dwg_add_XRECORD_string (xrecord, 1, 3, "end");
+  free (str);
+  xrecord_handle = dwg_obj_generic_handlevalue (xrecord);
+
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  for (BITCODE_BL i = 0; i < read.num_objects; i++)
+    if (read.object[i].fixedtype == DWG_TYPE_XRECORD
+        && read.object[i].handle.value == xrecord_handle)
+      obj = &read.object[i];
+  rbuf = obj ? obj->tio.object->tio.XRECORD->xdata : NULL;
+  if (!rbuf || rbuf->type != 1 || rbuf->value.str.size != INT16_MAX
+      || !rbuf->value.str.u.data
+      || memcmp (rbuf->value.str.u.data, "\\U+0234", 7)
+      || memcmp (&rbuf->value.str.u.data[INT16_MAX - 7], "\\U+0234", 7))
+    fail ("%s: first string read back with %d bytes", what,
+          rbuf && rbuf->type == 1 ? (int)rbuf->value.str.size : -1);
+  else if (!(rbuf = rbuf->nextrb) || rbuf->type != 70
+           || rbuf->value.i16 != 1234)
+    fail ("%s: the int16 after it read back as %d", what,
+          rbuf ? (int)rbuf->type : -1);
+  else if (!(rbuf = rbuf->nextrb) || rbuf->type != 1
+           || rbuf->value.str.size != 3 || !rbuf->value.str.u.data
+           || memcmp (rbuf->value.str.u.data, "end", 3))
+    fail ("%s: the last string read back as %d", what,
+          rbuf ? (int)rbuf->type : -1);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      ok ("%s truncated to INT16_MAX, the records after it intact", what);
+      unlink (file);
+    }
+  return numfailed ();
+}
+
+/* r2007+ documents built with the add API keep 8-bit UTF-8 too. */
+static int
+test_non_ascii_text_r2007 (void)
+{
+  Dwg_Data *dwg = dwg_new_Document (R_2007, 0, tracelevel);
+  Dwg_Object_BLOCK_HEADER *ms
+      = dwg_object_to_BLOCK_HEADER (dwg_model_space_object (dwg));
+  const dwg_point_3d pt = { 0.0, 0.0, 0.0 };
+  Dwg_Entity_TEXT *text;
+
+  failed = 0;
+  text = dwg_add_TEXT (ms, "\xE2\x82\xAC 5", &pt, 2.5);
+  if (!text || !text->text_value
+      || strNE (text->text_value, "\xE2\x82\xAC 5"))
+    fail ("non_ascii r2007: TEXT not kept in UTF-8");
+  else
+    ok ("non_ascii r2007");
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+
 static int
 test_names (void)
 {
@@ -2796,6 +3168,7 @@ test_names (void)
   if (!dwg_is_valid_name (dwg, "\xa3\xc1"))
     fail ("dwg_is_valid_name(A3C1) U+FF21 LETTER CP949/r2000");
   dwg_free (dwg);
+  free (dwg);
 
   dwg = dwg_new_Document (R_2007, 0, tracelevel);
   dwg->header.codepage = CP_ANSI_1253; // ANSI Greek
@@ -2834,6 +3207,7 @@ test_names (void)
     fail ("dwg_is_valid_name (\"0\") ANSI_949/r2007");
 
   dwg_free (dwg);
+  free (dwg);
   if (!numfailed ())
     ok ("names");
   return numfailed ();
@@ -3149,6 +3523,336 @@ test_block_control_refresh (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* A layer's settings: frozen, off, frozen in new viewports, locked,
+   plotted, and the lineweight index (31 Default, 11 0.50 mm, 0 0.00 mm). */
+typedef struct
+{
+  const char *name;
+  BITCODE_B frozen, off, frozen_in_new, locked, plotflag;
+  BITCODE_RC linewt;
+} Layer_Flags;
+
+/* The flag0 an r2000+ DWG file stores for the settings. */
+static BITCODE_BS
+layer_flags_flag0 (const Layer_Flags *f)
+{
+  return (BITCODE_BS)((f->frozen ? 1 : 0) | (f->off ? 2 : 0)
+                      | (f->frozen_in_new ? 4 : 0) | (f->locked ? 8 : 0)
+                      | (f->plotflag ? 16 : 0) | ((f->linewt & 0x1f) << 5));
+}
+
+static Dwg_Object_LAYER *
+find_layer (Dwg_Data *dwg, const char *name)
+{
+  Bit_Chain dat = { 0 };
+  dat.version = dwg->header.version;
+  dat.from_version = dwg->header.from_version;
+  dat.opts = dwg->opts;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer = obj->tio.object->tio.LAYER;
+          if (layer->name && bit_eq_T (&dat, layer->name, name))
+            return layer;
+        }
+    }
+  return NULL;
+}
+
+/* The layer f names has f's settings, flag0 included, and with
+   check_colour, colour 7. */
+static void
+check_layer_flags (const char *what, Dwg_Data *dwg, const Layer_Flags *f,
+                   const int check_colour)
+{
+  Dwg_Object_LAYER *layer = find_layer (dwg, f->name);
+  const BITCODE_BS flag0 = layer_flags_flag0 (f);
+  if (!layer)
+    {
+      fail ("%s: no layer %s", what, f->name);
+      return;
+    }
+  if (layer->flag0 == flag0 && layer->frozen == f->frozen
+      && layer->off == f->off && layer->frozen_in_new == f->frozen_in_new
+      && layer->locked == f->locked && layer->plotflag == f->plotflag
+      && layer->linewt == f->linewt
+      && (!check_colour || layer->color.index == 7))
+    ok ("%s: layer %s flag0 0x%x%s", what, f->name, flag0,
+        check_colour ? ", colour 7" : "");
+  else
+    fail ("%s: layer %s flag0 0x%x frozen %d off %d frozen_in_new %d "
+          "locked %d plotflag %d linewt %d colour %d, expected flag0 0x%x%s",
+          what, f->name, layer->flag0, layer->frozen, layer->off,
+          layer->frozen_in_new, layer->locked, layer->plotflag, layer->linewt,
+          layer->color.index, flag0, check_colour ? ", colour 7" : "");
+}
+
+/* Layers of a new document keep their settings through a DWG write and
+   read: layer 0 and a layer from dwg_add_LAYER are plotted with the Default
+   lineweight and colour 7, as AutoCAD makes a layer (colour 0 is ByBlock,
+   which AUDIT reports as out of range on a layer), and settings changed
+   after dwg_add_LAYER are written. */
+static int
+test_layer_flags (const Dwg_Version_Type version)
+{
+  static const Layer_Flags layers[] = {
+    { "0", 0, 0, 0, 0, 1, 31 },           { "Default", 0, 0, 0, 0, 1, 31 },
+    { "Frozen", 1, 0, 0, 0, 1, 31 },      { "Off", 0, 1, 0, 0, 1, 31 },
+    { "FrozenInNew", 0, 0, 1, 0, 1, 31 }, { "Locked", 0, 0, 0, 1, 1, 31 },
+    { "NoPlot", 0, 0, 0, 0, 0, 31 },      { "Thick", 0, 0, 0, 0, 1, 11 },
+    { "All", 1, 1, 1, 1, 0, 0 },
+  };
+  const char *vername = dwg_version_type (version);
+  char file[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+
+  failed = 0;
+  for (int i = 1; i < ARRAY_SIZE (layers); i++)
+    {
+      Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, layers[i].name);
+      if (!layer)
+        {
+          fail ("layer_flags %s: dwg_add_LAYER %s failed", vername,
+                layers[i].name);
+          continue;
+        }
+      layer->frozen = layers[i].frozen;
+      layer->off = layers[i].off;
+      layer->frozen_in_new = layers[i].frozen_in_new;
+      layer->locked = layers[i].locked;
+      layer->plotflag = layers[i].plotflag;
+      layer->linewt = layers[i].linewt;
+    }
+  // what dwg_add_LAYER sets, before anything is written
+  snprintf (what, sizeof (what), "layer_flags %s: new document", vername);
+  check_layer_flags (what, dwg, &layers[0], 1);
+  check_layer_flags (what, dwg, &layers[1], 1);
+
+  snprintf (file, sizeof (file), "add_layers_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  snprintf (what, sizeof (what), "layer_flags %s: read back", vername);
+  for (int i = 0; i < ARRAY_SIZE (layers); i++)
+    check_layer_flags (what, &read, &layers[i], 1);
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* The layer named name has colour 7. */
+static void
+check_layer_colour (const char *what, Dwg_Data *dwg, const char *name)
+{
+  Dwg_Object_LAYER *layer = find_layer (dwg, name);
+  if (!layer)
+    fail ("%s: no layer %s", what, name);
+  else if (layer->color.index == 7)
+    ok ("%s: layer %s colour 7", what, name);
+  else
+    fail ("%s: layer %s colour %d, expected 7", what, name,
+          layer->color.index);
+}
+
+/* Before r2000 too, layer 0 and a layer from dwg_add_LAYER have colour 7,
+   in the document and written and read back. */
+static int
+test_layer_colour (const Dwg_Version_Type version)
+{
+  const char *vername = dwg_version_type (version);
+  char file[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+
+  failed = 0;
+  if (!dwg_add_LAYER (dwg, "L1"))
+    fail ("layer_colour %s: dwg_add_LAYER L1 failed", vername);
+  snprintf (what, sizeof (what), "layer_colour %s: new document", vername);
+  check_layer_colour (what, dwg, "0");
+  check_layer_colour (what, dwg, "L1");
+
+  snprintf (file, sizeof (file), "add_layer_colour_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  if (read.header.version != version)
+    fail ("layer_colour %s: read back version %s", vername,
+          dwg_version_type (read.header.version));
+  snprintf (what, sizeof (what), "layer_colour %s: read back", vername);
+  check_layer_colour (what, &read, "0");
+  check_layer_colour (what, &read, "L1");
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+// dwg_write_json () is in out_json.c, which needs DXF
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
+/* A document imported from JSON writes a layer's flag0 as the JSON has it:
+   the JSON holds flag0 and the lineweight, not the other fields. */
+static int
+test_layer_flags_json (void)
+{
+  static const Layer_Flags flags = { "J", 1, 0, 0, 1, 0, 11 };
+  const char *jsonfile = "add_layers.json";
+  const char *dwgfile = "add_layers_json.dwg";
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, flags.name);
+  Dwg_Data imported, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  // the JSON writer takes the settings from flag0
+  layer->flag0 = layer_flags_flag0 (&flags);
+  dat.version = dat.from_version = dwg->header.version;
+  dat.codepage = dwg->header.codepage;
+  dat.opts = dwg->opts;
+  dat.fh = fopen (jsonfile, "wb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags json: cannot write %s", jsonfile);
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  error = dwg_write_json (&dat, dwg);
+  fclose (dat.fh);
+  dwg_free (dwg);
+  free (dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_write_json 0x%x", error);
+      return numfailed ();
+    }
+
+  memset (&dat, 0, sizeof (dat));
+  memset (&imported, 0, sizeof (imported));
+  imported.opts = tracelevel;
+  dat.fh = fopen (jsonfile, "rb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags json: cannot read %s", jsonfile);
+      return numfailed ();
+    }
+  error = dwg_read_json (&dat, &imported);
+  fclose (dat.fh);
+  free (dat.chain);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_read_json 0x%x", error);
+      dwg_free (&imported);
+      return numfailed ();
+    }
+  imported.header.version = imported.header.from_version;
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &imported);
+  dwg_free (&imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_write_file 0x%x", error);
+      return numfailed ();
+    }
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  error = dwg_read_file (dwgfile, &read);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("layer_flags json: dwg_read_file 0x%x", error);
+  else
+    check_layer_flags ("layer_flags json: read back", &read, &flags, 1);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      unlink (jsonfile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+#endif
+
+#ifndef DISABLE_DXF
+/* A document imported from DXF takes a layer's frozen, frozen in new
+   viewports and locked from DXF 70 and off from a negative colour (62), and
+   is plotted. The colour is written as imported, negative for off. */
+static int
+test_layer_flags_dxf (void)
+{
+  static const Layer_Flags flags = { "D", 1, 1, 1, 1, 1, 31 };
+  const char *dxffile = "add_layers.dxf";
+  const char *dwgfile = "add_layers_dxf.dwg";
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, flags.name);
+  Dwg_Data imported, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  // the DXF writer takes 70 from flag, the sign of 62 from flag0
+  layer->flag = 1 | 2 | 4;
+  layer->flag0 = layer_flags_flag0 (&flags);
+  dat.version = dat.from_version = dwg->header.version;
+  dat.codepage = dwg->header.codepage;
+  dat.opts = dwg->opts;
+  unlink (dxffile);
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags dxf: cannot write %s", dxffile);
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  error = dwg_write_dxf (&dat, dwg);
+  fclose (dat.fh);
+  dwg_free (dwg);
+  free (dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dwg_write_dxf 0x%x", error);
+      return numfailed ();
+    }
+
+  // as dxf2dwg
+  memset (&imported, 0, sizeof (imported));
+  imported.opts = tracelevel;
+  imported.header.version = R_2000;
+  error = dxf_read_file (dxffile, &imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dxf_read_file 0x%x", error);
+      dwg_free (&imported);
+      return numfailed ();
+    }
+  if (imported.header.from_version == R_INVALID)
+    imported.header.from_version = imported.header.version;
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &imported);
+  dwg_free (&imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dwg_write_file 0x%x", error);
+      return numfailed ();
+    }
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  error = dwg_read_file (dwgfile, &read);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("layer_flags dxf: dwg_read_file 0x%x", error);
+  else
+    check_layer_flags ("layer_flags dxf: read back", &read, &flags, 0);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      unlink (dxffile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -3199,6 +3903,18 @@ main (int argc, char *argv[])
 #endif
   error += test_entity_count_read ();
   error += test_entity_count_r11_unknown ();
+  error += test_layer_flags (R_2000);
+  error += test_layer_flags (R_2004);
+  error += test_layer_flags (R_2010);
+  error += test_layer_flags (R_2018);
+  error += test_layer_colour (R_11);
+  error += test_layer_colour (R_14);
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
+  error += test_layer_flags_json ();
+#endif
+#ifndef DISABLE_DXF
+  error += test_layer_flags_dxf ();
+#endif
   error += test_attrib_links_autocad ("example_2000.dwg");
   error += test_attrib_links_autocad ("example_2004.dwg");
   error += test_attrib_links (R_2000);
@@ -3213,6 +3929,11 @@ main (int argc, char *argv[])
   error += test_attrib_r11 (R_10, 1);
   error += test_attrib_r11 (R_11, 2);
   error += test_vertex_links_read ();
+  error += test_non_ascii_text (R_2000);
+  error += test_non_ascii_text (R_2004);
+  error += test_non_ascii_text_r11 ();
+  error += test_long_xrecord_string ();
+  error += test_non_ascii_text_r2007 ();
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

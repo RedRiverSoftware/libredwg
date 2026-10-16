@@ -3389,13 +3389,34 @@ cleanup:
    document: about 19000 allocations to fail, each in a copy of its own. */
 #define OUT_OF_MEMORY_DWG "example_2000.dwg"
 
+/* The copies in dst, from index first on, that have no data but keep a
+   name of dst's own: dwg_free_object frees nothing of an object without
+   data, so freeing dst would leak it. */
+static unsigned
+named_without_data (const Dwg_Data *dst, const BITCODE_BL first)
+{
+  unsigned n = 0;
+  for (BITCODE_BL i = first; i < dst->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dst->object[i];
+      if (obj->tio.object)
+        continue;
+      if (((dst->opts & DWG_OPTS_IN) && obj->dxfname)
+          || ((dst->opts & DWG_OPTS_INJSON) && obj->name))
+        n++;
+    }
+  return n;
+}
+
 /* Copies objects of src into a new document, then frees it: an empty
    document like src, or one the add API makes, whose names the copy
    duplicates. Only copy.c's allocations during the copy count, from
-   alloc_calls 0 on. Returns the copy's error. */
+   alloc_calls 0 on. Returns the copy's error, and in *namedp the copies
+   named_without_data finds. */
 static int
 copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
-               const BITCODE_BL num_handles, const int add_api)
+               const BITCODE_BL num_handles, const int add_api,
+               unsigned *namedp)
 {
   Dwg_Data *dst = add_api ? dwg_new_Document (src->header.from_version, 0, 0)
                           : new_document_like (src);
@@ -3404,15 +3425,18 @@ copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
   BITCODE_BL num_unresolved = 0;
   int error;
 
+  *namedp = 0;
   if (!dst || !map)
     error = DWG_ERR_INTERNALERROR;
   else
     {
+      const BITCODE_BL first = dst->num_objects;
       alloc_calls = 0;
       alloc_counting = 1;
       error = dwg_copy_objects (dst, src, handles, num_handles, map,
                                 &unresolved, &num_unresolved);
       alloc_counting = 0;
+      *namedp = named_without_data (dst, first);
     }
   free (unresolved);
   dwg_copy_map_free (map);
@@ -3427,8 +3451,10 @@ copy_and_free (Dwg_Data *src, const BITCODE_RLL *handles,
 /* Each allocation copy.c makes, failed in turn, as it copies the objects
    of the drawing into a new document: the copy returns DWG_ERR_OUTOFMEM,
    and leaves the new document with nothing of the source's, so that
-   freeing it leaves the source as it was read. Under ASan a double free or
-   a use after free shows here too. The allocations of the functions copy.c
+   freeing it leaves the source as it was read, and no copy without data
+   that keeps a name of the new document's, which freeing it would leak.
+   Under ASan a double free or a use after free shows here too, and under
+   LeakSanitizer any other leak. The allocations of the functions copy.c
    calls in other files (dwg_add_object, dwg_add_handleref, the hash's)
    aren't failed. add_api: into a document made with the add API, with the
    model space entities only; else into an empty one, with every object. */
@@ -3440,7 +3466,8 @@ test_out_of_memory (const char *name, const int add_api)
   BITCODE_RLL *handles = NULL;
   BITCODE_BL num_handles = 0;
   long allocations = 0, first_wrong = 0;
-  unsigned not_made = 0, wrong = 0;
+  unsigned not_made = 0, wrong = 0, named = 0;
+  unsigned long named_total = 0;
   int error, first_error = 0;
   Compare c;
 
@@ -3477,7 +3504,8 @@ test_out_of_memory (const char *name, const int add_api)
 
   // a copy that fails no allocation counts them
   alloc_countdown = 0;
-  error = copy_and_free (&src, handles, num_handles, add_api);
+  error = copy_and_free (&src, handles, num_handles, add_api, &named);
+  named_total = named;
   allocations = alloc_calls;
   if (error >= DWG_ERR_CRITICAL || allocations <= 0)
     {
@@ -3491,7 +3519,8 @@ test_out_of_memory (const char *name, const int add_api)
     {
       alloc_countdown = n;
       alloc_failed = 0;
-      error = copy_and_free (&src, handles, num_handles, add_api);
+      error = copy_and_free (&src, handles, num_handles, add_api, &named);
+      named_total += named;
       alloc_countdown = 0;
       if (!alloc_failed)
         not_made++;
@@ -3511,6 +3540,13 @@ test_out_of_memory (const char *name, const int add_api)
           "DWG_ERR_OUTOFMEM (allocation %ld first: error 0x%x)",
           what, allocations, not_made, wrong, first_wrong,
           (unsigned)first_error);
+  if (!named_total)
+    OK ("%s: no copy left without data keeps a name of the new document's",
+        what);
+  else
+    FAIL ("%s: %lu copies left without data keep a name of the new "
+          "document's, which freeing it leaks",
+          what, named_total);
 
   // the source as read
   if (read_dwg (path, &fresh) >= DWG_ERR_CRITICAL)

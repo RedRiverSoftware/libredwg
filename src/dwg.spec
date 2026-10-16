@@ -617,7 +617,8 @@ DWG_ENTITY (BLOCK)
   }
   VERSIONS (R_2_0b, R_11) {
     FIELD_2RD (base_pt, 10);
-    if (R11OPTS (2))
+    // the DXF importer sets it without the opts bit
+    if (R11OPTS (2) || IF_IS_FREE)
       FIELD_TV (xref_pname, 1);
     if (R11OPTS (4)) {
       FIELD_TV (name, 2);
@@ -707,6 +708,9 @@ DWG_ENTITY (BLOCK)
   SINCE (R_13b1) {
     BLOCK_NAME (name, 2) // special pre-R13 naming rules
     COMMON_ENTITY_HANDLE_DATA;
+    FREE { // the DXF importer sets it
+      FIELD_TV (xref_pname, 1);
+    }
   }
 #endif
 
@@ -2665,6 +2669,11 @@ DWG_ENTITY (SPLINE)
     FIELD_3BD (end_tan_vec, 13);
     FIELD_BL (num_fit_pts, 0);
     FIELD_3DPOINT_VECTOR (fit_pts, num_fit_pts, 11);
+#ifdef IS_FREE
+    // the DXF importer sets them also for a fit-point spline
+    FIELD_VECTOR (knots, BD, num_knots, 40);
+    END_REPEAT (ctrl_pts);
+#endif
   }
 
   COMMON_ENTITY_HANDLE_DATA;
@@ -2975,6 +2984,9 @@ DWG_ENTITY (MTEXT)
               }
           }
       }
+  }
+  FREE { // the DXF importer sets them for any version and column type
+    FIELD_VECTOR (column_heights, BD, num_column_heights, 46);
   }
   COMMON_ENTITY_HANDLE_DATA;
 DWG_ENTITY_END
@@ -3321,8 +3333,11 @@ DWG_TABLE (LAYER)
     // separate DXF flag 70 from the internal DWG flag0 bitmask
     int flag0;
     ENCODER {
-      // with json we only use flag0, with DXF we use flag
-      if (dwg->opts & DWG_OPTS_INDXF) {
+      // A JSON import writes flag0 as it is. A DXF import takes the fields
+      // from flag (70) and the colour sign, plotted. A document read from a
+      // DWG file (no import flag) and one built with the add API (both
+      // import flags) take flag0 from the fields.
+      if ((dwg->opts & DWG_OPTS_IN) == DWG_OPTS_INDXF) {
         FIELD_VALUE (off)           = FIELD_VALUE (color.index) < 0;
         FIELD_VALUE (frozen)        = FIELD_VALUE (flag) & 1;
         FIELD_VALUE (frozen_in_new) = FIELD_VALUE (flag) & 2;
@@ -3330,7 +3345,7 @@ DWG_TABLE (LAYER)
         FIELD_VALUE (is_xref_ref)   = FIELD_VALUE (flag) & 64;
         FIELD_VALUE (plotflag) = 1;
       }
-      if (!(dwg->opts & DWG_OPTS_INJSON))
+      if ((dwg->opts & DWG_OPTS_IN) != DWG_OPTS_INJSON)
         FIELD_VALUE (flag0) = (FIELD_VALUE (frozen) ? 1 : 0) +
           (FIELD_VALUE (off) ? 2 : 0) +
           (FIELD_VALUE (frozen_in_new) ? 4 : 0) +
@@ -3707,6 +3722,9 @@ DWG_TABLE (LTYPE)
       }
     } // r2007
   } // r13
+  FREE { // the DXF importer sets it for every version
+    FIELD_BINARY (strings_area, 256, 0);
+  }
 
   SINCE (R_13b1) {
     START_OBJECT_HANDLE_STREAM;
