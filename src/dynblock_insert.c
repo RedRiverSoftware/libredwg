@@ -785,7 +785,7 @@ start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
   across = (pt->y - align->y) * c - (pt->x - align->x) * s;
   // AutoCAD's width factor is positive; the add API leaves it 0
   width_factor = attdef->width_factor > 0.0 ? attdef->width_factor : 1.0;
-  along = width * fabs (attdef->height) * p->scale * width_factor;
+  along = width * attdef->height * p->scale * width_factor;
   if (h != 2)
     along /= 2.0;
   if (!(attdef->generation & 2))
