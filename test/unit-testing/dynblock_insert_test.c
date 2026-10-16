@@ -1140,6 +1140,31 @@ test_value_sets (Dwg_Data *dst, BITCODE_RLL map[][2], const unsigned num_map)
   v.value = -M_PI / 6;
   failures += test_accepted (dst, toilet, 1.0, &v, 1,
                              "a rotation value on its increment, below 0");
+  // with limits pi/2 to 2 pi and the Toilet's Angle made pi, 2 pi is at
+  // the maximum, though it is 0 reduced, and pi/4 is below the minimum
+  angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  {
+    Dwg_Object_BLOCKROTATIONPARAMETER *_angle
+        = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+    const BITCODE_3BD endpt = _angle->def_endpt;
+    _angle->def_endpt.x = 2.0 * _angle->def_basept.x
+                          - _angle->def_base_angle_pt.x;
+    _angle->def_endpt.y = 2.0 * _angle->def_basept.y
+                          - _angle->def_base_angle_pt.y;
+    vs = &_angle->angle_value_set;
+    vs->flags = DWG_DYNPARAM_HAS_MINIMUM | DWG_DYNPARAM_HAS_MAXIMUM;
+    vs->minimum = M_PI / 2;
+    vs->maximum = 2.0 * M_PI;
+    v.value = 2.0 * M_PI;
+    failures += test_accepted (dst, toilet, 1.0, &v, 1,
+                               "a rotation value at its maximum of 2 pi");
+    v.value = M_PI / 4;
+    failures += test_refusal (dst, model_space (dst),
+                              block_header (dst, toilet), &pt, 1.0, 0.0, &v,
+                              1, NULL, 0, REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                              "a rotation value below its minimum");
+    _angle->def_endpt = endpt;
+  }
   angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
   angle->tio.object->tio.BLOCKROTATIONPARAMETER->angle_value_set = kept;
   return failures;
@@ -3642,6 +3667,68 @@ is_at (const BITCODE_3BD *pt, const double x, const double y, const double z)
          && fabs (pt->z - z) <= RECORD_TOLERANCE;
 }
 
+/* An ATTDEF at x -2^90 that two of the Window's stretch actions move, by
+   2^90 and then by 2^32 ('Stretch Divider' made to take 2^-58 of the
+   change), at Window Width 2^90 + 36: it ends at 2^32, while the sum of
+   the moves rounds to 2^90 and would put it at 0. Placed at a scale of
+   1e300 it is beyond what a double holds, which is refused before
+   anything is added. */
+static int
+test_attdef_moved_twice (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, WINDOW, &def_h);
+  const BITCODE_3BD origin = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d at = { -ldexp (1.0, 90), 10.0, 0.0 };
+  const BITCODE_BL point = 0;
+  Dwg_Object *width, *obj;
+  Dwg_Object_BLOCKSTRETCHACTION *stretch, *divider;
+  Dwg_Entity_ATTDEF *attdef;
+  BITCODE_RLL attdef_h;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  attdef = dst ? dwg_add_ATTDEF (block_header (dst, def_h), 2.5, 0, "Mark",
+                                 &at, "MARK", "M")
+               : NULL;
+  loglevel = test_loglevel;
+  width = attdef ? named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER,
+                               "winwidth")
+                 : NULL;
+  if (!width)
+    {
+      FAIL ("ATTDEF moved twice: adding an ATTDEF to the Window failed");
+      free_document (dst);
+      return 1;
+    }
+  attdef_h = handle_of (dst, attdef);
+  width->tio.object->tio.BLOCKLINEARPARAMETER->value_set.flags = 0;
+  obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION, "Stretch Width");
+  stretch = obj ? obj->tio.object->tio.BLOCKSTRETCHACTION : NULL;
+  obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
+                    "Stretch Divider");
+  divider = obj ? obj->tio.object->tio.BLOCKSTRETCHACTION : NULL;
+  if (!stretch || !divider
+      || !add_dep (dst, &stretch->deps, &stretch->num_deps, attdef_h)
+      || !add_stretch_entity (dst, stretch, attdef_h, &point, 1)
+      || !add_dep (dst, &divider->deps, &divider->num_deps, attdef_h)
+      || !add_stretch_entity (dst, divider, attdef_h, &point, 1))
+    {
+      FAIL ("ATTDEF moved twice: adding it to the stretch actions failed");
+      free_document (dst);
+      return 1;
+    }
+  divider->action_offset_x = ldexp (1.0, -58);
+  v.name = (char *)"Window Width";
+  v.value = ldexp (1.0, 90) + 36.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &origin, 1e300, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "an ATTDEF moved twice to beyond a double");
+  free_document (dst);
+  return failures;
+}
+
 /* Parameters the fixture's actions don't move, made to: the Door's
    'Stretch' moving its visibility parameter's point (index 0), and an
    ATTDEF added to the Window in 'Stretch Width''s frame and selection.
@@ -3827,6 +3914,7 @@ test_moved_parameters (Dwg_Data *src)
       failures++;
     }
   free_document (dst);
+  failures += test_attdef_moved_twice (src);
   return failures;
 }
 

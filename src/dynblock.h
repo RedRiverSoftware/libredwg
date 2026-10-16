@@ -34,20 +34,23 @@ typedef struct _dynblock_node_state
   BITCODE_3BD points[2];
 } Dynblock_Node_State;
 
-/* The change of the position of one of the definition's ATTDEFs, which
-   the evaluation moves whole. */
-typedef struct _dynblock_entity_delta
+/* One of the definition's ATTDEFs that the evaluation moves whole: its
+   insertion and alignment points after the moves, added to them one after
+   another as the evaluation adds them, so that they are the copy's to the
+   last bit. */
+typedef struct _dynblock_attdef_place
 {
   BITCODE_RLL entity;
-  BITCODE_3BD delta;
-} Dynblock_Entity_Delta;
+  BITCODE_2DPOINT ins_pt;
+  BITCODE_2DPOINT alignment_pt;
+} Dynblock_Attdef_Place;
 
 typedef struct _dynblock_state
 {
   Dynblock_Node_State *nodes; /* each parameter with points, in graph order */
   BITCODE_BL num_nodes;
-  Dynblock_Entity_Delta *deltas; /* the ATTDEFs that move */
-  BITCODE_BL num_deltas;
+  Dynblock_Attdef_Place *attdefs; /* the ATTDEFs that move */
+  BITCODE_BL num_attdefs;
 } Dynblock_State;
 
 /* Plans the evaluation of definition def_handle at values as

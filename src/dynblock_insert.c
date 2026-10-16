@@ -152,7 +152,7 @@ typedef struct _dynblock_placement
   BITCODE_BL *state;
   int at_defaults;
   /* for a representation block, the parameters' points the evaluation
-     gives, and the moves of the ATTDEFs */
+     gives, and where it moves the ATTDEFs */
   Dynblock_State evaluated;
   char reason[REASON_SIZE];
 } Dynblock_Placement;
@@ -515,13 +515,38 @@ normal_angle (const double angle)
   return a < 2.0 * M_PI ? a : 0.0;
 }
 
+/* Whether value is within the limits of dp's value set and on its
+   increment, counted from its minimum or 0, with tolerance eps. */
+static int
+is_within_value_set (const Dwg_DynParam *dp, const double value,
+                     const double eps)
+{
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM)
+      && value < dp->minimum - eps)
+    return 0;
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_MAXIMUM)
+      && value > dp->maximum + eps)
+    return 0;
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_INCREMENT) && dp->increment > 0.0)
+    {
+      const double base
+          = dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM ? dp->minimum : 0.0;
+      const double steps = (value - base) / dp->increment;
+      if (fabs (steps - round (steps)) * dp->increment > eps)
+        return 0;
+    }
+  return 1;
+}
+
 /* Whether value, of a LINEAR or ROTATION property dp other than its
    definition's (an angle reduced to [0, 2 pi)), is one dp's value set
    allows: in its list, or with no list within its limits and on its
-   increment, counted from its minimum or 0. AutoCAD moves a value it
-   doesn't allow to one it does on its next edit of the placement. The
-   tolerance is VALUE_EPSILON, or for a huge value a few units of its last
-   place, so that it stays far below any spacing a double can hold there. */
+   increment, counted from its minimum or 0; an angle when one a whole
+   turn away is, as an angle of 0 is at a maximum of 2 pi. AutoCAD moves a
+   value it doesn't allow to one it does on its next edit of the placement.
+   The tolerance is VALUE_EPSILON, or for a huge value a few units of its
+   last place, so that it stays far below any spacing a double can hold
+   there. */
 static int
 is_allowed_value (const Dwg_DynParam *dp, const double value)
 {
@@ -541,21 +566,11 @@ is_allowed_value (const Dwg_DynParam *dp, const double value)
         }
       return 0;
     }
-  if ((dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM)
-      && value < dp->minimum - eps)
-    return 0;
-  if ((dp->value_flags & DWG_DYNPARAM_HAS_MAXIMUM)
-      && value > dp->maximum + eps)
-    return 0;
-  if ((dp->value_flags & DWG_DYNPARAM_HAS_INCREMENT) && dp->increment > 0.0)
-    {
-      const double base
-          = dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM ? dp->minimum : 0.0;
-      const double steps = (value - base) / dp->increment;
-      if (fabs (steps - round (steps)) * dp->increment > eps)
-        return 0;
-    }
-  return 1;
+  if (dp->kind == DWG_DYNPARAM_ROTATION)
+    return is_within_value_set (dp, value, eps)
+           || is_within_value_set (dp, value + 2.0 * M_PI, eps)
+           || is_within_value_set (dp, value - 2.0 * M_PI, eps);
+  return is_within_value_set (dp, value, eps);
 }
 
 /* Matches values to the definition's properties into p->state, and decides
@@ -800,37 +815,43 @@ place_point (const Dynblock_Placement *p, const BITCODE_3BD *base,
 }
 
 /* The insertion and alignment points of attdef's ATTRIB, placed by p in
-   the block with base point base, after a move of attdef in the block by
-   the x and y of delta. Text left-aligned on the baseline doesn't use its
-   alignment point: AutoCAD keeps it (0,0), which dwg_set_dataflags ()
+   the block with base point base, from attdef's points in the block,
+   ins_pt and alignment_pt. Text left-aligned on the baseline doesn't use
+   its alignment point: AutoCAD keeps it (0,0), which dwg_set_dataflags ()
    leaves out (dataflags 0x02). */
 static void
 place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
-              const Dwg_Entity_ATTDEF *attdef, const BITCODE_3BD *delta,
-              BITCODE_3BD *pt, BITCODE_3BD *align)
+              const Dwg_Entity_ATTDEF *attdef, const BITCODE_2DPOINT *ins_pt,
+              const BITCODE_2DPOINT *alignment_pt, BITCODE_3BD *pt,
+              BITCODE_3BD *align)
 {
-  place_point (p, base, attdef->ins_pt.x + delta->x,
-               attdef->ins_pt.y + delta->y, attdef->elevation, pt);
+  place_point (p, base, ins_pt->x, ins_pt->y, attdef->elevation, pt);
   if (!attdef->horiz_alignment && !attdef->vert_alignment)
     {
       align->x = align->y = 0.0;
       align->z = pt->z;
     }
   else
-    place_point (p, base, attdef->alignment_pt.x + delta->x,
-                 attdef->alignment_pt.y + delta->y, attdef->elevation, align);
+    place_point (p, base, alignment_pt->x, alignment_pt->y,
+                 attdef->elevation, align);
 }
 
-/* How far the evaluation moves the definition's ATTDEF attdef: the
-   representation block's copy of it is there. */
-static BITCODE_3BD
-attdef_delta (const Dynblock_Placement *p, const BITCODE_RLL attdef)
+/* Where the evaluation moves the definition's ATTDEF attdef, its
+   representation block's copy: the moved points into *ins_ptp and
+   *alignment_ptp, or attdef's own when it doesn't move it. */
+static void
+attdef_place (const Dynblock_Placement *p, const BITCODE_RLL handle,
+              const Dwg_Entity_ATTDEF *attdef, BITCODE_2DPOINT *ins_ptp,
+              BITCODE_2DPOINT *alignment_ptp)
 {
-  BITCODE_3BD none = { 0.0, 0.0, 0.0 };
-  for (BITCODE_BL i = 0; i < p->evaluated.num_deltas; i++)
-    if (p->evaluated.deltas[i].entity == attdef)
-      return p->evaluated.deltas[i].delta;
-  return none;
+  *ins_ptp = attdef->ins_pt;
+  *alignment_ptp = attdef->alignment_pt;
+  for (BITCODE_BL i = 0; i < p->evaluated.num_attdefs; i++)
+    if (p->evaluated.attdefs[i].entity == handle)
+      {
+        *ins_ptp = p->evaluated.attdefs[i].ins_pt;
+        *alignment_ptp = p->evaluated.attdefs[i].alignment_pt;
+      }
 }
 
 /* Checks atts against def's attribute definitions: each tag names one, is
@@ -850,7 +871,8 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
     {
       const Dwg_Object *ent = ref_object (dwg, def->entities[i]);
       const Dwg_Entity_ATTDEF *attdef;
-      BITCODE_3BD pt, align, delta;
+      BITCODE_3BD pt, align;
+      BITCODE_2DPOINT ins_pt, alignment_pt;
       char *tag;
       int valid;
       if (!is_placed_attdef (ent))
@@ -865,8 +887,9 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                       ent->handle.value);
           return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
-      delta = attdef_delta (p, ent->handle.value);
-      place_attdef (p, &def->base_pt, attdef, &delta, &pt, &align);
+      attdef_place (p, ent->handle.value, attdef, &ins_pt, &alignment_pt);
+      place_attdef (p, &def->base_pt, attdef, &ins_pt, &alignment_pt, &pt,
+                    &align);
       if (!isfinite (pt.x) || !isfinite (pt.y) || !isfinite (pt.z)
           || !isfinite (align.x) || !isfinite (align.y)
           || !isfinite (attdef->height * p->scale)
@@ -1561,7 +1584,6 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       = etags ? appid_handle (dwg, "AcDbBlockRepETag") : 0;
   const Dwg_Object_BLOCK_HEADER *blk = block_of (dwg, p->block);
   const BITCODE_BL num_owned = blk->num_owned;
-  static const BITCODE_3BD no_delta = { 0.0, 0.0, 0.0 };
   BITCODE_RLL *attdefs;
   BITCODE_3BD base = blk->base_pt;
   BITCODE_BL n = 0;
@@ -1603,7 +1625,8 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
         if (strEQ (atts[k].tag, tag))
           value = atts[k].value;
       // the block's ATTDEFs are already where the evaluation put them
-      place_attdef (p, &base, attdef, &no_delta, &pt, &align);
+      place_attdef (p, &base, attdef, &attdef->ins_pt, &attdef->alignment_pt,
+                    &pt, &align);
       if (etags)
         has_etag = etag_index (dwg, defobj, &etag_value, &etag);
       ins.x = pt.x;

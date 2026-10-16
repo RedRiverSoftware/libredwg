@@ -4201,32 +4201,47 @@ dynblock_free_state (Dynblock_State *state)
   if (!state)
     return;
   free (state->nodes);
-  free (state->deltas);
+  free (state->attdefs);
   memset (state, 0, sizeof (*state));
 }
 
-/* Adds the whole moves of the definition's ATTDEFs in plan to state, one
-   delta for each ATTDEF. */
+/* Adds to state the points of each of the definition's ATTDEFs that plan
+   moves, after its moves: replayed in plan's order, as apply_moves () and
+   MOVE_TEXT apply them to the copy, as a sum of the moves could round
+   differently. */
 static int
-add_attdef_deltas (const Dynblock_Plan *plan, Dynblock_State *state)
+add_attdef_places (const Dynblock_Plan *plan, Dynblock_State *state)
 {
-  state->deltas = (Dynblock_Entity_Delta *)calloc (
-      plan->num_moves + 1, sizeof (Dynblock_Entity_Delta));
-  if (!state->deltas)
+  state->attdefs = (Dynblock_Attdef_Place *)calloc (
+      plan->num_moves + 1, sizeof (Dynblock_Attdef_Place));
+  if (!state->attdefs)
     return DWG_ERR_OUTOFMEM;
   for (BITCODE_BL i = 0; i < plan->num_moves; i++)
     {
       const Dynblock_Move *m = &plan->moves[i];
       const Dwg_Object *obj = handle_object (plan->dwg, m->entity);
+      const Dwg_Entity_ATTDEF *_obj;
+      Dynblock_Attdef_Place *place;
+      BITCODE_3BD delta;
       BITCODE_BL j;
       if (m->point >= 0 || !obj || obj->fixedtype != DWG_TYPE_ATTDEF)
         continue;
-      for (j = 0; j < state->num_deltas; j++)
-        if (state->deltas[j].entity == m->entity)
+      _obj = obj->tio.entity->tio.ATTDEF;
+      for (j = 0; j < state->num_attdefs; j++)
+        if (state->attdefs[j].entity == m->entity)
           break;
-      if (j == state->num_deltas)
-        state->deltas[state->num_deltas++].entity = m->entity;
-      add_delta (&state->deltas[j].delta, &m->delta);
+      place = &state->attdefs[j];
+      if (j == state->num_attdefs)
+        {
+          state->num_attdefs++;
+          place->entity = m->entity;
+          place->ins_pt = _obj->ins_pt;
+          place->alignment_pt = _obj->alignment_pt;
+        }
+      entity_delta (obj, &m->delta, &delta);
+      MOVE_2D (place->ins_pt, &delta);
+      if (_obj->horiz_alignment || _obj->vert_alignment)
+        MOVE_2D (place->alignment_pt, &delta);
     }
   return 0;
 }
@@ -4251,7 +4266,7 @@ dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
     {
       state->nodes = (Dynblock_Node_State *)calloc (
           ev.plan.num_nodes + 1, sizeof (Dynblock_Node_State));
-      error = state->nodes ? add_attdef_deltas (&ev.plan, state)
+      error = state->nodes ? add_attdef_places (&ev.plan, state)
                            : DWG_ERR_OUTOFMEM;
     }
   for (BITCODE_BL i = 0; !error && i < ev.plan.num_nodes; i++)
