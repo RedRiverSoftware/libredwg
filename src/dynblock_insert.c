@@ -485,6 +485,78 @@ etag_index (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RS *valuep,
   return found;
 }
 
+/* Appends to the EED of entity to a copy of the AcDbAttr group of attribute
+   definition from, as AutoCAD's ATTRIBs carry their definition's. AutoCAD
+   2007 and later keep an attribute's lock position in that group in files
+   before r2007, which have no field for it: they write 1070 0, 1070 1 for
+   a locked attribute and no group for another, and read 1070 0, 1070 0 as
+   not locked too. An ATTRIB without the group is not locked, and AutoCAD
+   may then leave it where it is when an edit of the placement moves its
+   definition. Returns 0 when from has no such group. A group that isn't
+   all 1070 items, the only form AutoCAD writes, or whose items don't hold
+   all the bytes read for it, is left out, with DWG_ERR_INVALIDEED. */
+static int
+copy_attr_eed (const Dwg_Data *dwg, const Dwg_Object *from,
+               Dwg_Object_Entity *to)
+{
+  const Dwg_Object_Entity *ent = from->tio.entity;
+  const Dwg_Eed *group = NULL;
+  BITCODE_BL first = 0, n, i;
+  Dwg_Eed *eed;
+  for (i = 0; !group && ent->eed && i < ent->num_eed; i++)
+    if (ent->eed[i].size)
+      {
+        const Dwg_Object *appid
+            = handle_object (dwg, ent->eed[i].handle.value);
+        if (appid && appid->fixedtype == DWG_TYPE_APPID
+            && appid->tio.object->tio.APPID->name
+            && strEQc (appid->tio.object->tio.APPID->name, "AcDbAttr"))
+          {
+            group = &ent->eed[i];
+            first = i;
+          }
+      }
+  if (!group)
+    return 0;
+  // the group's items: its first, and those after it without a size
+  for (n = 1; first + n < ent->num_eed && !ent->eed[first + n].size; n++)
+    ;
+  for (i = 0; i < n; i++)
+    if (!ent->eed[first + i].data || ent->eed[first + i].data->code != 70)
+      break;
+  // a 1070 item takes 3 bytes in the file
+  if (i < n || (group->raw && group->size != 3 * n))
+    {
+      LOG_WARN ("dwg_dynblock_insert: the AcDbAttr EED of attribute "
+                "definition " FORMAT_HV " isn't 1070 items only, decoded "
+                "in full, so its ATTRIB doesn't get it",
+                from->handle.value);
+      return DWG_ERR_INVALIDEED;
+    }
+  eed = (Dwg_Eed *)realloc (to->eed, (to->num_eed + n) * sizeof (Dwg_Eed));
+  if (!eed)
+    return DWG_ERR_OUTOFMEM;
+  to->eed = eed;
+  for (i = 0; i < n; i++)
+    {
+      Dwg_Eed *item = &eed[to->num_eed];
+      memset (item, 0, sizeof (*item));
+      item->data = eed_item (70);
+      if (!item->data)
+        return DWG_ERR_OUTOFMEM;
+      // Dwg_Eed_Data is packed
+      memcpy (&item->data->u.eed_70.rs, &ent->eed[first + i].data->u.eed_70.rs,
+              sizeof (item->data->u.eed_70.rs));
+      if (!i)
+        {
+          item->size = (BITCODE_BS)(3 * n);
+          item->handle = group->handle;
+        }
+      to->num_eed++;
+    }
+  return 0;
+}
+
 /*--------------------------------------------------------------------------------
  * Checks before anything is added
  */
@@ -925,12 +997,14 @@ attdef_place (const Dynblock_Placement *p, const BITCODE_RLL handle,
 }
 
 /* Checks atts against def's attribute definitions: each tag names one, is
-   given once, and has a value. The definitions must lie in the XY plane,
-   as the INSERT's transform is applied in it, have tags that
-   dwg_add_ATTRIB () takes, which are fewer than AutoCAD allows, and be
-   placed at points, a height and a thickness that a double holds, so that
-   a refusal comes before anything is added. The representation block's
-   attribute definitions are def's, moved as the evaluation moves them. */
+   given once, and has a value and a width that is finite and not
+   negative. The definitions must lie in the XY plane, as the INSERT's
+   transform is applied in it, have tags that dwg_add_ATTRIB () takes,
+   which are fewer than AutoCAD allows, be placed at points, a height and a
+   thickness that a double holds, and start, at the width given, where a
+   double holds (start_at_width ()), so that a refusal comes before
+   anything is added. The representation block's attribute definitions are
+   def's, moved as the evaluation moves them. */
 static int
 check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                   const BITCODE_BL num_atts)
@@ -1665,9 +1739,11 @@ copy_entity_properties (Dwg_Data *dwg, const Dwg_Object_Entity *from,
 /* Gives the INSERT an ATTRIB for each of its block's attribute definitions
    that isn't constant, in the block's order, as AutoCAD's INSERT does: the
    definition's text properties, with the placement's transform applied,
-   and the value from atts, or the definition's default. With etags, each
+   and the value from atts, or the definition's default, starting where the
+   value's width in atts moves it (start_at_width ()). With etags, each
    ATTRIB gets its definition's AcDbBlockRepETag index, as AutoCAD's do on
-   a placement at the definition's values. */
+   a placement at the definition's values; then each gets a copy of its
+   definition's AcDbAttr EED (copy_attr_eed ()). */
 static int
 add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                 const BITCODE_BL num_atts, const int etags)
@@ -1694,7 +1770,8 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
     if (is_placed_attdef (ref_object (dwg, blk->entities[i])))
       attdefs[n++] = ref_handle (blk->entities[i]);
 
-  for (BITCODE_BL i = 0; !error && i < n; i++)
+  // an AcDbAttr group left out (DWG_ERR_INVALIDEED) doesn't stop the rest
+  for (BITCODE_BL i = 0; error < DWG_ERR_CRITICAL && i < n; i++)
     {
       const Dwg_Object *defobj = handle_object (dwg, attdefs[i]);
       const Dwg_Entity_ATTDEF *attdef = defobj->tio.entity->tio.ATTDEF;
@@ -1713,7 +1790,7 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
         {
           free (tag);
           free (dflt);
-          error = DWG_ERR_OUTOFMEM;
+          error |= DWG_ERR_OUTOFMEM;
           break;
         }
       for (BITCODE_BL k = 0; k < num_atts && !value; k++)
@@ -1734,14 +1811,14 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       free (dflt);
       if (!attrib)
         {
-          error = DWG_ERR_OUTOFMEM;
+          error |= DWG_ERR_OUTOFMEM;
           break;
         }
       attobj = dwg_obj_generic_to_object (attrib, &err);
       defobj = handle_object (dwg, attdefs[i]);
       attdef = defobj->tio.entity->tio.ATTDEF;
-      error = copy_entity_properties (dwg, defobj->tio.entity,
-                                      attobj->tio.entity);
+      error |= copy_entity_properties (dwg, defobj->tio.entity,
+                                       attobj->tio.entity);
       attrib->alignment_pt.x = align.x;
       attrib->alignment_pt.y = align.y;
       attrib->extrusion = attdef->extrusion;
@@ -1765,11 +1842,13 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       // only the DWG encoder, which comes with write support, reads them
       dwg_set_dataflags (attobj);
 #endif
-      if (!error && has_etag)
+      if (error < DWG_ERR_CRITICAL && has_etag)
         // AutoCAD's ATTRIBs carry the index, with a 1005 handle of 0
-        error = set_tag_eed (&attobj->tio.entity->eed,
-                             &attobj->tio.entity->num_eed, etag_appid,
-                             etag_value, 1, etag, 0);
+        error |= set_tag_eed (&attobj->tio.entity->eed,
+                              &attobj->tio.entity->num_eed, etag_appid,
+                              etag_value, 1, etag, 0);
+      if (error < DWG_ERR_CRITICAL)
+        error |= copy_attr_eed (dwg, defobj, attobj->tio.entity);
     }
   free (attdefs);
   return error;

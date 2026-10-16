@@ -398,8 +398,12 @@ typedef struct _dwg_attvalue
    default value. A preset attribute takes its value from atts too: preset
    only means AutoCAD doesn't prompt for it. At the definition's values
    each ATTRIB gets the AcDbBlockRepETag index of its definition, as
-   AutoCAD's do. They are added with dwg_add_ATTRIB (), which links them to
-   the INSERT as AutoCAD does.
+   AutoCAD's do. Each ATTRIB gets a copy of its definition's AcDbAttr EED,
+   as AutoCAD's do: AutoCAD 2007 and later keep an attribute's lock
+   position there in r2004 files (1070 0, 1070 1 when locked, and no group
+   otherwise), and may leave an ATTRIB without it, not locked, behind when
+   an edit of the placement moves its definition. They are added with
+   dwg_add_ATTRIB (), which links them to the INSERT as AutoCAD does.
 
    Where text justified centre, right or middle starts, its insertion
    point, AutoCAD derives from its alignment point and the width it
@@ -412,13 +416,13 @@ typedef struct _dwg_attvalue
    across the baseline as far as the definition's text does. Two things
    AutoCAD measures that a width doesn't hold: it centres text on its
    first character's outline where that starts left of the text's start,
-   so a centred value beginning with such a character, as Arial's A, j
-   and _ do (by 3, 94 and 31 of its 2048 units), sits half that overhang
-   off; and it centres middle text on the height of its characters too,
-   which LibreDWG takes from the definition's text, so a value whose
-   characters reach lower or higher than those, such as one with
-   descenders against capitals, sits off its alignment point across the
-   baseline, by up to about half the height. Text in a vertical style
+   so a centred or middle value beginning with such a character, as
+   Arial's A, j and _ do (by 3, 94 and 31 of its 2048 units), sits half
+   that overhang off; and it centres middle text on the height of its
+   characters too, which LibreDWG takes from the definition's text, so a
+   value whose characters reach lower or higher than those, such as one
+   with descenders against capitals, sits off its alignment point across
+   the baseline, by up to about half the height. Text in a vertical style
    starts where the definition's does. With no width (0), or for an
    attribute atts don't give, the ATTRIB starts where the definition's
    text starts, which AutoCAD laid out for the definition's tag or default
@@ -426,11 +430,15 @@ typedef struct _dwg_attvalue
    the baseline in AutoCAD, though not in LibreDWG's SVG output, which
    places such text by its alignment point. To place a default value as
    AutoCAD does, give it in atts with its width. Text left-aligned,
-   aligned or fit starts where the definition's does whatever the width.
+   aligned or fit, or with a vertical alignment above 3, which AutoCAD
+   doesn't define, starts where the definition's does whatever the width.
    A width that is negative or isn't finite, or at which the text's start,
-   or a coordinate of its offset from its alignment point, would be
-   beyond what a double holds, is refused, with nothing added
-   (DWG_ERR_VALUEOUTOFBOUNDS).
+   a coordinate of its offset from its alignment point, or a sum on the
+   way to the start would be beyond what a double holds, is refused, with
+   nothing added (DWG_ERR_VALUEOUTOFBOUNDS). Such a sum is an alignment
+   point's coordinate plus the part of the offset along the baseline, or
+   the distance across the baseline of a definition whose insertion and
+   alignment points are more than a double apart.
 
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
    document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
@@ -479,7 +487,9 @@ typedef struct _dwg_attvalue
                  other failure, such as DWG_ERR_OUTOFMEM, may leave what was
                  made in the document. Below it, the representation block
                  was made with data left out, as dwg_dynblock_evaluate ()
-                 returns.
+                 returns, or an ATTRIB was left without its definition's
+                 AcDbAttr EED, which wasn't 1070 items only, decoded in
+                 full (DWG_ERR_INVALIDEED).
    @return the INSERT, or NULL. */
 EXPORT Dwg_Entity_INSERT *
 dwg_dynblock_insert (Dwg_Object_BLOCK_HEADER *owner,
