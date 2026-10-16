@@ -1731,6 +1731,35 @@ check_attrib_links (const char *what, const Dwg_Data *dwg,
   return failures;
 }
 
+/* Appends n EED items to entity ent, each with zeroed data, the first
+   starting a group of the APPID with handle appid that takes size bytes in
+   a file. Returns the first, or NULL. */
+static Dwg_Eed *
+append_eed (Dwg_Object_Entity *ent, const BITCODE_RLL appid,
+            const BITCODE_BS size, const BITCODE_BL n)
+{
+  const BITCODE_BL first = ent->num_eed;
+  Dwg_Eed *eed
+      = (Dwg_Eed *)realloc (ent->eed, (first + n) * sizeof (Dwg_Eed));
+  if (!eed)
+    return NULL;
+  ent->eed = eed;
+  memset (&eed[first], 0, n * sizeof (Dwg_Eed));
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      eed[first + i].data = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data));
+      if (!eed[first + i].data)
+        return NULL;
+      ent->num_eed++;
+    }
+  eed[first].size = size;
+  eed[first].handle.code = 5;
+  for (BITCODE_RLL v = appid; v; v >>= 8)
+    eed[first].handle.size++;
+  eed[first].handle.value = appid;
+  return &eed[first];
+}
+
 /* Gives entity ent the AcDbBlockRepETag EED AutoCAD gives the entities of
    a dynamic block definition: 1070 1, the index, and a 1005 handle, of 0
    on an ATTDEF. */
@@ -1740,19 +1769,9 @@ add_etag (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RL index)
   BITCODE_H appid
       = dwg_find_tablehandle (dwg, "AcDbBlockRepETag", "APPID");
   const BITCODE_RLL zero = 0;
-  Dwg_Eed *eed = (Dwg_Eed *)calloc (3, sizeof (Dwg_Eed));
-  if (!appid || !eed || ent->num_eed)
-    {
-      free (eed);
-      return 1;
-    }
-  eed[0].size = 3 + 5 + 9;
-  eed[0].handle.code = 5;
-  eed[0].handle.size = 2;
-  eed[0].handle.value = appid->absolute_ref;
-  for (int i = 0; i < 3; i++)
-    eed[i].data = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data));
-  if (!eed[0].data || !eed[1].data || !eed[2].data)
+  Dwg_Eed *eed
+      = appid ? append_eed (ent, appid->absolute_ref, 3 + 5 + 9, 3) : NULL;
+  if (!eed)
     return 1;
   eed[0].data->code = 70;
   eed[0].data->u.eed_70.rs = 1;
@@ -1761,16 +1780,85 @@ add_etag (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RL index)
   memcpy (&eed[1].data->u.eed_71.rl, &index, sizeof (index));
   eed[2].data->code = 5;
   memcpy (&eed[2].data->u.eed_5.entity, &zero, sizeof (zero));
-  ent->eed = eed;
-  ent->num_eed = 3;
   return 0;
 }
 
-/* An expected ATTRIB: its tag and value. */
+/* Gives entity ent an AcDbAttr EED group, adding its APPID to dwg when
+   dwg has none: 1070 0, then an item with the given code, 70 (1070) or 71
+   (1071), and value. AutoCAD 2007 and later write 1070 0, 1070 1 there for
+   an attribute whose position is locked, in files before r2007. */
+static int
+add_attr_eed (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RC code,
+              const BITCODE_RS value)
+{
+  BITCODE_H found = dwg_find_tablehandle (dwg, "AcDbAttr", "APPID");
+  BITCODE_RLL appid = found ? found->absolute_ref : 0;
+  const BITCODE_RS zero = 0;
+  const BITCODE_RL value71 = value;
+  Dwg_Eed *eed;
+  if (!appid)
+    {
+      Dwg_Object_APPID *_appid = dwg_add_APPID (dwg, "AcDbAttr");
+      if (!_appid)
+        return 1;
+      appid = handle_of (dwg, _appid);
+    }
+  // a 1070 takes 3 bytes in a file, a 1071 5
+  eed = append_eed (ent, appid, code == 71 ? 8 : 6, 2);
+  if (!eed)
+    return 1;
+  eed[0].data->code = 70;
+  // Dwg_Eed_Data is packed
+  memcpy (&eed[0].data->u.eed_70.rs, &zero, sizeof (zero));
+  eed[1].data->code = code;
+  if (code == 71)
+    memcpy (&eed[1].data->u.eed_71.rl, &value71, sizeof (value71));
+  else
+    memcpy (&eed[1].data->u.eed_70.rs, &value, sizeof (value));
+  return 0;
+}
+
+/* The values of obj's AcDbAttr EED group, of 1070 items, into values, up
+   to two of them. Returns how many items the group has, -1 when obj has
+   no such group, or -2 when it has two, or an item that isn't a 1070. */
+static int
+attr_eed (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RS values[2])
+{
+  const Dwg_Eed *eed = obj->tio.entity->eed;
+  int n = -1, in_group = 0;
+  for (BITCODE_BL i = 0; eed && i < obj->tio.entity->num_eed; i++)
+    {
+      if (eed[i].size)
+        {
+          const Dwg_Object *appid = object (dwg, eed[i].handle.value);
+          in_group = appid && appid->fixedtype == DWG_TYPE_APPID
+                     && !strcmp (appid->tio.object->tio.APPID->name,
+                                 "AcDbAttr");
+          if (in_group && n >= 0)
+            return -2;
+          if (in_group)
+            n = 0;
+        }
+      if (!in_group)
+        continue;
+      if (!eed[i].data || eed[i].data->code != 70)
+        return -2;
+      if (n < 2)
+        // Dwg_Eed_Data is packed
+        memcpy (&values[n], &eed[i].data->u.eed_70.rs, sizeof (values[n]));
+      n++;
+    }
+  return n;
+}
+
+/* An expected ATTRIB: its tag and value, and whether it has an AcDbAttr
+   EED group, 1070 0 and 1070 lock. */
 typedef struct
 {
   const char *tag;
   const char *value;
+  int has_attr_eed;
+  BITCODE_RS lock;
 } Expected_Attrib;
 
 /* The ATTRIBs of placement insert, placed at ins_pt, scale and rotation in
@@ -1780,7 +1868,8 @@ typedef struct
    ATTRIB keeps it (0, 0) and doesn't store it (dataflags 0x02), as
    AutoCAD's don't. Other ATTRIBs are aligned at their definition's
    alignment point, placed; dataflags 0x02 stands for an alignment point of
-   (0, 0), as AutoCAD reads it. */
+   (0, 0), as AutoCAD reads it. Each has the AcDbAttr EED group expected,
+   which its definition has too, or neither has one. */
 static int
 check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
@@ -1875,10 +1964,31 @@ check_attribs (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
                 fmod (d->rotation + rotation, 2.0 * M_PI), etags);
           failures++;
         }
+      // the definition's AcDbAttr group, copied
+      {
+        BITCODE_RS av[2] = { 9, 9 }, dv[2] = { 9, 9 };
+        const int an = attr_eed (dwg, attobj, av);
+        const int dn = attr_eed (dwg, defobj, dv);
+        const int want = expected[k].has_attr_eed ? 2 : -1;
+        if (an != want || dn != want
+            || (want == 2
+                && (av[0] != 0 || av[1] != expected[k].lock || dv[0] != 0
+                    || dv[1] != expected[k].lock)))
+          {
+            FAIL ("%s: ATTRIB %s has %d AcDbAttr items (%u, %u), its "
+                  "definition %d (%u, %u), expected %d (0, %u)",
+                  what, a->tag, an, (unsigned)av[0], (unsigned)av[1], dn,
+                  (unsigned)dv[0], (unsigned)dv[1], want,
+                  (unsigned)expected[k].lock);
+            failures++;
+          }
+      }
       k++;
     }
   if (!failures)
-    OK ("%s: %u ATTRIBs, as their definitions placed by the INSERT", what, k);
+    OK ("%s: %u ATTRIBs, as their definitions placed by the INSERT, each "
+        "with the AcDbAttr EED expected",
+        what, k);
   return failures;
 }
 
@@ -1964,6 +2074,10 @@ static const Width_Case width_cases[] = {
   // centred and backward
   { "BACKWARD", 1, 0, 2, 0.0, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
     4895.0 / 1466.0, 1.6684856753, 0.0, 3.0, 0 },
+  // right-aligned and backward: forward of its alignment point by the
+  // whole width
+  { "RIGHTBACK", 2, 0, 2, 0.0, 0.0, 1.0, "AB", 1.8635743520, 0.0, "ABgy",
+    4895.0 / 1466.0, 3.3390177353, 0.0, 0.0, 0 },
   // no width: the definition's start, though the value is longer
   { "NOWIDTH", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
     "ABCDEFGHIJ", 0.0, -0.9307639836, -0.5, 0.0, 0 },
@@ -2079,7 +2193,8 @@ check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
 }
 
 /* Attribute values given with their widths start where AutoCAD starts
-   them: centred, right-aligned, middle and backward text, long and short
+   them: centred, right-aligned, middle, and backward text centred or
+   right-aligned, long and short
    values, turned definitions, oblique and with a width factor; without a
    width, without a value, left on the middle, aligned or in a vertical
    style, where the definition's text starts; on a copy of Trees, placed at
@@ -2107,10 +2222,11 @@ test_attribute_widths (Dwg_Data *src)
       return 1;
     }
   def = block_header (dst, def_h);
-  vertical = dwg_add_STYLE (dst, "VERTICAL");
+  vertical = def ? dwg_add_STYLE (dst, "VERTICAL") : NULL;
   if (!vertical)
     {
-      FAIL ("attribute widths: adding a text style failed");
+      FAIL ("attribute widths: %s failed",
+            def ? "adding a text style" : "finding the copy of Trees");
       free_dwg (dst);
       free (dst);
       return 1;
@@ -2176,6 +2292,13 @@ test_attribute_widths (Dwg_Data *src)
     }
   h1 = handle_of (dst, ins1);
   h2 = handle_of (dst, ins2);
+  if (!object (dst, h2))
+    {
+      FAIL ("attribute widths: the INSERT at Shrub (Plan) not found");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
   block2 = ref (object (dst, h2)->tio.entity->tio.INSERT->block_header);
   failures += check_widths ("attribute widths at the definition's values",
                             dst, h1, def_h, &at1, 1.0, 0.0);
@@ -2212,8 +2335,11 @@ test_attribute_widths (Dwg_Data *src)
    on a layer of its own and shown in the first visibility state only; one
    left-aligned as dwg_add_ATTDEF () makes it, with an alignment point of
    0 and dataflags 0; and one centred at (0, 0), which it doesn't store
-   (dataflags 0x02). Placed at the definition's values and at another
-   state, scaled and rotated, with one value given. */
+   (dataflags 0x02). The plain one has AcDbAttr EED of 1070 0 and 1070 1
+   (locked) before its AcDbBlockRepETag, and the rotated one 1070 0 and
+   1070 0 after it, which their ATTRIBs copy as they are; the others have
+   none, nor do their ATTRIBs. Placed at the definition's values and at
+   another state, scaled and rotated, with one value given. */
 static int
 test_attributes (Dwg_Data *src)
 {
@@ -2227,14 +2353,14 @@ test_attributes (Dwg_Data *src)
   Dwg_Object_LAYER *layer;
   const BITCODE_3BD at1 = { 50.0, 60.0, 0.0 }, at2 = { -20.0, 10.0, 5.0 };
   const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7", 0.0 } };
-  const Expected_Attrib expected1[] = { { "NUMBER", "EL-7" },
-                                        { "RATING", "10W" },
-                                        { "LABEL", "L1" },
-                                        { "MARK", "M" } };
-  const Expected_Attrib expected2[] = { { "NUMBER", "#" },
-                                        { "RATING", "10W" },
-                                        { "LABEL", "L1" },
-                                        { "MARK", "M" } };
+  const Expected_Attrib expected1[] = { { "NUMBER", "EL-7", 1, 1 },
+                                        { "RATING", "10W", 1, 0 },
+                                        { "LABEL", "L1", 0, 0 },
+                                        { "MARK", "M", 0, 0 } };
+  const Expected_Attrib expected2[] = { { "NUMBER", "#", 1, 1 },
+                                        { "RATING", "10W", 1, 0 },
+                                        { "LABEL", "L1", 0, 0 },
+                                        { "MARK", "M", 0, 0 } };
   Dwg_DynValue v;
   Dwg_Entity_INSERT *ins1, *ins2;
   BITCODE_RLL h1, h2, block2;
@@ -2258,7 +2384,12 @@ test_attributes (Dwg_Data *src)
            = dwg_add_ATTDEF (def, 1.5, 0, "Rating", &p3, "RATING", "10W"))
       || !(label = dwg_add_ATTDEF (def, 1.0, 0, "Label", &p4, "LABEL", "L1"))
       || !(mark = dwg_add_ATTDEF (def, 1.0, 0, "Mark", &p5, "MARK", "M"))
-      || add_etag (dst, number->parent, 1001))
+      // AcDbAttr before and after another group, which its copy mustn't
+      // take in
+      || add_attr_eed (dst, number->parent, 70, 1)
+      || add_etag (dst, number->parent, 1001)
+      || add_etag (dst, centred->parent, 1002)
+      || add_attr_eed (dst, centred->parent, 70, 0))
     {
       FAIL ("attributes: adding the definitions failed");
       free_dwg (dst);
@@ -2438,12 +2569,16 @@ test_attributes_non_ascii (Dwg_Data *src)
                     "e \xE2\x82\xAC 5",
             0.0 } };
   const Expected_Attrib utf8[]
-      = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9" },
-          { "NOTE", "30\xC2\xB0 Stra\xC3\x9F"
-                    "e \xE2\x82\xAC 5" } };
-  const Expected_Attrib cp1252[] = { { "CABLE", "10 mm\xB2 caf\xE9" },
-                                     { "NOTE", "30\xB0 Stra\xDF"
-                                               "e \x80 5" } };
+      = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9", 0, 0 },
+          { "NOTE",
+            "30\xC2\xB0 Stra\xC3\x9F"
+            "e \xE2\x82\xAC 5",
+            0, 0 } };
+  const Expected_Attrib cp1252[] = { { "CABLE", "10 mm\xB2 caf\xE9", 0, 0 },
+                                     { "NOTE",
+                                       "30\xB0 Stra\xDF"
+                                       "e \x80 5",
+                                       0, 0 } };
   Dwg_Entity_INSERT *ins;
   BITCODE_RLL h;
   Dwg_Data readback;
@@ -2505,6 +2640,83 @@ test_attributes_non_ascii (Dwg_Data *src)
     }
   if (!failures)
     unlink (WRITTEN_NON_ASCII);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
+/* An AcDbAttr EED group that isn't all 1070 items, or whose items don't
+   hold all the bytes read for it, is left out of its ATTRIB, with
+   DWG_ERR_INVALIDEED and the INSERT returned, and the ATTRIBs after it
+   still get theirs: on a copy of Trees given three attribute definitions,
+   with 1070 0 and 1071 1, with 1070 0 and 1070 1, and with 1070 0 and
+   1070 1 read from 7 bytes, placed at the definition's values. */
+static int
+test_attr_eed_left_out (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def = dst ? block_header (dst, def_h) : NULL;
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { 1.0, -2.0, 0.0 },
+                     p3 = { 1.0, -6.0, 0.0 };
+  const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
+  const char *const tags[3] = { "BAD", "GOOD", "SHORT" };
+  const int want[3] = { -1, 2, -1 };
+  Dwg_Entity_ATTDEF *bad = NULL, *good = NULL, *cut = NULL;
+  Dwg_Entity_INSERT *ins;
+  int failures = 0, error = 0;
+
+  if (!def || !(bad = dwg_add_ATTDEF (def, 2.5, 0, "Bad", &p1, "BAD", "B"))
+      || !(good = dwg_add_ATTDEF (def, 2.5, 0, "Good", &p2, "GOOD", "G"))
+      || !(cut = dwg_add_ATTDEF (def, 2.5, 0, "Short", &p3, "SHORT", "S"))
+      || add_attr_eed (dst, bad->parent, 71, 1)
+      || add_attr_eed (dst, good->parent, 70, 1)
+      || add_attr_eed (dst, cut->parent, 70, 1)
+      // as read from a file, with a byte more than its items hold
+      || !(cut->parent->eed[0].raw = (BITCODE_TF)calloc (7, 1)))
+    {
+      FAIL ("AcDbAttr left out: adding the definitions failed");
+      if (dst)
+        {
+          free_dwg (dst);
+          free (dst);
+        }
+      return 1;
+    }
+  cut->parent->eed[0].size = 7;
+
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (!ins || error != DWG_ERR_INVALIDEED || ins->num_owned != 3)
+    {
+      FAIL ("AcDbAttr left out: 0x%x, %u ATTRIBs, expected 0x%x and 3",
+            error, ins ? (unsigned)ins->num_owned : 0u,
+            (unsigned)DWG_ERR_INVALIDEED);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  for (unsigned k = 0; k < 3; k++)
+    {
+      const Dwg_Object *att = object (dst, ref (ins->attribs[k]));
+      BITCODE_RS v[2] = { 9, 9 };
+      const int n = att && att->fixedtype == DWG_TYPE_ATTRIB
+                        ? attr_eed (dst, att, v)
+                        : -3;
+      if (n == want[k] && (n != 2 || (v[0] == 0 && v[1] == 1))
+          && !strcmp (att->tio.entity->tio.ATTRIB->tag, tags[k]))
+        OK ("AcDbAttr left out: ATTRIB %s has %s", tags[k],
+            n == 2 ? "1070 0, 1070 1" : "no AcDbAttr group");
+      else
+        {
+          FAIL ("AcDbAttr left out: ATTRIB %u (%s) has %d AcDbAttr items "
+                "(%u, %u), expected %d",
+                k, tags[k], n, (unsigned)v[0], (unsigned)v[1], want[k]);
+          failures++;
+        }
+    }
   free_dwg (dst);
   free (dst);
   return failures;
@@ -3062,8 +3274,6 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
   return NULL;
 }
 
-/* Places def in dwg's model space with the given values, which must
-   succeed. */
 /* Places def at the origin at scale with atts, and gets the insertion
    point of its only ATTRIB into *x and *y. Returns 0 when it is placed. */
 static int
@@ -3088,6 +3298,8 @@ attrib_start (Dwg_Data *dwg, Dwg_Object_BLOCK_HEADER *def, const double scale,
   return 0;
 }
 
+/* Places def in dwg's model space with the given values, which must
+   succeed. */
 static int
 test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
                const Dwg_DynValue *values, const BITCODE_BL n,
@@ -3203,9 +3415,12 @@ test_huge_rotation (Dwg_Data *dwg, const BITCODE_RLL def,
    not (0, 0, 0), a graph node of a class whose stored value is not known,
    and a DIMENSION, which draws a block of its own, all only at other
    values than the definition's; and attribute definitions off the XY
-   plane, attribute values given twice or without a tag or value, and
-   scales at which an attribute's placed point, height or thickness is
-   beyond what a double holds. */
+   plane, attribute values given twice or without a tag or value, widths
+   that are negative or aren't finite, a width that starts the text beyond
+   what a double holds, and scales at which an attribute's placed point,
+   height or thickness is beyond what a double holds. Accepted besides:
+   widths whose starts a double holds though a product on the way to them
+   doesn't, and a width on left-aligned text, which doesn't move it. */
 static int
 test_definition_refusals (Dwg_Data *src)
 {
@@ -4399,8 +4614,10 @@ test_attdef_moved_twice (Dwg_Data *src)
    At Wall Thickness 6 the visibility parameter's record holds its point
    moved 1 down, as Wall Thickness's end point moves; at Window Width 24
    the ATTRIB is where the evaluation moved its ATTDEF, 12 to the left,
-   and at a huge scale one placed beyond a double is refused before
-   anything is added, while the definition's own place is not. */
+   and, centred with a width given, starts back by half the width from
+   where the evaluation moved its alignment point; and at a huge scale one
+   placed beyond a double is refused before anything is added, while the
+   definition's own place is not. */
 static int
 test_moved_parameters (Dwg_Data *src)
 {
@@ -4521,6 +4738,12 @@ test_moved_parameters (Dwg_Data *src)
                                     block_header (dst, def_h), &at, 1.0, 0.0,
                                     &v, 1, NULL, 0, &error);
       loglevel = test_loglevel;
+      if (!block_header (dst, def_h))
+        {
+          FAIL ("moved parameters: the Window's copy not found");
+          free_document (dst);
+          return failures + 1;
+        }
       {
         const BITCODE_3BD base = block_header (dst, def_h)->base_pt;
         const Dwg_Object *attrib
@@ -4664,6 +4887,7 @@ main (int argc, char *argv[])
   failures += test_refusals (&src);
   failures += test_attributes (&src);
   failures += test_attributes_non_ascii (&src);
+  failures += test_attr_eed_left_out (&src);
   failures += test_image_reactors (&src);
   failures += test_sortents_entries (&src);
   failures += test_sortents_order (&src);
