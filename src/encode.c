@@ -8009,6 +8009,14 @@ downconvert_TABLESTYLE (Dwg_Object *restrict obj)
           _obj->rowstyles[0].borders[i].color
               = _obj->sty.cellstyle.borders[i].color;
         }
+      // the borders go, with their ltype refs. The decoder keeps NULL refs
+      // out of dwg->object_ref, so the field owns those.
+      for (unsigned i = 0; i < _obj->sty.cellstyle.num_borders; i++)
+        {
+          Dwg_Object_Ref *ltype = _obj->sty.cellstyle.borders[i].ltype;
+          if (ltype && !ltype->handleref.is_global)
+            free (ltype);
+        }
       free (_obj->sty.cellstyle.borders);
       _obj->sty.cellstyle.borders = NULL;
       _obj->sty.cellstyle.num_borders = 0;

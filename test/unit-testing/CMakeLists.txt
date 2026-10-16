@@ -115,6 +115,14 @@ if(NOT LIBREDWG_DISABLE_WRITE)
   if(NOT MSVC)
     add_test(color_test ${TARGET_SYSTEM_EMULATOR} color_test${CMAKE_EXECUTABLE_SUFFIX})
   endif()
+  add_executable(indxf_test indxf_test.c ../../src/logging.c
+    ../../src/classes.c tests_common.h)
+  if(NOT MSVC)
+    add_test(indxf_test ${TARGET_SYSTEM_EMULATOR} indxf_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds test/test-data
+    set_tests_properties(indxf_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  endif()
   add_executable(svg_api_test svg_api_test.c ../../src/logging.c
     ../../src/classes.c tests_common.h)
   if(NOT MSVC)

@@ -1012,7 +1012,8 @@ DWG_OBJECT (TABLESTYLE)
       }
   }
 
-  UNTIL (R_2007) {
+  // the DXF importer sets rowstyles for every version
+  IF_FREE_OR_VERSIONS (R_13b1, R_2007) {
     FIELD_VALUE (num_rowstyles) = 3;
     // 0: data, 1: title, 2: header
     #define rowstyle rowstyles[rcount1]
@@ -1042,6 +1043,9 @@ DWG_OBJECT (TABLESTYLE)
         //  SUB_FIELD_BL (rowstyle,unit_type, 91);
         //  SUB_FIELD_TU (rowstyle,format_string, 1);
         //}
+        FREE { // set by the DXF importer
+          SUB_FIELD_TU (rowstyle,format_string, 1);
+        }
         #undef border
     END_REPEAT_BLOCK
     END_REPEAT (rowstyles)

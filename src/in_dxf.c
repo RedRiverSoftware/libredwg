@@ -5096,6 +5096,17 @@ add_GEODATA (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
 #  undef CHK_geomesh_pts
 #  undef CHK_geomesh_faces
 
+/* Frees what add_CellStyle and the cell style's name pair set, and clears
+   the cell style, before another one is read into it. Its refs are global. */
+static void
+free_TABLESTYLE_CellStyle (Dwg_TABLESTYLE_CellStyle *sty)
+{
+  free (sty->name);
+  free (sty->cellstyle.content_format.value_format_string);
+  free (sty->cellstyle.borders);
+  memset (sty, 0, sizeof (Dwg_TABLESTYLE_CellStyle));
+}
+
 // returns with 0
 // subclass for multiple objects.
 // Only handle conflicts?, codes with multiple keys.
@@ -5524,9 +5535,13 @@ add_TABLESTYLE (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
   BITCODE_H hdl;
   int i = -1, j = -1;
 
+  // NULL returns free the pair: the caller reads on
 #  define CHK_rowstyles                                                       \
     if (!(i >= 0 && i < 3) || !o->num_rowstyles || !o->rowstyles)             \
-      return NULL;                                                            \
+      {                                                                       \
+        dxf_free_pair (pair);                                                 \
+        return NULL;                                                          \
+      }                                                                       \
     assert (i >= 0 && i < 3);                                                 \
     assert (o->num_rowstyles);                                                \
     assert (o->rowstyles)
@@ -5534,7 +5549,10 @@ add_TABLESTYLE (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
 #  define CHK_borders                                                         \
     if (!(j >= 0 && j <= 6) || !o->rowstyles[i].num_borders                   \
         || !o->rowstyles[i].borders)                                          \
-      return NULL;                                                            \
+      {                                                                       \
+        dxf_free_pair (pair);                                                 \
+        return NULL;                                                          \
+      }                                                                       \
     assert (j >= 0 && j < 6);                                                 \
     assert (o->rowstyles[i].num_borders);                                     \
     assert (o->rowstyles[i].borders)
@@ -5550,7 +5568,10 @@ add_TABLESTYLE (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
           CHK_rowstyles;
           hdl = find_tablehandle (dwg, pair);
           if (!hdl)
-            return NULL;
+            {
+              dxf_free_pair (pair);
+              return NULL;
+            }
           assert (hdl);
           o->rowstyles[i].text_style = hdl;
           LOG_TRACE ("%s.rowstyles[%d].text_style = " FORMAT_REF " [H %d]\n",
@@ -5615,7 +5636,10 @@ add_TABLESTYLE (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
           CHK_rowstyles;
           j = pair->code - 274;
           if (j < 0 || j >= 6)
-            return NULL;
+            {
+              dxf_free_pair (pair);
+              return NULL;
+            }
           assert (j >= 0 && j <= 6);
           if (!o->rowstyles[i].borders)
             {
@@ -5624,6 +5648,7 @@ add_TABLESTYLE (Dwg_Object *restrict obj, Bit_Chain *restrict dat,
               if (!o->rowstyles[i].borders)
                 {
                   o->rowstyles[i].num_borders = 0;
+                  dxf_free_pair (pair);
                   return NULL;
                 }
               o->rowstyles[i].num_borders = 6;
@@ -8492,9 +8517,14 @@ add_AcDbEvalExpr (Dwg_Object *restrict obj, char *_obj,
         }
       else if (pair->code == 1)
         {
-          ee->value.text1 = strdup (pair->value.s.ptr);
-          LOG_TRACE ("%s.%s.%s = %s [T %d]\n", obj->name, evalexpr,
-                     "value.text1", pair->value.s.ptr, pair->code);
+          // An empty 1 comes before the 70 value code. value is a union:
+          // only a value code 1 makes it the text.
+          if (ee->value_code == 1)
+            {
+              ee->value.text1 = strdup (pair->value.s.ptr);
+              LOG_TRACE ("%s.%s.%s = %s [T %d]\n", obj->name, evalexpr,
+                         "value.text1", pair->value.s.ptr, pair->code);
+            }
         }
       else if (pair->code == 70 && ee->value_code)
         {
@@ -10042,6 +10072,8 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
   int j = 0, k = 0, l = 0, error = 0;
   BITCODE_BL i = i_p ? *i_p : 0;
   int cur_cell = -1;
+  int num_tablestyle_formats = 0;
+  int light_class_version_read = 0;
   size_t written = 0;
   BITCODE_RL curr_inserts = 0;
   BITCODE_RS flag = 0;
@@ -10189,6 +10221,9 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
           // clang-format on
           {
             dwg->num_objects--;
+            free (obj->tio.object);
+            obj->tio.object = NULL;
+            free (dxfname);
             LOG_ERROR ("Unknown DXF AcDbSymbolTableRecord %s, skipping", name);
             return pair;
           }
@@ -10198,6 +10233,10 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
   if (!_obj)
     {
       dwg->num_objects--;
+      free (obj->tio.object);
+      obj->tio.object = NULL;
+      free (dxfname);
+      obj->dxfname = NULL;
       LOG_ERROR ("Empty _obj at DXF AcDbSymbolTableRecord %s, skipping", name);
       return pair;
     }
@@ -10372,9 +10411,13 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                        != dwg->object[0].tio.object->tio.BLOCK_HEADER
                 && dwg->num_objects)
               {
+                // drop the new slot, with its object and dxfname
                 dwg->num_objects--;
                 free (obj->tio.object->tio.BLOCK_HEADER);
-                obj->tio.object->tio.BLOCK_HEADER = NULL;
+                free (obj->tio.object);
+                obj->tio.object = NULL;
+                free (obj->dxfname);
+                obj->dxfname = dxfname = NULL;
                 obj = &dwg->object[0];
                 _obj = obj->tio.object->tio.APPID;
                 LOG_TRACE ("Reuse existing BLOCK_HEADER.*Model_Space %X [0]\n",
@@ -10520,6 +10563,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                     {
                       obj->type = obj->fixedtype = DWG_TYPE_DIMENSION_LINEAR;
                       obj->name = (char *)"DIMENSION_LINEAR";
+                      free (obj->dxfname);
                       obj->dxfname = strdup (obj->name);
                       strcpy (name, obj->name);
                       LOG_TRACE ("change type to %s\n", name);
@@ -10530,6 +10574,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                       // new pairs
                       obj->type = obj->fixedtype = DWG_TYPE_DIMENSION_ALIGNED;
                       obj->name = (char *)"DIMENSION_ALIGNED";
+                      free (obj->dxfname);
                       obj->dxfname = strdup (obj->name);
                       strcpy (name, obj->name);
                       LOG_TRACE ("change type to %s\n", name);
@@ -10538,6 +10583,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                     {
                       obj->type = obj->fixedtype = DWG_TYPE_DIMENSION_ORDINATE;
                       obj->name = (char *)"DIMENSION_ORDINATE";
+                      free (obj->dxfname);
                       obj->dxfname = strdup (obj->name);
                       strcpy (name, obj->name);
                       LOG_TRACE ("change type to %s\n", name);
@@ -10546,6 +10592,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                     {
                       obj->type = obj->fixedtype = DWG_TYPE_DIMENSION_DIAMETER;
                       obj->name = (char *)"DIMENSION_DIAMETER";
+                      free (obj->dxfname);
                       obj->dxfname = strdup (obj->name);
                       strcpy (name, obj->name);
                       LOG_TRACE ("change type to %s\n", name);
@@ -11573,6 +11620,51 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                          o->has_leader);
               goto next_pair;
             }
+          // Up to r2002 a LIGHT's colour is a second 90 after its
+          // class_version (dwg2.spec), which the generic loop would read as
+          // the class_version again. The free walk then stops at the
+          // class_version out of bounds and leaks the name.
+          else if (pair->code == 90 && obj->fixedtype == DWG_TYPE_LIGHT
+                   && strEQc (subclass, "AcDbLight"))
+            {
+              Dwg_Entity_LIGHT *o = obj->tio.entity->tio.LIGHT;
+              if (!light_class_version_read)
+                {
+                  o->class_version = pair->value.u;
+                  light_class_version_read = 1;
+                  LOG_TRACE ("LIGHT.class_version = %u [BL 90]\n",
+                             o->class_version);
+                }
+              else
+                {
+                  Dwg_Color *color = &o->light_color;
+                  color->rgb = pair->value.u;
+                  color->method = pair->value.u >> 0x18;
+                  // and the palette index, which an r2000 DWG keeps, as
+                  // bit_read_CMC sets it
+                  switch (color->method)
+                    {
+                    case 0xc0: // ByLayer
+                      color->index = 256;
+                      break;
+                    case 0xc1: // ByBlock
+                      color->index = 0;
+                      break;
+                    case 0xc3: // ACI
+                      color->index = bit_CMC_aci_index (color->rgb);
+                      break;
+                    case 0xc8: // None
+                      color->index = 257;
+                      break;
+                    default:
+                      color->index = dwg_find_color_index (color->rgb);
+                      break;
+                    }
+                  LOG_TRACE ("LIGHT.light_color = %08X, index %d [CMC 90]\n",
+                             color->rgb, color->index);
+                }
+              goto next_pair;
+            }
           else if (pair->code == 91
                    && obj->fixedtype == DWG_TYPE_EVALUATION_GRAPH)
             {
@@ -11962,7 +12054,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
               Dwg_Entity_MTEXT *o = obj->tio.entity->tio.MTEXT;
               if (!o->num_column_heights)
                 o->num_column_heights = 1;
-              if (!j)
+              if (!o->column_heights) // j stays 0 here
                 {
                   o->column_heights = (BITCODE_BD *)xcalloc (
                       o->num_column_heights, sizeof (BITCODE_BD));
@@ -12023,10 +12115,25 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
                 }
               else if (obj->fixedtype == DWG_TYPE_TABLESTYLE)
                 {
-                  // TODO ovr
+                  // The table's cell style, then its override, as
+                  // TABLESTYLE in dwg2.spec writes them. TABLESTYLE has room
+                  // for one override: a further cell style replaces it.
                   Dwg_Object_TABLESTYLE *o = obj->tio.object->tio.TABLESTYLE;
-                  tbl_sty = &o->sty;
-                  csty = &o->sty.cellstyle;
+                  if (!num_tablestyle_formats)
+                    {
+                      tbl_sty = &o->sty;
+                      strcpy (key, "sty");
+                    }
+                  else
+                    {
+                      if (o->numoverrides)
+                        free_TABLESTYLE_CellStyle (&o->ovr);
+                      o->numoverrides = 1;
+                      tbl_sty = &o->ovr;
+                      strcpy (key, "ovr");
+                    }
+                  num_tablestyle_formats++;
+                  csty = &tbl_sty->cellstyle;
                 }
               if (csty)
                 pair = add_CellStyle (obj, csty, &key[0], dat, pair);
@@ -12205,6 +12312,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
           else if (pair->code == 71
                    && strEQc (subclass, "AcDbSectionViewStyle"))
             {
+              dxf_free_pair (pair); // the 71 . 0 it starts after
               pair = add_AcDbSectionViewStyle (obj, dat);
               if (!pair) // success
                 goto start_loop;
@@ -12214,6 +12322,7 @@ static __nonnull ((1, 2, 3, 4)) Dxf_Pair *new_object (
           else if (pair->code == 71 && strEQc (subclass, "AcDbDetailViewStyle")
                    && obj->fixedtype == DWG_TYPE_DETAILVIEWSTYLE)
             {
+              dxf_free_pair (pair); // the 71 . 0 it starts after
               pair = add_AcDbDetailViewStyle (obj, dat);
               if (pair && pair->code == 100) // success
                 goto start_loop;
@@ -13802,8 +13911,7 @@ invalid_dxf:
 fail:
   if (obj)
     {
-      obj->dxfname = NULL; // prevent double-free by caller
-      dwg_free_object (obj);
+      dwg_free_object (obj); // with its dxfname
       dwg->num_objects--;
     }
   return NULL;
@@ -13865,17 +13973,14 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
               BITCODE_H ref;
               dxf_free_pair (pair);
               // until 0 table or 0 ENDTAB
+              // new_object takes dxfname: the object keeps it, or it is freed
               pair = new_object (table, dxfname, dat, dwg, ctrl_id,
                                  (BITCODE_BL *)&i);
+              dxfname = NULL;
               obj = &dwg->object[idx];
               ctrl = &dwg->object[ctrl_id];
               if (!pair)
-                {
-                  free (dxfname);
-                  if (idx != dwg->num_objects)
-                    obj->dxfname = NULL;
-                  return DWG_ERR_INVALIDDWG;
-                }
+                return DWG_ERR_INVALIDDWG;
               // new_object may have reused an existing object (e.g.,
               // *Paper_Space via "Reuse existing BLOCK_HEADER"), decrementing
               // num_objects. In that case idx >= num_objects and obj points to
@@ -13982,19 +14087,13 @@ dxf_tables_read (Bit_Chain *restrict dat, Dwg_Data *restrict dwg)
                       {
                         _obj->strings_area = (BITCODE_TF)xcalloc (512, 1);
                         if (!_obj->strings_area)
-                          {
-                            free (dxfname);
-                            goto outofmem;
-                          }
+                          goto outofmem;
                       }
                     if (dwg->header.from_version <= R_2004)
                       {
                         _obj->strings_area = (BITCODE_TF)xcalloc (256, 1);
                         if (!_obj->strings_area)
-                          {
-                            free (dxfname);
-                            goto outofmem;
-                          }
+                          goto outofmem;
                       }
                   }
                 else if (dat->version <= R_12 && strEQc (table, "VPORT") && obj

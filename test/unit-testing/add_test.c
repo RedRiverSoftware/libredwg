@@ -3168,6 +3168,7 @@ test_names (void)
   if (!dwg_is_valid_name (dwg, "\xa3\xc1"))
     fail ("dwg_is_valid_name(A3C1) U+FF21 LETTER CP949/r2000");
   dwg_free (dwg);
+  free (dwg);
 
   dwg = dwg_new_Document (R_2007, 0, tracelevel);
   dwg->header.codepage = CP_ANSI_1253; // ANSI Greek
@@ -3206,6 +3207,7 @@ test_names (void)
     fail ("dwg_is_valid_name (\"0\") ANSI_949/r2007");
 
   dwg_free (dwg);
+  free (dwg);
   if (!numfailed ())
     ok ("names");
   return numfailed ();
@@ -3521,6 +3523,336 @@ test_block_control_refresh (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* A layer's settings: frozen, off, frozen in new viewports, locked,
+   plotted, and the lineweight index (31 Default, 11 0.50 mm, 0 0.00 mm). */
+typedef struct
+{
+  const char *name;
+  BITCODE_B frozen, off, frozen_in_new, locked, plotflag;
+  BITCODE_RC linewt;
+} Layer_Flags;
+
+/* The flag0 an r2000+ DWG file stores for the settings. */
+static BITCODE_BS
+layer_flags_flag0 (const Layer_Flags *f)
+{
+  return (BITCODE_BS)((f->frozen ? 1 : 0) | (f->off ? 2 : 0)
+                      | (f->frozen_in_new ? 4 : 0) | (f->locked ? 8 : 0)
+                      | (f->plotflag ? 16 : 0) | ((f->linewt & 0x1f) << 5));
+}
+
+static Dwg_Object_LAYER *
+find_layer (Dwg_Data *dwg, const char *name)
+{
+  Bit_Chain dat = { 0 };
+  dat.version = dwg->header.version;
+  dat.from_version = dwg->header.from_version;
+  dat.opts = dwg->opts;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_LAYER)
+        {
+          Dwg_Object_LAYER *layer = obj->tio.object->tio.LAYER;
+          if (layer->name && bit_eq_T (&dat, layer->name, name))
+            return layer;
+        }
+    }
+  return NULL;
+}
+
+/* The layer f names has f's settings, flag0 included, and with
+   check_colour, colour 7. */
+static void
+check_layer_flags (const char *what, Dwg_Data *dwg, const Layer_Flags *f,
+                   const int check_colour)
+{
+  Dwg_Object_LAYER *layer = find_layer (dwg, f->name);
+  const BITCODE_BS flag0 = layer_flags_flag0 (f);
+  if (!layer)
+    {
+      fail ("%s: no layer %s", what, f->name);
+      return;
+    }
+  if (layer->flag0 == flag0 && layer->frozen == f->frozen
+      && layer->off == f->off && layer->frozen_in_new == f->frozen_in_new
+      && layer->locked == f->locked && layer->plotflag == f->plotflag
+      && layer->linewt == f->linewt
+      && (!check_colour || layer->color.index == 7))
+    ok ("%s: layer %s flag0 0x%x%s", what, f->name, flag0,
+        check_colour ? ", colour 7" : "");
+  else
+    fail ("%s: layer %s flag0 0x%x frozen %d off %d frozen_in_new %d "
+          "locked %d plotflag %d linewt %d colour %d, expected flag0 0x%x%s",
+          what, f->name, layer->flag0, layer->frozen, layer->off,
+          layer->frozen_in_new, layer->locked, layer->plotflag, layer->linewt,
+          layer->color.index, flag0, check_colour ? ", colour 7" : "");
+}
+
+/* Layers of a new document keep their settings through a DWG write and
+   read: layer 0 and a layer from dwg_add_LAYER are plotted with the Default
+   lineweight and colour 7, as AutoCAD makes a layer (colour 0 is ByBlock,
+   which AUDIT reports as out of range on a layer), and settings changed
+   after dwg_add_LAYER are written. */
+static int
+test_layer_flags (const Dwg_Version_Type version)
+{
+  static const Layer_Flags layers[] = {
+    { "0", 0, 0, 0, 0, 1, 31 },           { "Default", 0, 0, 0, 0, 1, 31 },
+    { "Frozen", 1, 0, 0, 0, 1, 31 },      { "Off", 0, 1, 0, 0, 1, 31 },
+    { "FrozenInNew", 0, 0, 1, 0, 1, 31 }, { "Locked", 0, 0, 0, 1, 1, 31 },
+    { "NoPlot", 0, 0, 0, 0, 0, 31 },      { "Thick", 0, 0, 0, 0, 1, 11 },
+    { "All", 1, 1, 1, 1, 0, 0 },
+  };
+  const char *vername = dwg_version_type (version);
+  char file[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+
+  failed = 0;
+  for (int i = 1; i < ARRAY_SIZE (layers); i++)
+    {
+      Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, layers[i].name);
+      if (!layer)
+        {
+          fail ("layer_flags %s: dwg_add_LAYER %s failed", vername,
+                layers[i].name);
+          continue;
+        }
+      layer->frozen = layers[i].frozen;
+      layer->off = layers[i].off;
+      layer->frozen_in_new = layers[i].frozen_in_new;
+      layer->locked = layers[i].locked;
+      layer->plotflag = layers[i].plotflag;
+      layer->linewt = layers[i].linewt;
+    }
+  // what dwg_add_LAYER sets, before anything is written
+  snprintf (what, sizeof (what), "layer_flags %s: new document", vername);
+  check_layer_flags (what, dwg, &layers[0], 1);
+  check_layer_flags (what, dwg, &layers[1], 1);
+
+  snprintf (file, sizeof (file), "add_layers_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  snprintf (what, sizeof (what), "layer_flags %s: read back", vername);
+  for (int i = 0; i < ARRAY_SIZE (layers); i++)
+    check_layer_flags (what, &read, &layers[i], 1);
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+/* The layer named name has colour 7. */
+static void
+check_layer_colour (const char *what, Dwg_Data *dwg, const char *name)
+{
+  Dwg_Object_LAYER *layer = find_layer (dwg, name);
+  if (!layer)
+    fail ("%s: no layer %s", what, name);
+  else if (layer->color.index == 7)
+    ok ("%s: layer %s colour 7", what, name);
+  else
+    fail ("%s: layer %s colour %d, expected 7", what, name,
+          layer->color.index);
+}
+
+/* Before r2000 too, layer 0 and a layer from dwg_add_LAYER have colour 7,
+   in the document and written and read back. */
+static int
+test_layer_colour (const Dwg_Version_Type version)
+{
+  const char *vername = dwg_version_type (version);
+  char file[48], what[64];
+  Dwg_Data *dwg = dwg_new_Document (version, 0, tracelevel);
+  Dwg_Data read;
+
+  failed = 0;
+  if (!dwg_add_LAYER (dwg, "L1"))
+    fail ("layer_colour %s: dwg_add_LAYER L1 failed", vername);
+  snprintf (what, sizeof (what), "layer_colour %s: new document", vername);
+  check_layer_colour (what, dwg, "0");
+  check_layer_colour (what, dwg, "L1");
+
+  snprintf (file, sizeof (file), "add_layer_colour_%s.dwg", vername);
+  if (write_and_read (dwg, file, &read) >= DWG_ERR_CRITICAL)
+    return numfailed ();
+  if (read.header.version != version)
+    fail ("layer_colour %s: read back version %s", vername,
+          dwg_version_type (read.header.version));
+  snprintf (what, sizeof (what), "layer_colour %s: read back", vername);
+  check_layer_colour (what, &read, "0");
+  check_layer_colour (what, &read, "L1");
+  dwg_free (&read);
+  if (!numfailed ())
+    unlink (file);
+  return numfailed ();
+}
+
+// dwg_write_json () is in out_json.c, which needs DXF
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
+/* A document imported from JSON writes a layer's flag0 as the JSON has it:
+   the JSON holds flag0 and the lineweight, not the other fields. */
+static int
+test_layer_flags_json (void)
+{
+  static const Layer_Flags flags = { "J", 1, 0, 0, 1, 0, 11 };
+  const char *jsonfile = "add_layers.json";
+  const char *dwgfile = "add_layers_json.dwg";
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, flags.name);
+  Dwg_Data imported, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  // the JSON writer takes the settings from flag0
+  layer->flag0 = layer_flags_flag0 (&flags);
+  dat.version = dat.from_version = dwg->header.version;
+  dat.codepage = dwg->header.codepage;
+  dat.opts = dwg->opts;
+  dat.fh = fopen (jsonfile, "wb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags json: cannot write %s", jsonfile);
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  error = dwg_write_json (&dat, dwg);
+  fclose (dat.fh);
+  dwg_free (dwg);
+  free (dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_write_json 0x%x", error);
+      return numfailed ();
+    }
+
+  memset (&dat, 0, sizeof (dat));
+  memset (&imported, 0, sizeof (imported));
+  imported.opts = tracelevel;
+  dat.fh = fopen (jsonfile, "rb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags json: cannot read %s", jsonfile);
+      return numfailed ();
+    }
+  error = dwg_read_json (&dat, &imported);
+  fclose (dat.fh);
+  free (dat.chain);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_read_json 0x%x", error);
+      dwg_free (&imported);
+      return numfailed ();
+    }
+  imported.header.version = imported.header.from_version;
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &imported);
+  dwg_free (&imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags json: dwg_write_file 0x%x", error);
+      return numfailed ();
+    }
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  error = dwg_read_file (dwgfile, &read);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("layer_flags json: dwg_read_file 0x%x", error);
+  else
+    check_layer_flags ("layer_flags json: read back", &read, &flags, 1);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      unlink (jsonfile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+#endif
+
+#ifndef DISABLE_DXF
+/* A document imported from DXF takes a layer's frozen, frozen in new
+   viewports and locked from DXF 70 and off from a negative colour (62), and
+   is plotted. The colour is written as imported, negative for off. */
+static int
+test_layer_flags_dxf (void)
+{
+  static const Layer_Flags flags = { "D", 1, 1, 1, 1, 1, 31 };
+  const char *dxffile = "add_layers.dxf";
+  const char *dwgfile = "add_layers_dxf.dwg";
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object_LAYER *layer = dwg_add_LAYER (dwg, flags.name);
+  Dwg_Data imported, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  // the DXF writer takes 70 from flag, the sign of 62 from flag0
+  layer->flag = 1 | 2 | 4;
+  layer->flag0 = layer_flags_flag0 (&flags);
+  dat.version = dat.from_version = dwg->header.version;
+  dat.codepage = dwg->header.codepage;
+  dat.opts = dwg->opts;
+  unlink (dxffile);
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    {
+      fail ("layer_flags dxf: cannot write %s", dxffile);
+      dwg_free (dwg);
+      free (dwg);
+      return numfailed ();
+    }
+  error = dwg_write_dxf (&dat, dwg);
+  fclose (dat.fh);
+  dwg_free (dwg);
+  free (dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dwg_write_dxf 0x%x", error);
+      return numfailed ();
+    }
+
+  // as dxf2dwg
+  memset (&imported, 0, sizeof (imported));
+  imported.opts = tracelevel;
+  imported.header.version = R_2000;
+  error = dxf_read_file (dxffile, &imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dxf_read_file 0x%x", error);
+      dwg_free (&imported);
+      return numfailed ();
+    }
+  if (imported.header.from_version == R_INVALID)
+    imported.header.from_version = imported.header.version;
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &imported);
+  dwg_free (&imported);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("layer_flags dxf: dwg_write_file 0x%x", error);
+      return numfailed ();
+    }
+  memset (&read, 0, sizeof (read));
+  read.opts = tracelevel;
+  error = dwg_read_file (dwgfile, &read);
+  if (error >= DWG_ERR_CRITICAL)
+    fail ("layer_flags dxf: dwg_read_file 0x%x", error);
+  else
+    check_layer_flags ("layer_flags dxf: read back", &read, &flags, 0);
+  dwg_free (&read);
+  if (!numfailed ())
+    {
+      unlink (dxffile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+#endif
+
 int
 main (int argc, char *argv[])
 {
@@ -3571,6 +3903,18 @@ main (int argc, char *argv[])
 #endif
   error += test_entity_count_read ();
   error += test_entity_count_r11_unknown ();
+  error += test_layer_flags (R_2000);
+  error += test_layer_flags (R_2004);
+  error += test_layer_flags (R_2010);
+  error += test_layer_flags (R_2018);
+  error += test_layer_colour (R_11);
+  error += test_layer_colour (R_14);
+#if !defined(DISABLE_DXF) && !defined(DISABLE_JSON)
+  error += test_layer_flags_json ();
+#endif
+#ifndef DISABLE_DXF
+  error += test_layer_flags_dxf ();
+#endif
   error += test_attrib_links_autocad ("example_2000.dwg");
   error += test_attrib_links_autocad ("example_2004.dwg");
   error += test_attrib_links (R_2000);
