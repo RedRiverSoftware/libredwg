@@ -65,6 +65,7 @@ static int test_loglevel;
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
 #define WRITTEN_R11 "dynblock_insert_test_r11.dwg"
 #define WRITTEN_WIDTHS "dynblock_insert_test_widths.dwg"
+#define WRITTEN_COUNTER "dynblock_insert_test_counter.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -5018,6 +5019,363 @@ test_moved_parameters (Dwg_Data *src)
   return failures;
 }
 
+/*--------------------------------------------------------------------------------
+ * The definition's AcDbBlockRepETag counter
+ */
+
+/* Whether EED item eed starts a group of the APPID AcDbBlockRepETag. */
+static int
+is_etag_group (const Dwg_Data *dwg, const Dwg_Eed *eed)
+{
+  const Dwg_Object *appid = object (dwg, eed->handle.value);
+  return appid && appid->fixedtype == DWG_TYPE_APPID
+         && !strcmp (appid->tio.object->tio.APPID->name, "AcDbBlockRepETag");
+}
+
+/* What the AcDbBlockRepETag EED of an object holds: how many groups, and
+   of the first, its size in bytes, its items' codes, its 1070 and its
+   1071. */
+typedef struct
+{
+  unsigned num_groups;
+  BITCODE_BS size;
+  unsigned num_items;
+  BITCODE_RC codes[4];
+  BITCODE_RS value;
+  BITCODE_RL counter;
+} Etag_Group;
+
+static void
+etag_group (const Dwg_Data *dwg, const BITCODE_RLL handle, Etag_Group *g)
+{
+  const Dwg_Object *obj = object (dwg, handle);
+  const Dwg_Eed *eed = obj ? obj->tio.object->eed : NULL;
+  const BITCODE_BL num_eed = obj ? obj->tio.object->num_eed : 0;
+  int in_group = 0;
+  memset (g, 0, sizeof (*g));
+  for (BITCODE_BL i = 0; eed && i < num_eed; i++)
+    {
+      const Dwg_Eed_Data *data = eed[i].data;
+      if (eed[i].size)
+        {
+          in_group = is_etag_group (dwg, &eed[i]);
+          if (in_group && ++g->num_groups == 1)
+            g->size = eed[i].size;
+        }
+      if (!in_group || g->num_groups != 1 || !data)
+        continue;
+      if (g->num_items < 4)
+        g->codes[g->num_items] = data->code;
+      g->num_items++;
+      // Dwg_Eed_Data is packed
+      if (data->code == 70)
+        memcpy (&g->value, &data->u.eed_70.rs, sizeof (g->value));
+      else if (data->code == 71)
+        memcpy (&g->counter, &data->u.eed_71.rl, sizeof (g->counter));
+    }
+}
+
+/* Definition def has one AcDbBlockRepETag group, as AutoCAD writes it on a
+   definition: 8 bytes, 1070 1 and 1071 counter, with no 1005 handle. */
+static int
+check_counter (const char *what, const Dwg_Data *dwg, const BITCODE_RLL def,
+               const BITCODE_RL counter)
+{
+  Etag_Group g;
+  etag_group (dwg, def, &g);
+  if (g.num_groups == 1 && g.size == 8 && g.num_items == 2 && g.codes[0] == 70
+      && g.codes[1] == 71 && g.value == 1 && g.counter == counter)
+    {
+      OK ("%s: the definition's AcDbBlockRepETag group is 1070 1, 1071 %u",
+          what, (unsigned)counter);
+      return 0;
+    }
+  FAIL ("%s: %u AcDbBlockRepETag groups, the first of %u bytes with %u "
+        "items (%u, %u), 1070 %u, 1071 %u; expected one of 8 bytes, 1070 1, "
+        "1071 %u",
+        what, g.num_groups, (unsigned)g.size, g.num_items,
+        (unsigned)g.codes[0], (unsigned)g.codes[1], (unsigned)g.value,
+        (unsigned)g.counter, (unsigned)counter);
+  return 1;
+}
+
+static int
+check_no_counter (const char *what, const Dwg_Data *dwg,
+                  const BITCODE_RLL def)
+{
+  Etag_Group g;
+  etag_group (dwg, def, &g);
+  if (!g.num_groups)
+    {
+      OK ("%s: the definition has no AcDbBlockRepETag group", what);
+      return 0;
+    }
+  FAIL ("%s: the definition has %u AcDbBlockRepETag groups, expected none",
+        what, g.num_groups);
+  return 1;
+}
+
+/* Removes the AcDbBlockRepETag groups from the EED eed of *num_eedp items.
+   Returns how many items it removed. */
+static unsigned
+remove_etag_eed (const Dwg_Data *dwg, Dwg_Eed *eed, BITCODE_BL *num_eedp)
+{
+  BITCODE_BL kept = 0;
+  unsigned removed = 0;
+  int in_group = 0;
+  for (BITCODE_BL i = 0; eed && i < *num_eedp; i++)
+    {
+      if (eed[i].size)
+        in_group = is_etag_group (dwg, &eed[i]);
+      if (in_group)
+        {
+          free (eed[i].data);
+          free (eed[i].raw);
+          removed++;
+        }
+      else
+        eed[kept++] = eed[i];
+    }
+  *num_eedp = kept;
+  return removed;
+}
+
+/* Removes definition def's AcDbBlockRepETag group, the counter, as a
+   definition AutoCAD has not evaluated has none. Returns 0 when it has
+   none to remove. */
+static unsigned
+remove_counter (Dwg_Data *dwg, const BITCODE_RLL def)
+{
+  Dwg_Object_Object *o = object (dwg, def)->tio.object;
+  return remove_etag_eed (dwg, o->eed, &o->num_eed);
+}
+
+/* Sets the 1071 of definition def's AcDbBlockRepETag group to counter, with
+   the bytes read for the group dropped, so that they agree. Returns 0 when
+   it has no such 1071. */
+static int
+set_counter (Dwg_Data *dwg, const BITCODE_RLL def, const BITCODE_RL counter)
+{
+  Dwg_Object_Object *o = object (dwg, def)->tio.object;
+  Dwg_Eed *group = NULL;
+  for (BITCODE_BL i = 0; o->eed && i < o->num_eed; i++)
+    {
+      if (o->eed[i].size)
+        group = is_etag_group (dwg, &o->eed[i]) ? &o->eed[i] : NULL;
+      if (group && o->eed[i].data && o->eed[i].data->code == 71)
+        {
+          // Dwg_Eed_Data is packed
+          memcpy (&o->eed[i].data->u.eed_71.rl, &counter, sizeof (counter));
+          free (group->raw);
+          group->raw = NULL;
+          return 1;
+        }
+    }
+  return 0;
+}
+
+/* The highest AcDbBlockRepETag index of the entities of block def. */
+static BITCODE_RL
+highest_index (const Dwg_Data *dwg, const BITCODE_RLL def)
+{
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, def);
+  BITCODE_RL highest = 0;
+  for (BITCODE_BL i = 0; blk && blk->entities && i < blk->num_owned; i++)
+    {
+      const Dwg_Object *ent = object (dwg, ref (blk->entities[i]));
+      BITCODE_RLL handle = 0;
+      BITCODE_RL index = 0;
+      if (ent && eed_tag (dwg, ent, "AcDbBlockRepETag", &handle, &index)
+          && index > highest)
+        highest = index;
+    }
+  return highest;
+}
+
+/* Adds to block def a LINE with the AcDbBlockRepETag index given. Returns
+   0 when it is added. */
+static int
+add_indexed_line (Dwg_Data *dwg, const BITCODE_RLL def, const BITCODE_RL index)
+{
+  const dwg_point_3d p1 = { 0.0, 0.0, 0.0 }, p2 = { 1.0, 1.0, 0.0 };
+  Dwg_Entity_LINE *line = dwg_add_LINE (block_header (dwg, def), &p1, &p2);
+  loglevel = test_loglevel;
+  return !line || add_etag (dwg, line->parent, index);
+}
+
+/* Places def at the origin with the n values v: at the definition's values
+   (at_defaults), drawing def, or else drawing a representation block. */
+static int
+place_at_origin (Dwg_Data *dwg, const BITCODE_RLL def, const Dwg_DynValue *v,
+                 const BITCODE_BL n, const int at_defaults,
+                 const int expected_error, const char *what)
+{
+  const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
+  Dwg_Entity_INSERT *ins;
+  int error = 0;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def), &at,
+                             1.0, 0.0, v, n, NULL, 0, &error);
+  loglevel = test_loglevel;
+  if (ins && error == expected_error
+      && (ref (ins->block_header) == def) == at_defaults)
+    return 0;
+  FAIL ("%s: placing failed: 0x%x, expected 0x%x, drawing %s", what, error,
+        expected_error,
+        !ins                             ? "nothing"
+        : ref (ins->block_header) == def ? "the definition"
+                                         : "a representation block");
+  return 1;
+}
+
+/* A placement at other values gives a definition without an
+   AcDbBlockRepETag group, the counter AutoCAD keeps on a definition once
+   it has evaluated it, one: 1070 1 and 1071 one more than the highest
+   index of its entities, neither their count nor the last one's plus 1,
+   with their indexes kept. A copy of Trees, whose entities have the
+   indexes 0 to 581, has its group removed and gets two LINEs with the
+   indexes 1000 and then 900. A placement at the definition's values adds
+   no group; one at another visibility state adds 1071 1001, which a
+   second one leaves alone, and which the document written and read back
+   holds, its placements still matching their evaluation. A copy of the
+   Door, whose entities have the indexes 0 to 10, with its group's 1071
+   set to 50 instead of 11, keeps 50. A definition
+   whose entities have no index gets no group, nor, with
+   DWG_ERR_INVALIDEED, does one whose highest index is 0x7FFFFFFF, as a
+   1071 of 0x80000000 is negative. */
+static int
+test_etag_counter (Dwg_Data *src)
+{
+  BITCODE_RLL def = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def);
+  Dwg_Data readback;
+  Dwg_DynValue shrub, wall;
+  int failures = 0, error;
+
+  memset (&shrub, 0, sizeof (shrub));
+  shrub.name = (char *)"Type (view)";
+  shrub.state = (char *)"Shrub (Plan)";
+  memset (&wall, 0, sizeof (wall));
+  wall.name = (char *)"Wall Thickness";
+  wall.value = 6.0;
+
+  if (!dst || !remove_counter (dst, def) || add_indexed_line (dst, def, 1000)
+      || add_indexed_line (dst, def, 900))
+    {
+      FAIL ("counter: preparing the copy of Trees failed");
+      free_document (dst);
+      return 1;
+    }
+  if (highest_index (dst, def) != 1000)
+    {
+      FAIL ("counter: Trees' highest index is %u, expected 1000",
+            (unsigned)highest_index (dst, def));
+      free_document (dst);
+      return 1;
+    }
+  failures += place_at_origin (dst, def, NULL, 0, 1, 0,
+                               "counter at the definition's values");
+  failures += check_no_counter ("counter at the definition's values", dst,
+                                def);
+  failures += place_at_origin (dst, def, &shrub, 1, 0, 0,
+                               "counter at another state");
+  failures += check_counter ("counter at another state", dst, def, 1001);
+  failures += place_at_origin (dst, def, &shrub, 1, 0, 0,
+                               "counter at another state again");
+  failures
+      += check_counter ("counter at another state again", dst, def, 1001);
+
+  error = write_dwg (WRITTEN_COUNTER, dst);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("counter: write r2004: 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      error = read_dwg (WRITTEN_COUNTER, &readback);
+      if (error >= DWG_ERR_CRITICAL)
+        {
+          FAIL ("counter: read back: 0x%x", error);
+          failures++;
+        }
+      else
+        {
+          Dwg_DynBlock_Check_Report *report;
+          failures
+              += check_counter ("counter read back", &readback, def, 1001);
+          loglevel = tracelevel;
+          report = dwg_dynblock_check (&readback, 1e-9);
+          loglevel = test_loglevel;
+          if (report && report->num_checks == 2 && report->num_match == 2)
+            OK ("counter read back: the check matches both representation "
+                "blocks");
+          else
+            {
+              FAIL ("counter read back: %u checks, %u match, expected 2",
+                    report ? (unsigned)report->num_checks : 0,
+                    report ? (unsigned)report->num_match : 0);
+              failures++;
+            }
+          dwg_dynblock_free_check_report (report);
+        }
+      free_dwg (&readback);
+    }
+  free_document (dst);
+
+  dst = document_with (src, DOOR, &def);
+  if (!dst || highest_index (dst, def) != 10 || !set_counter (dst, def, 50))
+    {
+      FAIL ("counter: preparing the copy of the Door failed");
+      free_document (dst);
+      return failures + 1;
+    }
+  failures += place_at_origin (dst, def, &wall, 1, 0, 0,
+                               "counter of 50 at another Wall Thickness");
+  failures += check_counter ("counter of 50 at another Wall Thickness", dst,
+                             def, 50);
+  free_document (dst);
+
+  // the Door with no index on its entities
+  dst = document_with (src, DOOR, &def);
+  if (dst && remove_counter (dst, def))
+    {
+      const Dwg_Object_BLOCK_HEADER *blk = block_header (dst, def);
+      for (BITCODE_BL i = 0; blk->entities && i < blk->num_owned; i++)
+        {
+          Dwg_Object *ent = object (dst, ref (blk->entities[i]));
+          if (ent && ent->supertype == DWG_SUPERTYPE_ENTITY)
+            remove_etag_eed (dst, ent->tio.entity->eed,
+                             &ent->tio.entity->num_eed);
+        }
+      failures += place_at_origin (dst, def, &wall, 1, 0, 0,
+                                   "counter with no index");
+      failures += check_no_counter ("counter with no index", dst, def);
+    }
+  else
+    {
+      FAIL ("counter: preparing the copy of the Door failed");
+      failures++;
+    }
+  free_document (dst);
+
+  dst = document_with (src, TREES, &def);
+  if (!dst || !remove_counter (dst, def)
+      || add_indexed_line (dst, def, 0x7FFFFFFF))
+    {
+      FAIL ("counter: preparing the copy of Trees failed");
+      free_document (dst);
+      return failures + 1;
+    }
+  failures += place_at_origin (dst, def, &shrub, 1, 0, DWG_ERR_INVALIDEED,
+                               "counter with no room");
+  failures += check_no_counter ("counter with no room", dst, def);
+  free_document (dst);
+  if (!failures)
+    unlink (WRITTEN_COUNTER);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -5060,6 +5418,7 @@ main (int argc, char *argv[])
   failures += test_minsert (&src);
   failures += test_unknown_states (&src);
   failures += test_moved_parameters (&src);
+  failures += test_etag_counter (&src);
   free_dwg (&src);
   return failures ? 1 : 0;
 }
