@@ -57,6 +57,7 @@ static int test_loglevel;
 #define WRITTEN "dynblock_insert_test.dwg"
 #define WRITTEN_ATTRIBS "dynblock_insert_test_attribs.dwg"
 #define WRITTEN_NON_ASCII "dynblock_insert_test_non_ascii.dwg"
+#define WRITTEN_ATTRIBUTE_TEXT "dynblock_insert_test_attribute_text.dwg"
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
@@ -1854,26 +1855,33 @@ test_attributes (Dwg_Data *src)
   return failures;
 }
 
-/* An attribute definition whose default value has characters outside
-   ASCII, added to Trees in a fixture of its own, which holds it in
-   codepage 1252, and copied with Trees into a document built with the add
-   API, which holds it in UTF-8: the ATTRIB placed holds what the add API
-   stores for that default given in UTF-8. Not written, as the encoder of a
-   document built with the add API doesn't write all characters right. */
+/* Attribute definitions whose default values have characters outside
+   ASCII, in a document built with the add API, which holds them in UTF-8,
+   placed at their defaults: one added to Trees in a fixture of its own,
+   which holds it in codepage 1252, and copied with Trees, the other added
+   to the copy with dwg_add_ATTDEF (). The ATTRIBs hold the defaults as
+   given in UTF-8, and the r2004 file written holds them in codepage
+   1252. */
 static int
 test_attribute_text (void)
 {
   static const char dflt[] = "30\xC2\xB0 caf\xC3\xA9";
   static const char dflt_1252[] = "30\xB0 caf\xE9";
-  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 };
+  static const char state[] = "Open 30\xC2\xBA";
+  static const char state_1252[] = "Open 30\xBA";
+  const Expected_Attrib utf8[]
+      = { { "SIZE", dflt }, { "STATE", state } };
+  const Expected_Attrib cp1252[]
+      = { { "SIZE", dflt_1252 }, { "STATE", state_1252 } };
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 };
   const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
-  Dwg_Data src;
+  Dwg_Data src, readback;
   Dwg_Data *dst = NULL;
-  BITCODE_RLL def_h = 0;
-  const Dwg_Object *defobj = NULL, *attobj = NULL;
-  Dwg_Entity_ATTDEF *attdef;
+  BITCODE_RLL def_h = 0, h;
+  const Dwg_Object *defobj = NULL;
+  Dwg_Object_BLOCK_HEADER *def;
+  Dwg_Entity_ATTDEF *attdef, *added;
   Dwg_Entity_INSERT *ins;
-  char *expected = NULL;
   int error, failures = 0;
 
   error = read_dwg (fixture, &src);
@@ -1893,6 +1901,8 @@ test_attribute_text (void)
       free_dwg (&src);
       return 1;
     }
+  // the add API leaves the width factor 0
+  attdef->width_factor = 1.0;
   dst = document_with (&src, TREES, &def_h);
   if (!dst)
     {
@@ -1900,12 +1910,10 @@ test_attribute_text (void)
       free_dwg (&src);
       return 1;
     }
+  def = block_header (dst, def_h);
   // the copy of the definition, the block's last entity
-  {
-    const Dwg_Object_BLOCK_HEADER *def = block_header (dst, def_h);
-    if (def->num_owned && def->entities)
-      defobj = object (dst, ref (def->entities[def->num_owned - 1]));
-  }
+  if (def->num_owned && def->entities)
+    defobj = object (dst, ref (def->entities[def->num_owned - 1]));
   if (defobj && defobj->fixedtype == DWG_TYPE_ATTDEF
       && !strcmp (defobj->tio.entity->tio.ATTDEF->default_value, dflt))
     OK ("attribute text: the definition copied in UTF-8");
@@ -1914,37 +1922,64 @@ test_attribute_text (void)
       FAIL ("attribute text: the definition not copied in UTF-8");
       failures++;
     }
+  added = dwg_add_ATTDEF (def, 2.5, 0, "State", &p2, "STATE", state);
+  loglevel = test_loglevel;
+  if (added && added->default_value && !strcmp (added->default_value, state))
+    {
+      OK ("attribute text: a definition added to the copy in UTF-8");
+      added->width_factor = 1.0;
+    }
+  else
+    {
+      FAIL ("attribute text: the definition not added to the copy in "
+            "UTF-8");
+      free_dwg (dst);
+      free (dst);
+      free_dwg (&src);
+      return failures + 1;
+    }
 
   error = 0;
   loglevel = tracelevel;
-  ins = dwg_dynblock_insert (model_space (dst), block_header (dst, def_h),
-                             &at, 1.0, 0.0, NULL, 0, NULL, 0, &error);
-  expected = dwg_add_u8_input (dst, dflt);
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             NULL, 0, &error);
   loglevel = test_loglevel;
-  if (ins && ins->num_owned == 1 && ins->attribs)
-    attobj = object (dst, ref (ins->attribs[0]));
-  if (!ins || error || !expected)
+  if (!ins || error)
     {
       FAIL ("attribute text: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      free_dwg (&src);
+      return failures + 1;
+    }
+  h = handle_of (dst, ins);
+  failures += check_attribs ("attribute text, in UTF-8", dst, h, def_h, &at,
+                             1.0, 0.0, utf8, 2, 1);
+
+  error = write_dwg (WRITTEN_ATTRIBUTE_TEXT, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ATTRIBUTE_TEXT, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("attribute text: write or read back 0x%x", error);
       failures++;
     }
-  else if (attobj && attobj->fixedtype == DWG_TYPE_ATTRIB
-           && attobj->tio.entity->tio.ATTRIB->text_value
-           && !strcmp (attobj->tio.entity->tio.ATTRIB->text_value, expected))
-    OK ("attribute text: the ATTRIB holds the default as the add API "
-        "stores it");
   else
     {
-      FAIL ("attribute text: the ATTRIB holds '%s', not the default as the "
-            "add API stores it, '%s'",
-            attobj && attobj->fixedtype == DWG_TYPE_ATTRIB
-                    && attobj->tio.entity->tio.ATTRIB->text_value
-                ? attobj->tio.entity->tio.ATTRIB->text_value
-                : "",
-            expected);
-      failures++;
+      if (readback.header.codepage != CP_ANSI_1252)
+        {
+          FAIL ("attribute text: read back with codepage %u",
+                (unsigned)readback.header.codepage);
+          failures++;
+        }
+      failures += check_attribs ("read back attribute text, in codepage "
+                                 "1252",
+                                 &readback, h, def_h, &at, 1.0, 0.0, cp1252,
+                                 2, 1);
+      free_dwg (&readback);
     }
-  free (expected);
+  if (!failures)
+    unlink (WRITTEN_ATTRIBUTE_TEXT);
   free_dwg (dst);
   free (dst);
   free_dwg (&src);

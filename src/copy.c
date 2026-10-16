@@ -41,6 +41,7 @@
 #include "bits.h"
 #include "dwg.h"
 #include "decode.h"
+#include "encode.h"
 #include "classes.h"
 #include "hash.h"
 #include "copy.h"
@@ -1294,12 +1295,14 @@ copy_eed (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
 }
 
 /* The bytes XRECORD data takes in an r13 to r2004 DWG file, as the decoder
-   reads it: each item's type [RS], then its value. */
+   reads it: each item's type [RS], then its value. The encoder writes
+   num_xdata items, and the JSON importer leaves an empty one after
+   them. */
 static BITCODE_BL
-copy_xdata_size (const Dwg_Resbuf *restrict rbuf)
+copy_xdata_size (const Dwg_Resbuf *restrict rbuf, const BITCODE_BL num_xdata)
 {
   size_t size = 0;
-  for (; rbuf; rbuf = rbuf->nextrb)
+  for (BITCODE_BL i = 0; rbuf && i < num_xdata; rbuf = rbuf->nextrb, i++)
     {
       size += 2;
       switch (dwg_resbuf_value_type (rbuf->type))
@@ -1380,7 +1383,12 @@ copy_xdata (Copy_Chain *restrict cdat, const Dwg_Object *restrict holder,
                   copy->value.str.size = 0;
                   cdat->error |= DWG_ERR_OUTOFMEM;
                 }
-              else if (size > 0xFFFF)
+              /* dst's encoder writes a string in the codepage as it is, and
+                 dwg_decode_xdata () reads a length above 0x7FFF as negative
+                 and skips the string. A string in UTF-8 is converted again
+                 when it is written, and truncated to 0x7FFF bytes then. */
+              else if (size > (cdat->tv == COPY_TV_FROM_UTF8 ? 0x7FFF
+                                                              : 0xFFFF))
                 {
                   LOG_ERROR ("copy: %s " FORMAT_HV " XRECORD string of %u "
                              "bytes too long once converted",
@@ -1668,8 +1676,7 @@ copy_restore_values (const Dwg_DYNAPI_field *fields, void *restrict _obj,
    each kind of document: as it is from a document imported from JSON;
    from flag and the colour of one imported from DXF, plotted; and from the
    fields of any other. This is the flag0 a layer of src stands for: what
-   the encoder writes of it, but from the fields for the add API, which
-   sets those (plotflag, linewt) and not flag0. */
+   the encoder writes of it. */
 static BITCODE_BS
 copy_layer_flag0 (const Dwg_Object_LAYER *restrict src, const Copy_Kind kind)
 {
@@ -1723,6 +1730,57 @@ copy_layer_flags (const Copy_Chain *restrict cdat,
     _obj->color.index = _obj->off ? -abs (_obj->color.index)
                                   : abs (_obj->color.index);
 }
+
+/* Whether the encoder works out the dataflags of dwg's TEXTs, ATTRIBs and
+   ATTDEFs from their values (dwg.spec): for a DXF import, a document built
+   with the add API, and r2000 and older. It writes those of the others as
+   they are, and leaves out the values they flag as defaults. */
+static int
+copy_dataflags_from_values (const Dwg_Data *dwg)
+{
+  return (dwg->opts & DWG_OPTS_INDXF) || dwg->header.from_version <= R_2000;
+}
+
+/* A TEXT, ATTRIB or ATTDEF copied into a document whose encoder takes its
+   dataflags otherwise than its source's. From a source whose encoder works
+   them out, the copy gets them from its values: the DXF importer sets a
+   flag for a value that is there, where a DWG file sets it for one left
+   out. From the others, the values its flags leave out get their
+   defaults, as the decoder reads them: a JSON import holds a width factor
+   of 0 where its flag stands for 1. Only the DWG encoder, which comes with
+   write support, reads the flags. */
+#ifdef USE_WRITE
+#  define COPY_SET_DATAFLAGS dwg_set_dataflags (obj)
+#else
+#  define COPY_SET_DATAFLAGS ((void)0)
+#endif
+#define COPY_TEXT_DATAFLAGS(token)                                            \
+  {                                                                           \
+    Dwg_Entity_##token *_obj = obj->tio.entity->tio.token;                    \
+    const int src_values = copy_dataflags_from_values (cdat->src);            \
+    const int dst_values = copy_dataflags_from_values (cdat->dst);            \
+    if (src_values && !dst_values)                                            \
+      COPY_SET_DATAFLAGS;                                                     \
+    else if (!src_values && dst_values)                                       \
+      {                                                                       \
+        if (_obj->dataflags & 0x01)                                           \
+          _obj->elevation = 0.0;                                              \
+        if (_obj->dataflags & 0x02)                                           \
+          _obj->alignment_pt.x = _obj->alignment_pt.y = 0.0;                  \
+        if (_obj->dataflags & 0x04)                                           \
+          _obj->oblique_angle = 0.0;                                          \
+        if (_obj->dataflags & 0x08)                                           \
+          _obj->rotation = 0.0;                                               \
+        if (_obj->dataflags & 0x10)                                           \
+          _obj->width_factor = 1.0;                                           \
+        if (_obj->dataflags & 0x20)                                           \
+          _obj->generation = 0;                                               \
+        if (_obj->dataflags & 0x40)                                           \
+          _obj->horiz_alignment = 0;                                          \
+        if (_obj->dataflags & 0x80)                                           \
+          _obj->vert_alignment = 0;                                           \
+      }                                                                       \
+  }
 
 /*--------------------------------------------------------------------------------
  * Fixups the specs can't express
@@ -1808,13 +1866,28 @@ copy_fixup_after (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
       copy_layer_flags (cdat, obj->tio.object->tio.LAYER,
                         srcobj->tio.object->tio.LAYER);
       break;
+    case DWG_TYPE_TEXT:
+      COPY_TEXT_DATAFLAGS (TEXT);
+      break;
+    case DWG_TYPE_ATTRIB:
+      COPY_TEXT_DATAFLAGS (ATTRIB);
+      break;
+    case DWG_TYPE_ATTDEF:
+      COPY_TEXT_DATAFLAGS (ATTDEF);
+      break;
     /* The encoder of a document read from a DWG file writes xdata_size as
-       it is, so it follows strings converted to other lengths. */
+       it is, and leaves out a string that would end beyond it, so it
+       follows strings converted to other lengths. The encoder of an import
+       or of a document built with the add API computes it as it writes, so
+       their xdata_size may be off: dwg_add_XRECORD_string () counts 4 bytes
+       and the string, where a string takes 5 and itself. */
     case DWG_TYPE_XRECORD:
-      if (cdat->xdata_resized)
+      if (cdat->xdata_resized
+          || ((cdat->src->opts & DWG_OPTS_IN)
+              && !(cdat->dst->opts & DWG_OPTS_IN)))
         {
           Dwg_Object_XRECORD *_obj = obj->tio.object->tio.XRECORD;
-          _obj->xdata_size = copy_xdata_size (_obj->xdata);
+          _obj->xdata_size = copy_xdata_size (_obj->xdata, _obj->num_xdata);
           cdat->xdata_resized = 0;
         }
       break;
@@ -1833,16 +1906,15 @@ copy_fixup_after (Copy_Chain *restrict cdat, Dwg_Object *restrict obj,
       }
       break;
     /* A DWG file has no control points or knots for a fit-point spline
-       (scenario 2), but the DXF importer sets them, and the spec walk
-       leaves them out there. */
+       (scenario 2), but the DXF importer sets them. There the spec walks
+       the knots, for freeing, and frees the control points without walking
+       them (END_REPEAT), which copies nothing. */
     case DWG_TYPE_SPLINE:
       {
         Dwg_Entity_SPLINE *_obj = obj->tio.entity->tio.SPLINE;
         BITCODE_BL i;
         if (_obj->scenario & 1)
           break;
-        (void)copy_vector (cdat, (void **)&_obj->knots, _obj->num_knots,
-                           sizeof (BITCODE_BD));
         (void)copy_vector (cdat, (void **)&_obj->ctrl_pts,
                            _obj->num_ctrl_pts,
                            sizeof (Dwg_SPLINE_control_point));

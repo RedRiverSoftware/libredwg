@@ -391,7 +391,8 @@ typedef struct _param_list
   const char *unknown_class;
 } Param_List;
 
-/* Appends a property of parameter obj, named name in dwg's codepage. */
+/* Appends a property of parameter obj, named name as dwg keeps its
+   strings, in its codepage or in UTF-8 (utf8_copy ()). */
 static Dwg_DynParam *
 add_param (Param_List *list, const Dwg_Data *dwg, const Dwg_Object *obj,
            const Dwg_DynParam_Kind kind, const char *name)
@@ -3978,8 +3979,8 @@ compare_doubles (Dynblock_Compare *c, const char *name, const double *a,
       }
 }
 
-/* Strings compare as the drawing keeps them, in its codepage, and are
-   given in the reason in UTF-8. */
+/* Strings compare as the drawing keeps them, in its codepage or in UTF-8
+   (utf8_copy ()), and are given in the reason in UTF-8. */
 static void
 compare_string (Dynblock_Compare *c, const char *name, const char *a,
                 const char *b)

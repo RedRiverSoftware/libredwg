@@ -105,10 +105,16 @@ typedef struct _dwg_copy_unresolved
      between the two, with \U+XXXX for a character the codepage lacks, as
      the encoder converts them. An XRECORD's strings are converted with
      their own codepage, NULs inside them kept, and its xdata_size computed
-     again. EED strings, which the encoder writes as they are in every
-     kind, are copied as they are. A string that is not UTF-8 in a document
-     whose strings are, or that has a character beyond U+FFFF, which
-     \U+XXXX can't hold, is copied as it is, with DWG_ERR_VALUEOUTOFBOUNDS.
+     again, as it is too for a copy from an import or a document built
+     with the add API into a document read from a DWG file. An XRECORD
+     string too long once converted is left out, NULL with size 0, with
+     DWG_ERR_VALUEOUTOFBOUNDS: above 0x7FFF bytes in the codepage, the most
+     the decoder reads, or above 0xFFFF in UTF-8, the most its size holds
+     (the encoder converts it, and truncates the result to 0x7FFF). EED
+     strings, which the encoder writes as they are in every kind, are
+     copied as they are. A string that is not UTF-8 in a document whose
+     strings are, or that has a character beyond U+FFFF, which \U+XXXX
+     can't hold, is copied as it is, with DWG_ERR_VALUEOUTOFBOUNDS.
    - From r2000 a LAYER holds its flags three ways: flag0, the fields
      frozen, off, frozen_in_new, locked, plotflag and linewt, and the DXF
      flag with the sign of the colour index. The encoder writes flag0 as it
@@ -116,14 +122,20 @@ typedef struct _dwg_copy_unresolved
      plotted, and from the fields for the others. A copy into a document of
      another kind holds all three as its source stands for them: flag0 from
      a JSON import, the DXF flag and the colour from a DXF import, and the
-     fields from the others, the add API's included, which sets those and
-     not flag0.
+     fields from the others.
+   - The encoder works out the dataflags of a TEXT, ATTRIB or ATTDEF from
+     its values for a DXF import, a document built with the add API, or
+     one of r2000 or older, and writes those of the others as they are,
+     leaving out the values they flag as defaults. A copy into a document
+     whose encoder takes them otherwise than its source's gets them from
+     its values, or, the other way, the values its source's flags leave
+     out at their defaults.
    The copy walks the specs, which set some fields from others as the
    decoder needs them (a table record's DXF flag from its bits, LAYER's
-   fields from flag0). Those fields then take their sources' values again,
-   but for counts, which the walk sets to the number of elements it copied
-   (TABLESTYLE's three row styles, IMAGE's two clip vertices of a
-   rectangle).
+   fields from flag0). Those fields then take their sources' values again.
+   So does a count, when it is no larger than the walk's, which may have
+   copied that many elements (TABLESTYLE's three row styles, IMAGE's two
+   clip vertices of a rectangle).
 
    src and dst must be r13 to r2004 documents (R_13b1 to R_2004), and,
    between documents, of the same version and codepage. A copy is refused
