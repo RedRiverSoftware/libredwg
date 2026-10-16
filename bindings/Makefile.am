@@ -77,7 +77,9 @@ install-am: $(dist_perl_PERL) perl/Makefile perl/LibreDWG.$(OBJEXT)
 	  echo "perl bindings not installed: configured --with-perl-install=no"; \
 	else \
 	  echo '$(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)"'; \
-	  $(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)"; \
+	  $(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)" || { \
+	    echo "perl bindings install failed; configure --with-perl-install=no skips it"; \
+	    exit 1; }; \
 	fi
 
 clean-am:
