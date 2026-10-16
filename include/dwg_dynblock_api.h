@@ -327,7 +327,8 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
      block table is full (65535 blocks);
    - DWG_ERR_INVALIDTYPE when def is not a dynamic block definition;
    - no further bit for an action or parameter whose data isn't what
-     AutoCAD writes, such as a stretch point an entity doesn't have.
+     AutoCAD writes, such as a stretch point an entity or a linear
+     parameter doesn't have.
    Or the copy's refusal, such as of an entity handle def lists twice. A
    refusal adds nothing to the document, and the reason is logged at
    LOG_ERROR. Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the
@@ -401,18 +402,20 @@ typedef struct _dwg_attvalue
    increment, counted from its minimum or 0 (DWG_ERR_VALUEOUTOFBOUNDS);
    values that dwg_dynblock_evaluate () refuses, with its reasons, such as
    a FLIP value of 1; for a representation block, a graph node of a class
-   whose stored value is not known, a rotate or scale action whose base
-   point isn't (0, 0, 0), an entity that draws a block of its own, as a
+   whose stored value is not known (one of a class LibreDWG can't decode
+   is refused first, as dwg_dynblock_evaluate () refuses it, with
+   DWG_ERR_UNHANDLEDCLASS), a rotate or scale action whose base point
+   isn't (0, 0, 0), an entity that draws a block of its own, as a
    DIMENSION does, or values at which an action that runs moves a
    parameter in a way whose stored points AutoCAD's placements have not
-   shown: a rotation
-   parameter that another action moves or turns, a parameter an action
+   shown: a rotation parameter that another action moves or turns, a base
+   point parameter that an action moves or turns, a parameter an action
    selects without listing it among those it moves, an action listing its
-   own parameter or one parameter twice, a stretch point a parameter's
-   record doesn't hold or one listed twice, a rotation parameter given a
-   value whose end point is at its base point, or a parameter that a
-   rotate action turns and another action moves or turns too
-   (DWG_ERR_NOTYETSUPPORTED), or that would move
+   own parameter or one parameter twice, a stretch point that the record
+   of a parameter other than a linear one doesn't hold, or a point listed
+   twice, a rotation parameter given a value whose end point is at its
+   base point, or a parameter that a rotate action turns and another
+   action moves or turns too (DWG_ERR_NOTYETSUPPORTED), or that would move
    a parameter's point beyond what a double holds, or leave the points of
    a parameter given a value that don't hold it, as at coordinates so large
    that they round (DWG_ERR_VALUEOUTOFBOUNDS); an attribute definition

@@ -787,7 +787,7 @@ repeat_placement (Dwg_Data *dst, Dwg_Data *src, BITCODE_RLL map[][2],
                   const double rotation)
 {
   const Dwg_Object *ins = object (src, autocad);
-  const Dwg_Entity_INSERT *_ins = ins->tio.entity->tio.INSERT;
+  const Dwg_Entity_INSERT *_ins;
   Dwg_Object_BLOCK_HEADER *def = NULL;
   Dwg_DynValue *values = NULL;
   BITCODE_BL count = 0;
@@ -796,6 +796,12 @@ repeat_placement (Dwg_Data *dst, Dwg_Data *src, BITCODE_RLL map[][2],
   const unsigned n = num_placements;
   int at_defaults = 1, evaluated = 0, failures = 0, error;
   char what[256];
+  if (!ins || ins->fixedtype != DWG_TYPE_INSERT)
+    {
+      FAIL ("AutoCAD's placement " FORMAT_HV " not found", autocad);
+      return 1;
+    }
+  _ins = ins->tio.entity->tio.INSERT;
   error = dwg_dynblock_get_values (_ins, &def, &values, &count);
   error |= dwg_dynblock_get_params (def, &params, &num_params);
   loglevel = test_loglevel;
@@ -2808,12 +2814,10 @@ test_huge_rotation (Dwg_Data *dwg, const BITCODE_RLL def,
   const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
   const Dwg_Object *obj
       = graph_node (dwg, def, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
-  const Dwg_Object_BLOCKROTATIONPARAMETER *rotation
-      = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
-  const BITCODE_RLL param = obj->handle.value;
-  const BITCODE_BL nodeid = rotation->evalexpr.nodeid;
-  const BITCODE_3BD base = rotation->def_basept,
-                    base_angle = rotation->def_base_angle_pt;
+  const Dwg_Object_BLOCKROTATIONPARAMETER *rotation;
+  BITCODE_RLL param;
+  BITCODE_BL nodeid;
+  BITCODE_3BD base, base_angle;
   Dwg_Entity_INSERT *insert;
   Dwg_Object_BLOCK_HEADER *read_def = NULL;
   Dwg_DynValue *values = NULL;
@@ -2823,6 +2827,16 @@ test_huge_rotation (Dwg_Data *dwg, const BITCODE_RLL def,
   char key[16];
   double angle = -1.0;
   int error = 0;
+  if (!obj)
+    {
+      FAIL ("insert %s: the rotation parameter not found", what);
+      return 1;
+    }
+  rotation = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+  param = obj->handle.value;
+  nodeid = rotation->evalexpr.nodeid;
+  base = rotation->def_basept;
+  base_angle = rotation->def_base_angle_pt;
   loglevel = tracelevel;
   insert = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def),
                                 &pt, 1.0, 0.0, v, n, NULL, 0, &error);
@@ -3409,6 +3423,7 @@ typedef struct
 
 #define GRAFT_PARAM 905
 #define GRAFT_ACTION 920
+#define GRAFT_BASEPOINT 930
 
 static int
 graft_rotation (Dwg_Data *dwg, const BITCODE_RLL window,
@@ -3491,6 +3506,7 @@ entity_copy (const Dwg_Data *dst, const Dwg_Data *src, const BITCODE_RLL def,
    listing its own parameter among those it moves; a parameter an action
    selects without listing it; a stretch point a parameter's record
    doesn't hold, or one listed twice; a rotation parameter that another
+   action moves; a base point parameter that a stretch, move or rotate
    action moves; and a parameter that a rotate action turns and another
    action moves. dwg_dynblock_insert () refuses each with nothing added,
    while dwg_dynblock_evaluate () evaluates the geometry, which doesn't
@@ -3502,13 +3518,14 @@ test_unknown_states (Dwg_Data *src)
   BITCODE_RLL map[8][2];
   unsigned num_map;
   BITCODE_RLL window, door, toilet;
-  Dwg_Object *width, *height, *wall, *swing, *angle, *obj;
+  Dwg_Object *width, *height, *wall, *swing, *angle, *basept, *obj;
   Dwg_Object_BLOCKSTRETCHACTION *stretch_width = NULL, *stretch_wall = NULL;
   Dwg_Object_BLOCKMOVEACTION *move_swing = NULL;
   Dwg_Object_BLOCKROTATEACTION *rotate_plan = NULL;
+  Dwg_Object_BLOCKBASEPOINTPARAMETER *_basept;
   Dwg_DynValue v[2];
-  BITCODE_BL width_id, height_id, wall_id, swing_id, angle_id;
-  BITCODE_RLL height_h;
+  BITCODE_BL width_id, height_id, wall_id, swing_id, angle_id, basept_id;
+  BITCODE_RLL height_h, basept_h;
   Graft g;
   int failures;
 
@@ -3523,6 +3540,8 @@ test_unknown_states (Dwg_Data *src)
   wall = named_node (dst, door, DWG_TYPE_BLOCKLINEARPARAMETER, "wall");
   swing = named_node (dst, door, DWG_TYPE_BLOCKFLIPPARAMETER, "swing");
   angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  // which no action of the fixture moves
+  basept = graph_node (dst, door, DWG_TYPE_BLOCKBASEPOINTPARAMETER, NULL);
   if ((obj = named_node (dst, window, DWG_TYPE_BLOCKSTRETCHACTION,
                          "Stretch Width")))
     stretch_width = obj->tio.object->tio.BLOCKSTRETCHACTION;
@@ -3533,8 +3552,8 @@ test_unknown_states (Dwg_Data *src)
   if ((obj = named_node (dst, toilet, DWG_TYPE_BLOCKROTATEACTION,
                          "Rotate Plan")))
     rotate_plan = obj->tio.object->tio.BLOCKROTATEACTION;
-  if (!width || !height || !wall || !swing || !angle || !stretch_width
-      || !stretch_wall || !move_swing || !rotate_plan)
+  if (!width || !height || !wall || !swing || !angle || !basept
+      || !stretch_width || !stretch_wall || !move_swing || !rotate_plan)
     {
       FAIL ("unknown states: fixture objects not found");
       free_document (dst);
@@ -3546,7 +3565,10 @@ test_unknown_states (Dwg_Data *src)
   wall_id = nodeid_of (wall);
   swing_id = nodeid_of (swing);
   angle_id = nodeid_of (angle);
+  basept_id = nodeid_of (basept);
   height_h = height->handle.value;
+  basept_h = basept->handle.value;
+  _basept = basept->tio.object->tio.BLOCKBASEPOINTPARAMETER;
   memset (v, 0, sizeof (v));
 
   // the Window at Window Width 24, which 'Stretch Width' takes
@@ -3638,6 +3660,26 @@ test_unknown_states (Dwg_Data *src)
     }
   else
     failures++;
+  // the Door's base point parameter, whose one point is its point 0
+  {
+    const BITCODE_BL point = 0;
+    if (add_stretch_code (stretch_wall, basept_id, &point, 1))
+      {
+        failures += test_unknown (dst, door, v, 1,
+                                  "a stretch moving a base point parameter");
+        pop_stretch_code (stretch_wall);
+      }
+    else
+      failures++;
+  }
+  if (add_action (&move_swing->actions, &move_swing->num_actions, basept_id))
+    {
+      failures += test_unknown (dst, door, v, 1,
+                                "a move moving a base point parameter");
+      move_swing->num_actions--;
+    }
+  else
+    failures++;
 
   // the Toilet at Angle 1.2, which 'Rotate Plan' takes
   v[0].name = (char *)"Angle";
@@ -3654,15 +3696,57 @@ test_unknown_states (Dwg_Data *src)
   // the Toilet's Angle with its end point at its base point, which no turn
   // moves, so that the record would read back as another angle
   angle = graph_node (dst, toilet, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL);
+  if (angle)
+    {
+      Dwg_Object_BLOCKROTATIONPARAMETER *_angle
+          = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+      const BITCODE_3BD endpt = _angle->def_endpt;
+      _angle->def_endpt = _angle->def_basept;
+      failures += test_unknown (dst, toilet, v, 1,
+                                "a rotation parameter with its end point at "
+                                "its base point");
+      _angle->def_endpt = endpt;
+    }
+  else
+    {
+      FAIL ("unknown states: the Toilet's rotation parameter not found");
+      failures++;
+    }
+  // the Door's base point parameter in the Toilet's graph, under a node id
+  // the Toilet doesn't use, turned by 'Rotate Plan'
   {
-    Dwg_Object_BLOCKROTATIONPARAMETER *_angle
-        = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
-    const BITCODE_3BD endpt = _angle->def_endpt;
-    _angle->def_endpt = _angle->def_basept;
-    failures += test_unknown (dst, toilet, v, 1,
-                              "a rotation parameter with its end point at "
-                              "its base point");
-    _angle->def_endpt = endpt;
+    Dwg_Object_EVALUATION_GRAPH *graph = evaluation_graph (dst, toilet);
+    Dwg_EVAL_Node *nodes
+        = graph ? (Dwg_EVAL_Node *)realloc (graph->nodes,
+                                            (graph->num_nodes + 1)
+                                                * sizeof (Dwg_EVAL_Node))
+                : NULL;
+    if (nodes)
+      {
+        graph->nodes = nodes;
+        memset (&nodes[graph->num_nodes], 0, sizeof (Dwg_EVAL_Node));
+        nodes[graph->num_nodes++].evalexpr
+            = dwg_add_handleref (dst, 5, basept_h, NULL);
+        _basept->evalexpr.nodeid = GRAFT_BASEPOINT;
+        if (add_action (&rotate_plan->actions, &rotate_plan->num_actions,
+                        GRAFT_BASEPOINT))
+          {
+            failures += test_unknown (dst, toilet, v, 1,
+                                      "a rotate action turning a base point "
+                                      "parameter");
+            rotate_plan->num_actions--;
+          }
+        else
+          failures++;
+        _basept->evalexpr.nodeid = basept_id;
+        graph->num_nodes--;
+      }
+    else
+      {
+        FAIL ("unknown states: grafting the Door's base point parameter "
+              "failed");
+        failures++;
+      }
   }
 
   // the Toilet's Angle in the Window's graph, 'Stretch Width' moving its

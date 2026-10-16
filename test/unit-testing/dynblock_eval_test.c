@@ -1773,6 +1773,32 @@ test_linear_refusals (Dwg_Data *dwg)
     stretch->hdls[0].indexes[0] = index;
   }
 
+  // a point 2 of a linear parameter, which has 2, of its own parameter or
+  // another
+  if (add_stretch_code (stretch, width->evalexpr.nodeid, 2))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
+                                "a stretch of its own parameter's point 2");
+      pop_stretch_code (stretch);
+    }
+  else
+    {
+      fail ("linear refusals: out of memory");
+      failures++;
+    }
+  if (add_stretch_code (stretch, height->evalexpr.nodeid, 2))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
+                                "a stretch of another linear parameter's "
+                                "point 2");
+      pop_stretch_code (stretch);
+    }
+  else
+    {
+      fail ("linear refusals: out of memory");
+      failures++;
+    }
+
   {
     // the INSERT of placement W1, in model space
     BITCODE_H hdl = stretch->hdls[0].hdl;

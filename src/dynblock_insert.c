@@ -544,9 +544,8 @@ is_within_value_set (const Dwg_DynParam *dp, const double value,
    increment, counted from its minimum or 0; an angle when one a whole
    turn away is, as an angle of 0 is at a maximum of 2 pi. AutoCAD moves a
    value it doesn't allow to one it does on its next edit of the placement.
-   The tolerance is VALUE_EPSILON, or for a huge value a few units of its
-   last place, so that it stays far below any spacing a double can hold
-   there. */
+   The tolerance is VALUE_EPSILON, or for a huge value 8 DBL_EPSILON times
+   its size, 8 to 16 units in its last place. */
 static int
 is_allowed_value (const Dwg_DynParam *dp, const double value)
 {

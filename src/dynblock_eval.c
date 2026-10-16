@@ -1304,9 +1304,12 @@ typedef struct _dynblock_plan
   Dynblock_Node_State *states;
   /* for each of nodes, the STATE_MOVED and STATE_TURNED changes planned */
   unsigned char *changes;
-  /* why the stored state of a parameter that an action moves is not
-     known, or empty: dynblock_evaluated_state () refuses it, while the
-     geometry is evaluated */
+  /* why the stored state of a parameter is not known, or empty: one that
+     an action moves, turns or selects without listing it in a way
+     AutoCAD's placements have not shown, or a rotation parameter whose
+     value turns it with its end point at its base point.
+     dynblock_evaluated_state () refuses it, while the geometry is
+     evaluated */
   char unknown[REASON_SIZE];
   dwg_inthash *node_handles;
   Dynblock_Linear *linear;
@@ -1589,7 +1592,9 @@ note_change (Dynblock_Plan *plan, const Dynblock_Action *a,
 /* The state of the parameter with node id nodeid, other than a linear
    one, whose points action a moves or turns, as change says, or NULL when
    AutoCAD's records have not shown how they move: those of a rotation
-   parameter, whose record also holds its base angle point, and of a
+   parameter, whose record also holds its base angle point; of a base point
+   parameter, which sets where the block sits on its insertion point, while
+   the representation block keeps the definition's base point; and of a
    parameter of a class whose record is not known. */
 static Dynblock_Node_State *
 moved_state (Dynblock_Plan *plan, const Dynblock_Action *a,
@@ -1599,7 +1604,8 @@ moved_state (Dynblock_Plan *plan, const Dynblock_Action *a,
   Dynblock_Node_State *state = find_state (plan, nodeid);
   if (!obj || !is_parameter (obj))
     return NULL;
-  if (obj->fixedtype != DWG_TYPE_BLOCKROTATIONPARAMETER && state
+  if (obj->fixedtype != DWG_TYPE_BLOCKROTATIONPARAMETER
+      && obj->fixedtype != DWG_TYPE_BLOCKBASEPOINTPARAMETER && state
       && state->num_points)
     {
       note_change (plan, a, nodeid, change);
@@ -2358,6 +2364,16 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
                       (unsigned)c->bl95);
           return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
+      for (BITCODE_BS j = 0; k >= 0 && j < c->num_indexes; j++)
+        if (c->indexes[j] > 1)
+          {
+            set_reason (plan->reason, plan->reason_size,
+                        "stretch action '%s' lists point %u of linear "
+                        "property '%s', which has 2",
+                        a->name, (unsigned)c->indexes[j],
+                        plan->linear[k].name);
+            return DYNBLOCK_REFUSED;
+          }
       // Its own parameter's end point is where the value puts it. Moving
       // it again would change the value AutoCAD shows, so how AutoCAD
       // stores one the action lists is not known; the geometry doesn't
@@ -2384,14 +2400,6 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
       for (BITCODE_BS j = 0; j < c->num_indexes; j++)
         {
           Dynblock_Linear *q = &plan->linear[k];
-          if (c->indexes[j] > 1)
-            {
-              set_reason (plan->reason, plan->reason_size,
-                          "stretch action '%s' lists point %u of linear "
-                          "property '%s', which has 2",
-                          a->name, (unsigned)c->indexes[j], q->name);
-              return DYNBLOCK_REFUSED;
-            }
           if (c->indexes[j] == 0)
             {
               q->base.x += delta->x;
@@ -3299,8 +3307,11 @@ check_turns (Dynblock_Plan *plan)
 }
 
 /* Plans the LINEAR and ROTATION values of list, given in value (a NaN
-   where not given), for definition _def, whose evaluation graph is graph,
-   into plan->moves and plan->turns. */
+   where not given), for definition _def, whose evaluation graph is graph:
+   the entities' moves and turns into plan->moves and plan->turns, the
+   graph nodes' points as the actions leave them into plan->states, how
+   the actions changed them into plan->changes, and why a parameter's
+   stored state is not known into plan->unknown. */
 static int
 plan_values (Dynblock_Plan *plan, const Dwg_Object_BLOCK_HEADER *_def,
              const Dwg_Object *graph, const Param_List *list,
