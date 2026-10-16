@@ -1773,6 +1773,32 @@ test_linear_refusals (Dwg_Data *dwg)
     stretch->hdls[0].indexes[0] = index;
   }
 
+  // a point 2 of a linear parameter, which has 2, of its own parameter or
+  // another
+  if (add_stretch_code (stretch, width->evalexpr.nodeid, 2))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
+                                "a stretch of its own parameter's point 2");
+      pop_stretch_code (stretch);
+    }
+  else
+    {
+      fail ("linear refusals: out of memory");
+      failures++;
+    }
+  if (add_stretch_code (stretch, height->evalexpr.nodeid, 2))
+    {
+      failures += test_refusal (dwg, WINDOW, &v, 1, REFUSED (0),
+                                "a stretch of another linear parameter's "
+                                "point 2");
+      pop_stretch_code (stretch);
+    }
+  else
+    {
+      fail ("linear refusals: out of memory");
+      failures++;
+    }
+
   {
     // the INSERT of placement W1, in model space
     BITCODE_H hdl = stretch->hdls[0].hdl;
@@ -2131,10 +2157,15 @@ test_stretch_whole (Dwg_Data *dwg)
       return 1;
     }
   {
+    // copies of the boundaries' objects, which stay where they are when
+    // dwg_add_HATCH () adds the HATCH, and may move dwg->object, before it
+    // reads them
+    const Dwg_Object boundary_obj = dwg->object[boundary->parent->objid];
+    const Dwg_Object crossing_obj = dwg->object[crossing->parent->objid];
     const Dwg_Object *pathobjs[1];
-    pathobjs[0] = &dwg->object[boundary->parent->objid];
+    pathobjs[0] = &boundary_obj;
     hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
-    pathobjs[0] = &dwg->object[crossing->parent->objid];
+    pathobjs[0] = &crossing_obj;
     crossing_hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
     loglevel = test_loglevel;
     if (!hatch || !crossing_hatch)
@@ -3119,15 +3150,19 @@ test_turn_whole (Dwg_Data *dwg)
     bulged->num_bulges = 4;
     bulged->flag |= 16;
   }
-  set_owner (dwg, insert->attribs[0], entity_handle (dwg, insert->parent));
-  set_owner (dwg, insert->seqend, entity_handle (dwg, insert->parent));
   {
+    // copies of the boundaries' objects, which stay where they are when
+    // dwg_add_HATCH () adds the HATCH, and may move dwg->object, before it
+    // reads them
+    const Dwg_Object closed_obj = dwg->object[closed->parent->objid];
+    const Dwg_Object bulged_obj = dwg->object[bulged->parent->objid];
+    const Dwg_Object boundary_obj = dwg->object[boundary->parent->objid];
     const Dwg_Object *pathobjs[1];
-    pathobjs[0] = &dwg->object[closed->parent->objid];
+    pathobjs[0] = &closed_obj;
     hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
-    pathobjs[0] = &dwg->object[bulged->parent->objid];
+    pathobjs[0] = &bulged_obj;
     bulged_hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
-    pathobjs[0] = &dwg->object[boundary->parent->objid];
+    pathobjs[0] = &boundary_obj;
     arc_hatch = dwg_add_HATCH (def, 1, "SOLID", 0, 1, pathobjs);
     loglevel = test_loglevel;
     if (!hatch || !bulged_hatch || !arc_hatch || hatch->num_paths != 1
@@ -3696,6 +3731,287 @@ test_rotation_graft (Dwg_Data *dwg)
                             "an entity the rotate action lists twice");
   g.action->num_deps = 1;
   ungraft_rotation (dwg, &g);
+  return failures;
+}
+
+/* Appends node id nodeid to the list *actions of *num_actions node ids of
+   an action. */
+static int
+add_listed (BITCODE_BL **actions, BITCODE_BL *num_actions,
+            const BITCODE_BL nodeid)
+{
+  BITCODE_BL *more = (BITCODE_BL *)realloc (
+      *actions, (*num_actions + 1) * sizeof (BITCODE_BL));
+  if (!more)
+    return 0;
+  *actions = more;
+  more[(*num_actions)++] = nodeid;
+  return 1;
+}
+
+/* The refusals a rotate action shares with stretch and move actions, made
+   by the Toilet's 'Rotate Plan' at Angle 1.2: an object in its selection
+   that is not an entity of the definition (the Window's LINE BBD5), a
+   node id in its list that the graph doesn't have, a parameter that
+   chains its actions in its list (the Toilet's alignment parameter) and
+   one only in its selection (its flip parameter). */
+static int
+test_rotate_refusals (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCKROTATEACTION *act
+      = rotate_action (dwg, TOILET, "Rotate Plan");
+  Dwg_Object *alignment = graph_node (
+      dwg, TOILET, DWG_TYPE_BLOCKALIGNMENTPARAMETER, "Alignment");
+  Dwg_Object *flip = graph_node (dwg, TOILET, DWG_TYPE_BLOCKFLIPPARAMETER,
+                                 "Flip");
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!act || !alignment || !flip)
+    {
+      fail ("rotate refusals: fixture objects not found");
+      return 1;
+    }
+  v.name = (char *)"Angle";
+  v.value = 1.2;
+  if (add_dep (dwg, &act->deps, &act->num_deps, 0xBBD5))
+    {
+      failures += test_refusal (dwg, TOILET, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a rotate action selecting an entity of "
+                                "another block");
+      act->num_deps--;
+    }
+  else
+    failures++;
+  if (add_listed (&act->actions, &act->num_actions, 99999))
+    {
+      failures += test_refusal (dwg, TOILET, &v, 1,
+                                REFUSED (DWG_ERR_INVALIDHANDLE),
+                                "a rotate action listing a node the graph "
+                                "doesn't have");
+      act->num_actions--;
+    }
+  else
+    failures++;
+  // found again, as the evaluations added objects
+  alignment = graph_node (dwg, TOILET, DWG_TYPE_BLOCKALIGNMENTPARAMETER,
+                          "Alignment");
+  alignment->tio.object->tio.BLOCKALIGNMENTPARAMETER->chain_actions = 1;
+  failures += test_refusal (dwg, TOILET, &v, 1,
+                            REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                            "a rotate action turning a parameter chaining "
+                            "its actions");
+  alignment->tio.object->tio.BLOCKALIGNMENTPARAMETER->chain_actions = 0;
+  act = rotate_action (dwg, TOILET, "Rotate Plan");
+  flip = graph_node (dwg, TOILET, DWG_TYPE_BLOCKFLIPPARAMETER, "Flip");
+  if (add_dep (dwg, &act->deps, &act->num_deps, flip->handle.value))
+    {
+      if (evaluate (dwg, TOILET, &v, 1, "rotate refusals, flip selected"))
+        OK ("rotate refusals: a rotate action may select another parameter "
+            "that doesn't chain its actions");
+      else
+        failures++;
+      flip = graph_node (dwg, TOILET, DWG_TYPE_BLOCKFLIPPARAMETER, "Flip");
+      flip->tio.object->tio.BLOCKFLIPPARAMETER->chain_actions = 1;
+      failures += test_refusal (dwg, TOILET, &v, 1,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a rotate action selecting, not listing, a "
+                                "parameter chaining its actions");
+      flip->tio.object->tio.BLOCKFLIPPARAMETER->chain_actions = 0;
+      act = rotate_action (dwg, TOILET, "Rotate Plan");
+      act->num_deps--;
+    }
+  else
+    failures++;
+  return failures;
+}
+
+/* A LINEAR or ROTATION value for a parameter with a point that isn't
+   finite, as in a corrupt drawing, is refused: its length or angle isn't
+   finite either, and an angle would compare as no change. Here Window
+   Width's end point and the Toilet's base point. */
+static int
+test_non_finite_points (Dwg_Data *dwg)
+{
+  Dwg_Object_BLOCKLINEARPARAMETER *width
+      = linear_param (dwg, WINDOW, "Window Width");
+  Dwg_Object *obj = dwg_resolve_handle (dwg, TOILET_ANGLE);
+  Dwg_Object_BLOCKROTATIONPARAMETER *angle
+      = obj && obj->fixedtype == DWG_TYPE_BLOCKROTATIONPARAMETER
+            ? obj->tio.object->tio.BLOCKROTATIONPARAMETER
+            : NULL;
+  Dwg_DynValue v;
+  double kept;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!width || !angle)
+    {
+      fail ("non-finite points: fixture objects not found");
+      return 1;
+    }
+  kept = width->def_endpt.x;
+  width->def_endpt.x = (double)NAN;
+  v.name = (char *)"Window Width";
+  v.value = 24.0;
+  failures += test_refusal (dwg, WINDOW, &v, 1,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear parameter with an end point that isn't "
+                            "finite");
+  width->def_endpt.x = kept;
+  kept = angle->def_basept.x;
+  angle->def_basept.x = (double)NAN;
+  v.name = (char *)"Angle";
+  v.value = 1.2;
+  failures += test_refusal (dwg, TOILET, &v, 1,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a rotation parameter with a base point that "
+                            "isn't finite");
+  angle->def_basept.x = kept;
+  return failures;
+}
+
+/* Changes the first letter of the true name of definition def to letter,
+   returning the letter it had, or 0 when it has no true name. */
+static char
+rename_true_name (Dwg_Data *dwg, const BITCODE_RLL def, const char letter)
+{
+  Dwg_Object *obj = dwg_resolve_handle (dwg, def);
+  Dwg_Object_Object *o = obj ? obj->tio.object : NULL;
+  for (BITCODE_BL i = 0; o && o->eed && i < o->num_eed; i++)
+    {
+      const Dwg_Object *appid;
+      Dwg_Eed_Data *data = o->eed[i].data;
+      // the first item of a group has its size and APPID
+      if (!o->eed[i].size || !data)
+        continue;
+      appid = dwg_resolve_handle (dwg, o->eed[i].handle.value);
+      if (appid && appid->fixedtype == DWG_TYPE_APPID
+          && !strcmp (appid->tio.object->tio.APPID->name,
+                      "AcDbDynamicBlockTrueName")
+          && data->code == 0 && !data->u.eed_0.is_tu
+          && data->u.eed_0.length)
+        {
+          const char old = data->u.eed_0.string[0];
+          data->u.eed_0.string[0] = letter;
+          return old;
+        }
+    }
+  return 0;
+}
+
+/* A rotation parameter given a value that another rotate action lists or
+   selects: in a new document, the Toilet copied twice, under two true
+   names, and the second copy's rotation parameter, renamed 'Angle B',
+   moved into the first copy's evaluation graph under a node id it doesn't
+   use. With 'Angle B' given a value, the first copy's 'Rotate Plan'
+   listing it or only selecting it is refused, as the turn would leave it
+   at another angle than the value; with no value it is turned. */
+static int
+test_rotate_other_rotation (Dwg_Data *src)
+{
+  Dwg_Data *dst = dwg_new_Document (R_2004, 0, tracelevel);
+  Dwg_Object_BLOCK_HEADER *first, *second;
+  BITCODE_RLL first_h = 0, angle_h = 0;
+  Dwg_Object_EVALUATION_GRAPH *graph;
+  Dwg_EVAL_Node *nodes;
+  Dwg_Object *angle;
+  Dwg_Object_BLOCKROTATIONPARAMETER *_angle;
+  Dwg_Object_BLOCKROTATEACTION *act;
+  BITCODE_BL nodeid, num_nodes;
+  Dwg_DynValue v[2];
+  int error = 0, failures = 0;
+  char letter;
+
+  first = dwg_dynblock_copy_block (dst, src, block_header (src, TOILET),
+                                   &error);
+  letter = rename_true_name (src, TOILET, 'Q');
+  second = first && !error ? dwg_dynblock_copy_block (
+                                 dst, src, block_header (src, TOILET), &error)
+                           : NULL;
+  if (letter)
+    rename_true_name (src, TOILET, letter);
+  loglevel = test_loglevel;
+  if (!first || !second || first == second || error || !letter)
+    {
+      fail ("rotate other rotation: copying the Toilet twice: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  first_h = block_handle (first);
+  angle = graph_node (dst, block_handle (second),
+                      DWG_TYPE_BLOCKROTATIONPARAMETER, "Rotation");
+  graph = definition_graph (dst, first_h);
+  if (!angle || !graph)
+    {
+      fail ("rotate other rotation: the copies' objects not found");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  angle_h = angle->handle.value;
+  _angle = angle->tio.object->tio.BLOCKROTATIONPARAMETER;
+  nodeid = _angle->evalexpr.nodeid;
+  free (_angle->angle_name);
+  _angle->angle_name = strdup ("Angle B");
+  nodes = _angle->angle_name
+              ? (Dwg_EVAL_Node *)realloc (graph->nodes,
+                                          (graph->num_nodes + 1)
+                                              * sizeof (Dwg_EVAL_Node))
+              : NULL;
+  if (!nodes)
+    {
+      fail ("rotate other rotation: out of memory");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  graph->nodes = nodes;
+  _angle->evalexpr.nodeid = 905;
+  num_nodes = graph->num_nodes;
+  memset (&nodes[num_nodes], 0, sizeof (Dwg_EVAL_Node));
+  nodes[num_nodes].evalexpr = dwg_add_handleref (dst, 5, angle_h, NULL);
+  graph->num_nodes++;
+
+  memset (v, 0, sizeof (v));
+  v[0].name = (char *)"Angle";
+  v[0].value = 1.2;
+  v[1].name = (char *)"Angle B";
+  v[1].value = 0.5;
+  act = rotate_action (dst, first_h, "Rotate Plan");
+  if (act && add_listed (&act->actions, &act->num_actions, 905))
+    {
+      failures += test_refusal (dst, first_h, v, 2,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a rotate action turning a rotation parameter "
+                                "given a value");
+      if (evaluate (dst, first_h, v, 1, "rotate other rotation, no value"))
+        OK ("rotate other rotation: a rotate action may turn a rotation "
+            "parameter given no value");
+      else
+        failures++;
+      act = rotate_action (dst, first_h, "Rotate Plan");
+      act->num_actions--;
+    }
+  else
+    failures++;
+  if (act && add_dep (dst, &act->deps, &act->num_deps, angle_h))
+    {
+      failures += test_refusal (dst, first_h, v, 2,
+                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                "a rotate action selecting, not listing, a "
+                                "rotation parameter given a value");
+      act = rotate_action (dst, first_h, "Rotate Plan");
+      act->num_deps--;
+    }
+  else
+    failures++;
+  definition_graph (dst, first_h)->num_nodes = num_nodes;
+  angle = dwg_resolve_handle (dst, angle_h);
+  angle->tio.object->tio.BLOCKROTATIONPARAMETER->evalexpr.nodeid = nodeid;
+  free_dwg (dst);
+  free (dst);
   return failures;
 }
 
@@ -5122,7 +5438,7 @@ enum
   M_CENTRED_90,  // the same, turned a quarter turn
   M_CENTRED_30,  // ATTDEF centred on the baseline, turned 30 degrees
   M_RIGHT,       // ATTDEF right on the top
-  M_MIDDLE,      // ATTDEF middle
+  M_MIDDLE,      // ATTDEF middle, turned 30 degrees
   M_LEFT,        // ATTDEF left on the baseline
   M_BOTTOM_LEFT, // ATTDEF left on the bottom
   M_MIDDLE_LEFT, // ATTDEF left on the middle
@@ -5155,7 +5471,7 @@ measured_entity (Dwg_Object *obj, const int k)
     case M_RIGHT:
       return line_to_attdef (obj, 2, 3, 0.0, 1.0, 14.0, 3.0, 15.0);
     case M_MIDDLE:
-      return line_to_attdef (obj, 4, 0, 0.0, 1.0, 16.0, 2.0, 16.5);
+      return line_to_attdef (obj, 4, 0, M_PI / 6.0, 1.0, 16.0, 2.0, 16.5);
     case M_LEFT:
       return line_to_attdef (obj, 0, 0, 0.0, 1.0, 4.0, 0.0, 0.0);
     case M_BOTTOM_LEFT:
@@ -5201,15 +5517,17 @@ measured_entity (Dwg_Object *obj, const int k)
 /* What AutoCAD measures from laid-out text matches as equivalent: an
    attribute definition's insertion point moved along the baseline, where
    it is justified centre, right or middle, so that its alignment point
-   places it, and an MTEXT's extents where one side has none measured.
-   Text of the Trees definition and of its 4 placements' blocks, made from
-   LINEs: in AutoCAD's blocks, R1's 3 centred attribute definitions (at 0,
-   90 and 30 degrees), its right and its middle one moved along the
-   baseline, and the unmeasured MTEXT measured and the measured one
-   unmeasured, match; R2's centred one moved across the baseline differs,
-   and its measured MTEXT with extents 0, as AutoCAD writes them
-   unmeasured too, matches; R3's moves differ for an alignment point, 4
-   left attribute definitions (on the baseline, bottom, middle and top), a
+   places it, and also across it by up to its height for middle text, and
+   an MTEXT's extents where one side has none measured. Text of the Trees
+   definition and of its 4 placements' blocks, made from LINEs: in
+   AutoCAD's blocks, R1's 3 centred attribute definitions (at 0, 90 and 30
+   degrees), its right one moved along the baseline and its middle one
+   moved along and across it, and the unmeasured MTEXT measured and the
+   measured one unmeasured, match; R2's centred one moved across the
+   baseline differs, and its measured MTEXT with extents 0, as AutoCAD
+   writes them unmeasured too, matches; R3's moves differ for an alignment
+   point, 4 left attribute definitions (on the baseline, bottom, middle
+   and top), a middle one moved across by more than its height, a
    constant, an aligned, a fit, one of horizontal alignment 6 and one of
    vertical alignment 4, and a TEXT, and so do its MTEXT extents infinite
    against the definition's -1 and -1 against the definition's NaN; and
@@ -5268,8 +5586,11 @@ test_check_measured (Dwg_Data *dwg)
     a->ins_pt.y += 0.4 * sin (M_PI / 6.0);
     rep_entity (dwg, 0xCFF7, idx[M_RIGHT])->tio.entity->tio.ATTDEF->ins_pt.x
         -= 0.4;
-    rep_entity (dwg, 0xCFF7, idx[M_MIDDLE])->tio.entity->tio.ATTDEF->ins_pt.x
-        += 0.4;
+    // middle text moves across the baseline too, by less than its height:
+    // 0.4 along and 0.3 across, at 30 degrees
+    a = rep_entity (dwg, 0xCFF7, idx[M_MIDDLE])->tio.entity->tio.ATTDEF;
+    a->ins_pt.x += 0.4 * cos (M_PI / 6.0) - 0.3 * sin (M_PI / 6.0);
+    a->ins_pt.y += 0.4 * sin (M_PI / 6.0) + 0.3 * cos (M_PI / 6.0);
   }
   {
     Dwg_Entity_MTEXT *m
@@ -5297,6 +5618,11 @@ test_check_measured (Dwg_Data *dwg)
     a->alignment_pt.x += 0.4;
     rep_entity (dwg, 0xD49D, idx[M_LEFT])->tio.entity->tio.ATTDEF->ins_pt.x
         += 0.4;
+    // middle text moved across the baseline by more than its height: 2
+    // along and 1.2 across, at 30 degrees
+    a = rep_entity (dwg, 0xD49D, idx[M_MIDDLE])->tio.entity->tio.ATTDEF;
+    a->ins_pt.x += 2.0 * cos (M_PI / 6.0) - 1.2 * sin (M_PI / 6.0);
+    a->ins_pt.y += 2.0 * sin (M_PI / 6.0) + 1.2 * cos (M_PI / 6.0);
     for (int k = M_BOTTOM_LEFT; k <= M_TOP_LEFT; k++)
       rep_entity (dwg, 0xD49D, idx[k])->tio.entity->tio.ATTDEF->ins_pt.x
           += 0.4;
@@ -5337,8 +5663,9 @@ test_check_measured (Dwg_Data *dwg)
   c = find_check (report, 0xC8E0, 0xCFF7);
   if (c && c->status == MATCH && !c->num_differing && c->num_equivalent == 7)
     OK ("check measured: R1 matches 5 attribute definitions moved along "
-        "the baseline, 3 centred, at 0, 90 and 30 degrees, a right and a "
-        "middle one, and 2 MTEXTs measured on one side");
+        "the baseline, 3 centred, at 0, 90 and 30 degrees, a right one and "
+        "a middle one also moved across it by less than its height, and 2 "
+        "MTEXTs measured on one side");
   else
     {
       fail ("check measured R1: status %d, %u differ, %u equivalent, %s",
@@ -5363,12 +5690,13 @@ test_check_measured (Dwg_Data *dwg)
       failures++;
     }
   c = find_check (report, 0xC8E2, 0xD49D);
-  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 13
+  if (c && c->status == DWG_DYNBLOCK_CHECK_MISMATCH && c->num_differing == 14
       && !c->num_equivalent)
     OK ("check measured: R3 finds an alignment point, 4 left (baseline, "
-        "bottom, middle, top), a constant, an aligned, a fit and 2 unknown "
-        "attribute definitions and a TEXT moved, and 2 MTEXTs whose extents "
-        "aren't finite on one side: %s",
+        "bottom, middle, top), a middle one moved across by more than its "
+        "height, a constant, an aligned, a fit and 2 unknown attribute "
+        "definitions and a TEXT moved, and 2 MTEXTs whose extents aren't "
+        "finite on one side: %s",
         c->reason ? c->reason : "");
   else
     {
@@ -5743,6 +6071,8 @@ test_rotation_all (Dwg_Data *dwg)
 {
   int failures = test_rotation (dwg);
   failures += test_rotation_graft (dwg);
+  failures += test_rotate_refusals (dwg);
+  failures += test_non_finite_points (dwg);
   failures += test_turn_whole (dwg);
   failures += test_turn_text_anchor (dwg);
   return failures;
@@ -5786,6 +6116,7 @@ main (int argc, char *argv[])
   failures += on_fixture (test_evaluate_all);
   failures += on_fixture (test_linear_all);
   failures += on_fixture (test_rotation_all);
+  failures += on_fixture (test_rotate_other_rotation);
   // each check adds its evaluations to the document: a fresh one each
   failures += on_fixture (test_check);
   failures += on_fixture (test_check_finds);

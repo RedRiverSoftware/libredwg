@@ -292,9 +292,10 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    ATTDEF, of one whose extrusion is not along Z (either way), or of a
    HATCH with a pattern, a gradient, or a boundary segment other than a
    line; an entity that a rotate action turns and another action that
-   runs moves or turns too, as the order AutoCAD runs them in is not
-   known; an action that runs moving a rotation parameter given a value,
-   or a rotate action that runs turning a linear parameter that runs.
+   runs moves or turns too, or that one rotate action lists twice, as the
+   order AutoCAD runs them in is not known; an action that runs moving a
+   rotation parameter given a value, or a rotate action that runs turning
+   a linear parameter that runs.
 
    A FLIP value is accepted at 0 and refused otherwise; a value of any
    other kind (XY, POLAR, POINT, LOOKUP, CONSTRAINT or USER) is refused
@@ -318,13 +319,16 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
      entities; a node id an action names that the graph doesn't have;
    - DWG_ERR_VALUEOUTOFBOUNDS for a name no property has, a name given
      twice, a value that isn't finite, a LINEAR value below 0, for a
-     parameter longer than a double holds, or that would move a point
-     beyond what a double holds, a state the parameter doesn't have, a flip
-     value other than 0 or 1, or a document whose block table is full (65535
-     blocks);
+     parameter longer than a double holds (or with a point that isn't
+     finite), or that would move a point beyond what a double holds, a
+     ROTATION value for a parameter with a point that isn't finite, or that
+     would turn a point beyond what a double holds, a state the parameter
+     doesn't have, a flip value other than 0 or 1, or a document whose
+     block table is full (65535 blocks);
    - DWG_ERR_INVALIDTYPE when def is not a dynamic block definition;
    - no further bit for an action or parameter whose data isn't what
-     AutoCAD writes, such as a stretch point an entity doesn't have.
+     AutoCAD writes, such as a stretch point an entity or a linear
+     parameter doesn't have.
    Or the copy's refusal, such as of an entity handle def lists twice. A
    refusal adds nothing to the document, and the reason is logged at
    LOG_ERROR. Otherwise DWG_ERR_OUTOFMEM, which leaves what was made in the
@@ -339,6 +343,17 @@ typedef struct _dwg_attvalue
 {
   char *tag; /* the attribute definition's tag, as it has it */
   char *value;
+  /* The value's width as AutoCAD lays it out in its text style's font, at
+     a height of 1 and a width factor of 1, which places text justified
+     centre, right or middle as AutoCAD does (see dwg_dynblock_insert ()).
+     For a TrueType font: from the start of the text to the end of its
+     last character, that is the sum of the characters' advance widths, or
+     to the right edge of the last character's outline where that reaches
+     further, in font units, divided by the height of the font's capital A
+     (AutoCAD draws a capital A as tall as the text): 1466 of Arial's 2048
+     units. AutoCAD applies no kerning. 0 for none, so zero the struct
+     before filling it. */
+  double width;
 } Dwg_AttValue;
 
 /* Places dynamic block definition def in block owner, such as model space,
@@ -364,13 +379,18 @@ typedef struct _dwg_attvalue
    values in: AcDbBlockRepresentation, holding AcDbRepData (a
    BLOCKREPRESENTATION that names def) and AppDataCache, holding
    ACAD_ENHANCEDBLOCKDATA with an XRECORD named by the node id for each
-   graph node that AutoCAD keeps a record of. Each placement at other
-   values gets a representation block of its own.
+   graph node that AutoCAD keeps a record of: for a parameter, its points
+   as the evaluation's actions leave them (a linear parameter's end point
+   at its value, a rotation parameter's turned to its angle, and the points
+   of the parameters the actions that run move or turn), and for an action
+   what the definition holds. Each placement at other values gets a
+   representation block of its own.
 
    Attributes: the INSERT gets an ATTRIB for each attribute definition of
-   the block it draws that isn't constant, in the block's order, with the
-   definition's tag, flags, text style, height, width factor, oblique
-   angle, alignment, layer, colour, linetype, lineweight and plot style;
+   the block it draws that isn't constant, where the evaluation moved it,
+   in the block's order, with the definition's tag, flags, text style,
+   height, width factor, oblique angle, alignment, layer, colour,
+   linetype, lineweight and plot style;
    its position, alignment point, height, thickness and rotation placed by
    the INSERT (text left-aligned on the baseline has no alignment point,
    and the ATTRIB stores none, as AutoCAD's don't); and its value from
@@ -381,25 +401,74 @@ typedef struct _dwg_attvalue
    AutoCAD's do. They are added with dwg_add_ATTRIB (), which links them to
    the INSERT as AutoCAD does.
 
+   Where text justified centre, right or middle starts, its insertion
+   point, AutoCAD derives from its alignment point and the width it
+   measures for the text in its font, and draws a stored ATTRIB from that
+   insertion point. LibreDWG has no fonts, so for such an attribute give
+   the value's width in atts (Dwg_AttValue's width). The ATTRIB then starts
+   where AutoCAD starts it: back from its alignment point along the
+   baseline (forward for backward text) by that width at the ATTRIB's
+   height and width factor, or by half of it when centred or middle; and
+   across the baseline as far as the definition's text does. Two things
+   AutoCAD measures that a width doesn't hold: it centres text on its
+   first character's outline where that starts left of the text's start,
+   so a centred value beginning with such a character, as Arial's A, j
+   and _ do (by 3, 94 and 31 of its 2048 units), sits half that overhang
+   off; and it centres middle text on the height of its characters too,
+   which LibreDWG takes from the definition's text, so a value whose
+   characters reach lower or higher than those, such as one with
+   descenders against capitals, sits off its alignment point across the
+   baseline, by up to about half the height. Text in a vertical style
+   starts where the definition's does. With no width (0), or for an
+   attribute atts don't give, the ATTRIB starts where the definition's
+   text starts, which AutoCAD laid out for the definition's tag or default
+   value: a value of another width then sits off its alignment point along
+   the baseline in AutoCAD, though not in LibreDWG's SVG output, which
+   places such text by its alignment point. To place a default value as
+   AutoCAD does, give it in atts with its width. Text left-aligned,
+   aligned or fit starts where the definition's does whatever the width.
+   A width that is negative or isn't finite, or at which the text's start,
+   or a coordinate of its offset from its alignment point, would be
+   beyond what a double holds, is refused, with nothing added
+   (DWG_ERR_VALUEOUTOFBOUNDS).
+
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
    document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
    other than r2004 (DWG_ERR_NOTYETSUPPORTED); def not a dynamic block
    definition (DWG_ERR_INVALIDTYPE); owner def, or a block def inserts at
-   any depth, an insertion point, scale or rotation that isn't finite, or a
-   scale that isn't positive (DWG_ERR_VALUEOUTOFBOUNDS); values that
-   dwg_dynblock_evaluate () refuses, with its reasons; a LINEAR, ROTATION or
-   FLIP value other than the definition's (DWG_ERR_NOTYETSUPPORTED), as the
-   stored values of such a placement are not written yet; for a
-   representation block, a graph node of a class whose stored value is not
-   known, a rotate or scale action whose base point isn't (0, 0, 0), or an
-   entity that draws a block of its own, as a DIMENSION does
-   (DWG_ERR_NOTYETSUPPORTED); an attribute definition whose extrusion
+   any depth, an insertion point, scale or rotation that isn't finite, a
+   scale that isn't positive, or a LINEAR or ROTATION value other than the
+   definition's that the parameter's value set doesn't allow, which AutoCAD
+   would move to one it allows on its next edit of the placement: one not
+   in the set's list, or with no list one outside its limits or off its
+   increment, counted from its minimum or 0 (DWG_ERR_VALUEOUTOFBOUNDS);
+   values that dwg_dynblock_evaluate () refuses, with its reasons, such as
+   a FLIP value of 1; for a representation block, a graph node of a class
+   whose stored value is not known (one of a class LibreDWG can't decode
+   is refused first, as dwg_dynblock_evaluate () refuses it, with
+   DWG_ERR_UNHANDLEDCLASS), a rotate or scale action whose base point
+   isn't (0, 0, 0), an entity that draws a block of its own, as a
+   DIMENSION does, or values at which an action that runs moves a
+   parameter in a way whose stored points AutoCAD's placements have not
+   shown: a rotation parameter that another action moves or turns, a base
+   point parameter that an action moves or turns, a parameter an action
+   selects without listing it among those it moves, an action listing its
+   own parameter or one parameter twice, a stretch point that the record
+   of a parameter other than a linear one doesn't hold, or a point listed
+   twice, a rotation parameter given a value whose end point is at its
+   base point, or a parameter that a rotate action turns and another
+   action moves or turns too (DWG_ERR_NOTYETSUPPORTED), or that would move
+   a parameter's point beyond what a double holds, or leave the points of
+   a parameter given a value that don't hold it, as at coordinates so large
+   that they round (DWG_ERR_VALUEOUTOFBOUNDS); an attribute definition
+   whose extrusion
    isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()
    refuses, such as one with a period (DWG_ERR_NOTYETSUPPORTED); an
    attribute definition whose placed position, alignment point, height or
-   thickness is beyond what a double holds, at a huge scale, or an
-   attribute tag that names no attribute definition that isn't constant,
-   is given twice, or has no value (DWG_ERR_VALUEOUTOFBOUNDS). In a
+   thickness, where the evaluation moved it, is beyond what a double holds,
+   at a huge scale, or an attribute tag that names no attribute definition
+   that isn't constant, is given twice, or has no value
+   (DWG_ERR_VALUEOUTOFBOUNDS). In a
    LibreDWG built without write support, a placement at other values than
    the definition's is refused (DWG_ERR_NOTYETSUPPORTED).
 
@@ -510,9 +579,11 @@ typedef struct _dwg_dynblock_check_report
    both are finite, and the insertion point of an attribute definition
    that isn't constant, justified other than left, aligned or fit (centre,
    right or middle), where the alignment point matches and the insertion
-   point differs only along the baseline. AutoCAD derives that insertion
-   point from the alignment point and the width of the tag in a
-   definition, but of the default value in the blocks it evaluates. The
+   point differs only along the baseline, or for middle text also across
+   it by up to the text's height. AutoCAD derives that insertion point
+   from the alignment point and the width of the tag in a definition, but
+   of the default value in the blocks it evaluates, and centres middle
+   text on the height of its characters too. The
    blocks' base points compare too: a difference there is
    a mismatch, though not of an entity. EED is not compared.
 
