@@ -386,6 +386,20 @@ typedef struct _dwg_attvalue
    what the definition holds. Each placement at other values gets a
    representation block of its own.
 
+   A placement at other values also gives def the AcDbBlockRepETag EED
+   group AutoCAD keeps on a dynamic block definition once it has evaluated
+   it, when def has none: 1070 1, then a 1071 counter, one more than the
+   highest AcDbBlockRepETag index of def's entities, which keep their
+   indexes, gaps included. AutoCAD pairs a representation block's entities
+   with the definition's by that index. When it evaluates a definition
+   without the group itself, as for an edit of a placement at the
+   definition's values, a RESETBLOCK or a new placement, it numbers the
+   definition's entities afresh and adds the group; it then no longer
+   pairs the representation blocks made before with the definition, and
+   its edits of their placements change their stored values but not their
+   geometry. A group def has already is left as it is. A def none of whose
+   entities has an index gets no group.
+
    Attributes: the INSERT gets an ATTRIB for each attribute definition of
    the block it draws that isn't constant, where the evaluation moved it,
    in the block's order, with the definition's tag, flags, text style,
@@ -489,7 +503,9 @@ typedef struct _dwg_attvalue
                  was made with data left out, as dwg_dynblock_evaluate ()
                  returns, or an ATTRIB was left without its definition's
                  AcDbAttr EED, which wasn't 1070 items only, decoded in
-                 full (DWG_ERR_INVALIDEED).
+                 full, or def without its AcDbBlockRepETag counter, as its
+                 highest index leaves no room for one in a 1071, a signed
+                 32-bit integer (DWG_ERR_INVALIDEED).
    @return the INSERT, or NULL. */
 EXPORT Dwg_Entity_INSERT *
 dwg_dynblock_insert (Dwg_Object_BLOCK_HEADER *owner,
@@ -567,7 +583,10 @@ typedef struct _dwg_dynblock_check_report
    evaluates its definition at them, and compares the evaluated block with
    AutoCAD's entity by entity, paired by their AcDbBlockRepETag index. A
    representation block no INSERT draws gets a check too, with status
-   DWG_DYNBLOCK_CHECK_NO_VALUES.
+   DWG_DYNBLOCK_CHECK_NO_VALUES. Blocks made before AutoCAD numbered their
+   definition's entities afresh, which it does when it evaluates a
+   definition without an AcDbBlockRepETag group (see dwg_dynblock_insert
+   ()), no longer pair with the definition, and are mismatches.
 
    Entities compare by type, by their invisible flag, layer, colour,
    linetype flags, linetype, linetype scale, lineweight, plot style flags

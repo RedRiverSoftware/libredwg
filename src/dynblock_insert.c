@@ -404,50 +404,78 @@ appid_handle (Dwg_Data *dwg, const char *name)
   return appid ? dwg_obj_generic_handlevalue (appid) : 0;
 }
 
-/* Sets the EED *eedp, of *num_eedp items, which holds none yet, to one
-   group of the APPID with the given handle: a 1070, then a 1071 when
-   has_index, then a 1005 handle. */
+/* Appends to the EED *eedp, of *num_eedp items, one group of the APPID
+   with the given handle: a 1070, then a 1071 when has_index, then a 1005
+   handle when has_handle. */
 static int
-set_tag_eed (Dwg_Eed **eedp, BITCODE_BL *num_eedp, const BITCODE_RLL appid,
-             const BITCODE_RS value, const int has_index,
-             const BITCODE_RL index, const BITCODE_RLL handle)
+append_tag_eed (Dwg_Eed **eedp, BITCODE_BL *num_eedp, const BITCODE_RLL appid,
+                const BITCODE_RS value, const int has_index,
+                const BITCODE_RL index, const int has_handle,
+                const BITCODE_RLL handle)
 {
-  const BITCODE_BL num_eed = has_index ? 3 : 2;
-  Dwg_Eed *eed = (Dwg_Eed *)calloc (num_eed, sizeof (Dwg_Eed));
+  const BITCODE_BL num_items = 1 + (has_index ? 1 : 0) + (has_handle ? 1 : 0);
+  Dwg_Eed *eed = (Dwg_Eed *)realloc (
+      *eedp, (*num_eedp + num_items) * sizeof (Dwg_Eed));
+  Dwg_Eed *group;
   BITCODE_BL n = 0;
   if (!eed)
     return DWG_ERR_OUTOFMEM;
+  *eedp = eed;
+  group = &eed[*num_eedp];
+  memset (group, 0, num_items * sizeof (Dwg_Eed));
   // each item's size: its code byte and its value
-  eed[0].size = 3 + (has_index ? 5 : 0) + 9;
-  eed[0].handle.code = 5;
-  eed[0].handle.value = appid;
-  dwg_set_handle_size (&eed[0].handle);
-  eed[n].data = eed_item (70);
-  if (eed[n].data)
-    eed[n].data->u.eed_70.rs = value;
+  group[0].size = 3 + (has_index ? 5 : 0) + (has_handle ? 9 : 0);
+  group[0].handle.code = 5;
+  group[0].handle.value = appid;
+  dwg_set_handle_size (&group[0].handle);
+  group[n].data = eed_item (70);
+  if (group[n].data)
+    group[n].data->u.eed_70.rs = value;
   n++;
   if (has_index)
     {
-      eed[n].data = eed_item (71);
-      if (eed[n].data)
+      group[n].data = eed_item (71);
+      if (group[n].data)
         // Dwg_Eed_Data is packed
-        memcpy (&eed[n].data->u.eed_71.rl, &index, sizeof (index));
+        memcpy (&group[n].data->u.eed_71.rl, &index, sizeof (index));
       n++;
     }
-  eed[n].data = eed_item (5);
-  if (eed[n].data)
-    memcpy (&eed[n].data->u.eed_5.entity, &handle, sizeof (handle));
-  n++;
+  if (has_handle)
+    {
+      group[n].data = eed_item (5);
+      if (group[n].data)
+        memcpy (&group[n].data->u.eed_5.entity, &handle, sizeof (handle));
+      n++;
+    }
   for (BITCODE_BL i = 0; i < n; i++)
-    if (!eed[i].data)
+    if (!group[i].data)
       {
+        // the slots stay allocated, past *num_eedp
         for (BITCODE_BL j = 0; j < n; j++)
-          free (eed[j].data);
-        free (eed);
+          {
+            free (group[j].data);
+            group[j].data = NULL;
+          }
         return DWG_ERR_OUTOFMEM;
       }
-  *eedp = eed;
-  *num_eedp = n;
+  *num_eedp += n;
+  return 0;
+}
+
+/* Whether the EED of o has a group of the APPID named name. */
+static int
+has_eed_group (const Dwg_Data *dwg, const Dwg_Object_Object *o,
+               const char *name)
+{
+  for (BITCODE_BL i = 0; o->eed && i < o->num_eed; i++)
+    if (o->eed[i].size)
+      {
+        const Dwg_Object *appid = handle_object (dwg, o->eed[i].handle.value);
+        if (appid && appid->fixedtype == DWG_TYPE_APPID
+            && appid->tio.object->tio.APPID->name
+            && strEQ (appid->tio.object->tio.APPID->name, name))
+          return 1;
+      }
   return 0;
 }
 
@@ -1447,7 +1475,7 @@ complete_representation (Dynblock_Placement *p)
   rep->hasattrs = def->hasattrs;
   {
     Dwg_Object_Object *o = handle_object (dwg, p->block)->tio.object;
-    error = set_tag_eed (&o->eed, &o->num_eed, btag, 1, 0, 0, p->def);
+    error = append_tag_eed (&o->eed, &o->num_eed, btag, 1, 0, 0, 1, p->def);
   }
   for (BITCODE_BL i = 0; !error && i < rep->num_owned; i++)
     {
@@ -1463,6 +1491,65 @@ complete_representation (Dynblock_Placement *p)
   if (error < DWG_ERR_CRITICAL)
     error |= copy_image_reactors (p);
   return error;
+}
+
+/* Gives the definition the AcDbBlockRepETag group that AutoCAD keeps on a
+   dynamic block definition once it has evaluated it, when it has none:
+   1070 1, then a 1071 counter, the index the definition's next new entity
+   gets, one more than the highest index of its entities. AutoCAD pairs
+   the entities of a representation block with the definition's by that
+   index. When it evaluates a definition without the group, it numbers the
+   definition's entities afresh, in their order, and adds the group; it
+   then no longer pairs the representation blocks made before with the
+   definition, and its edits of their placements change the stored values
+   but not the geometry. The indexes are left as they are, gaps included,
+   as AutoCAD's own definitions with the group have them. A definition
+   none of whose entities has an index gets no group; nor does one whose
+   highest index leaves no room for the counter in a 1071, a signed 32-bit
+   integer, with DWG_ERR_INVALIDEED. */
+static int
+add_etag_counter (Dynblock_Placement *p)
+{
+  Dwg_Data *dwg = p->dwg;
+  const Dwg_Object_BLOCK_HEADER *def = block_of (dwg, p->def);
+  BITCODE_RL highest = 0;
+  BITCODE_RLL appid;
+  Dwg_Object_Object *o;
+  int found = 0;
+
+  if (has_eed_group (dwg, handle_object (dwg, p->def)->tio.object,
+                     "AcDbBlockRepETag"))
+    return 0;
+  for (BITCODE_BL i = 0; def->entities && i < def->num_owned; i++)
+    {
+      const Dwg_Object *ent = ref_object (dwg, def->entities[i]);
+      BITCODE_RS value;
+      BITCODE_RL index;
+      if (ent && ent->supertype == DWG_SUPERTYPE_ENTITY
+          && etag_index (dwg, ent, &value, &index)
+          && (!found || index > highest))
+        {
+          highest = index;
+          found = 1;
+        }
+    }
+  if (!found)
+    return 0;
+  if (highest >= 0x7FFFFFFF)
+    {
+      LOG_WARN ("dwg_dynblock_insert: definition " FORMAT_HV " has the "
+                "AcDbBlockRepETag index %u, which leaves no room for its "
+                "counter, so it doesn't get one",
+                p->def, (unsigned)highest);
+      return DWG_ERR_INVALIDEED;
+    }
+  // the definition's entities name the APPID, so this only finds it
+  appid = appid_handle (dwg, "AcDbBlockRepETag");
+  if (!appid)
+    return DWG_ERR_OUTOFMEM;
+  o = handle_object (dwg, p->def)->tio.object;
+  return append_tag_eed (&o->eed, &o->num_eed, appid, 1, 1, highest + 1, 0,
+                         0);
 }
 
 /*--------------------------------------------------------------------------------
@@ -1844,9 +1931,9 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
 #endif
       if (error < DWG_ERR_CRITICAL && has_etag)
         // AutoCAD's ATTRIBs carry the index, with a 1005 handle of 0
-        error |= set_tag_eed (&attobj->tio.entity->eed,
-                              &attobj->tio.entity->num_eed, etag_appid,
-                              etag_value, 1, etag, 0);
+        error |= append_tag_eed (&attobj->tio.entity->eed,
+                                 &attobj->tio.entity->num_eed, etag_appid,
+                                 etag_value, 1, etag, 1, 0);
       if (error < DWG_ERR_CRITICAL)
         error |= copy_attr_eed (dwg, defobj, attobj->tio.entity);
     }
@@ -1942,6 +2029,8 @@ place (Dynblock_Placement *p, const Dwg_DynValue *values,
       *eval_errorp = eval_error;
       p->block = block_object (rep)->handle.value;
       error = complete_representation (p);
+      if (error < DWG_ERR_CRITICAL)
+        error |= add_etag_counter (p);
       if (error >= DWG_ERR_CRITICAL)
         return error;
     }
