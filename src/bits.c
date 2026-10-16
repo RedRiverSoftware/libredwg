@@ -3361,7 +3361,7 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
                   && (wc1 = dwg_codepage_wc ((Dwg_Codepage)codepage, wc)))
                 {
                   if (wc1 > 0xFF)
-                    *dest++ = wc1 >> 4;
+                    *dest++ = wc1 >> 8;
                   *dest++ = wc1 & 0xff;
                 }
               // is representable as byte
@@ -3398,7 +3398,9 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
               if (is_asian_cp
                   && (wc1 = dwg_codepage_wc ((Dwg_Codepage)codepage, wc)))
                 {
-                  *dest++ = wc1 >> 4;
+                  // a double-byte character, or one byte (half-width kana)
+                  if (wc1 > 0xFF)
+                    *dest++ = wc1 >> 8;
                   *dest++ = wc1 & 0xff;
                 }
               else if (!is_asian_cp
@@ -3579,7 +3581,9 @@ bit_TV_to_utf8_codepage (const char *restrict src, const BITCODE_RS codepage)
 {
   const bool is_asian_cp = dwg_codepage_isasian ((const Dwg_Codepage)codepage);
   const size_t srclen = strlen (src);
-  size_t destlen = is_asian_cp ? srclen * 3 : trunc (srclen * 1.5);
+  /* A byte, or a two-byte character, is at most 3 bytes of UTF-8: the loop
+     below stops at destlen. */
+  size_t destlen = srclen * 3;
   size_t i = 0;
   char *str = (char *)calloc (destlen + 1, 1);
   unsigned char *tmp = (unsigned char *)src;

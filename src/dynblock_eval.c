@@ -119,14 +119,19 @@ ref_handle (const Dwg_Object_Ref *ref)
   return ref ? ref->absolute_ref : 0;
 }
 
-/* A UTF-8 copy of a string of dwg, which r2004 keeps in its codepage. */
+/* A UTF-8 copy of a string of dwg, with \U+XXXX as the character. r2004
+   keeps strings in its codepage, but for documents imported from JSON or
+   built with the add API, which keep UTF-8 (bit_write_TV () converts
+   those). */
 static char *
 utf8_copy (const Dwg_Data *dwg, const char *str)
 {
   char *utf8;
   if (!str)
     return strdup ("");
-  utf8 = bit_TV_to_utf8 (str, dwg->header.codepage);
+  utf8 = bit_TV_to_utf8 (str, (dwg->opts & DWG_OPTS_INJSON)
+                                  ? (BITCODE_RS)CP_UTF8
+                                  : dwg->header.codepage);
   if (!utf8)
     return NULL;
   return utf8 == str ? strdup (str) : utf8;
@@ -387,7 +392,8 @@ typedef struct _param_list
   const char *unknown_class;
 } Param_List;
 
-/* Appends a property of parameter obj, named name in dwg's codepage. */
+/* Appends a property of parameter obj, named name as dwg keeps its
+   strings, in its codepage or in UTF-8 (utf8_copy ()). */
 static Dwg_DynParam *
 add_param (Param_List *list, const Dwg_Data *dwg, const Dwg_Object *obj,
            const Dwg_DynParam_Kind kind, const char *name)
@@ -4536,8 +4542,8 @@ compare_doubles (Dynblock_Compare *c, const char *name, const double *a,
       }
 }
 
-/* Strings compare as the drawing keeps them, in its codepage, and are
-   given in the reason in UTF-8. */
+/* Strings compare as the drawing keeps them, in its codepage or in UTF-8
+   (utf8_copy ()), and are given in the reason in UTF-8. */
 static void
 compare_string (Dynblock_Compare *c, const char *name, const char *a,
                 const char *b)

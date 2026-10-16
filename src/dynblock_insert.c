@@ -210,14 +210,19 @@ block_object (const Dwg_Object_BLOCK_HEADER *blk)
   return obj;
 }
 
-/* The copy, in dwg's codepage, as UTF-8. */
+/* A UTF-8 copy of a string of dwg, with \U+XXXX as the character. r2004
+   keeps strings in its codepage, but for documents imported from JSON or
+   built with the add API, which keep UTF-8 (bit_write_TV () converts
+   those). */
 static char *
 utf8_copy (const Dwg_Data *dwg, const char *str)
 {
   char *utf8;
   if (!str)
     return strdup ("");
-  utf8 = bit_TV_to_utf8 (str, dwg->header.codepage);
+  utf8 = bit_TV_to_utf8 (str, (dwg->opts & DWG_OPTS_INJSON)
+                                  ? (BITCODE_RS)CP_UTF8
+                                  : dwg->header.codepage);
   if (!utf8)
     return NULL;
   return utf8 == str ? strdup (str) : utf8;
@@ -1470,8 +1475,10 @@ record_point (Dwg_Object_XRECORD *xrec, const BITCODE_3BD *pt)
   return dwg_add_XRECORD_pointd3d (xrec, 10, pt) ? 0 : DWG_ERR_OUTOFMEM;
 }
 
-/* Appends a string item with the bytes of str, which is in the document's
-   codepage, as the decoder reads one. */
+/* Appends a string item with the bytes of str, a string of the document,
+   as the decoder reads one: in its codepage, or in UTF-8 in a document
+   imported from JSON or built with the add API, whose XRECORD strings the
+   encoder converts as it converts the others. */
 static int
 record_string (const Dwg_Data *dwg, Dwg_Object_XRECORD *xrec, const short dxf,
                const char *str)
