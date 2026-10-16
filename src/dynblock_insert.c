@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <float.h>
 
 #include "common.h"
 #include "bits.h"
@@ -37,6 +38,7 @@
 #include "classes.h"
 #include "copy.h"
 #include "dwg_dynblock_api.h"
+#include "dynblock.h"
 
 #define DWG_LOGLEVEL loglevel
 #include "logging.h"
@@ -98,13 +100,12 @@ typedef struct _dynblock_node_record
   BITCODE_BL id[2];
 } Dynblock_Node_Record;
 
-/* The records AutoCAD writes for a placement at the definition's values
-   and a visibility state, as in test/test-data/2004/Dynblocks.dwg, which
-   dynblock_insert_test compares them with. A record holds a node's state
-   at the placement's values: a two-point parameter's points after the
-   actions have moved them, so for values other than the definition's they
-   are the evaluation's. Classes not listed are refused, as their records
-   are not known. */
+/* The records AutoCAD writes for a placement, as in
+   test/test-data/2004/Dynblocks.dwg, which dynblock_insert_test compares
+   them with. A record holds a node's state at the placement's values: a
+   parameter's points after the actions have moved them, which the
+   evaluation gives; an action's record is the same at every value.
+   Classes not listed are refused, as their records are not known. */
 static const Dynblock_Node_Record node_records[] = {
   { DWG_TYPE_BLOCKLINEARPARAMETER, RECORD_TWO_POINTS, { 18597260, 25303744 } },
   { DWG_TYPE_BLOCKALIGNMENTPARAMETER,
@@ -150,6 +151,9 @@ typedef struct _dynblock_placement
   /* for each property, the visibility state chosen, + 1, or 0 */
   BITCODE_BL *state;
   int at_defaults;
+  /* for a representation block, the parameters' points the evaluation
+     gives, and where it moves the ATTDEFs */
+  Dynblock_State evaluated;
   char reason[REASON_SIZE];
 } Dynblock_Placement;
 
@@ -511,6 +515,63 @@ normal_angle (const double angle)
   return a < 2.0 * M_PI ? a : 0.0;
 }
 
+/* Whether value is within the limits of dp's value set and on its
+   increment, counted from its minimum or 0, with tolerance eps. */
+static int
+is_within_value_set (const Dwg_DynParam *dp, const double value,
+                     const double eps)
+{
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM)
+      && value < dp->minimum - eps)
+    return 0;
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_MAXIMUM)
+      && value > dp->maximum + eps)
+    return 0;
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_INCREMENT) && dp->increment > 0.0)
+    {
+      const double base
+          = dp->value_flags & DWG_DYNPARAM_HAS_MINIMUM ? dp->minimum : 0.0;
+      const double steps = (value - base) / dp->increment;
+      if (fabs (steps - round (steps)) * dp->increment > eps)
+        return 0;
+    }
+  return 1;
+}
+
+/* Whether value, of a LINEAR or ROTATION property dp other than its
+   definition's (an angle reduced to [0, 2 pi)), is one dp's value set
+   allows: in its list, or with no list within its limits and on its
+   increment, counted from its minimum or 0; an angle when one a whole
+   turn away is, as an angle of 0 is at a maximum of 2 pi. AutoCAD moves a
+   value it doesn't allow to one it does on its next edit of the placement.
+   The tolerance is VALUE_EPSILON, or for a huge value 8 DBL_EPSILON times
+   its size, 8 to 16 units in its last place. */
+static int
+is_allowed_value (const Dwg_DynParam *dp, const double value)
+{
+  const double eps = fmax (VALUE_EPSILON, 8.0 * DBL_EPSILON * fabs (value));
+  if ((dp->value_flags & DWG_DYNPARAM_HAS_LIST) && dp->num_values)
+    {
+      for (BITCODE_BL i = 0; i < dp->num_values; i++)
+        {
+          double d = fabs (value - dp->values[i]);
+          if (dp->kind == DWG_DYNPARAM_ROTATION)
+            {
+              d = fmod (d, 2.0 * M_PI);
+              d = fmin (d, 2.0 * M_PI - d);
+            }
+          if (d <= eps)
+            return 1;
+        }
+      return 0;
+    }
+  if (dp->kind == DWG_DYNPARAM_ROTATION)
+    return is_within_value_set (dp, value, eps)
+           || is_within_value_set (dp, value + 2.0 * M_PI, eps)
+           || is_within_value_set (dp, value - 2.0 * M_PI, eps);
+  return is_within_value_set (dp, value, eps);
+}
+
 /* Matches values to the definition's properties into p->state, and decides
    whether the placement is at the definition's values. */
 static int
@@ -576,45 +637,41 @@ check_values (Dynblock_Placement *p, const Dwg_DynValue *values,
                           v->value);
               return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
             }
+          // the evaluation refuses a flipped block
           if (v->value != 0.0)
-            {
-              set_reason (p,
-                          "flip property '%s': the placement data for a "
-                          "flipped block is not written yet",
-                          dp->name);
-              return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-            }
+            p->at_defaults = 0;
           break;
-        // The records of a changed linear or rotation value hold the
-        // evaluated points of every parameter its actions move, which the
-        // evaluator does not give yet.
         case DWG_DYNPARAM_LINEAR:
-          if (fabs (v->value - dp->default_value) > VALUE_EPSILON)
+          if (fabs (v->value - dp->default_value) <= VALUE_EPSILON)
+            break;
+          p->at_defaults = 0;
+          if (!is_allowed_value (dp, v->value))
             {
               set_reason (p,
-                          "linear property '%s': the placement data for a "
-                          "value other than the definition's (%g) is not "
-                          "written yet",
-                          dp->name, dp->default_value);
-              return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+                          "linear property '%s': its value set doesn't "
+                          "allow %g",
+                          dp->name, v->value);
+              return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
             }
           break;
         case DWG_DYNPARAM_ROTATION:
           {
             // each reduced first: the difference of a huge value and the
             // default would lose the default
-            double d = fabs (normal_angle (v->value)
-                             - normal_angle (dp->default_value));
+            const double a = normal_angle (v->value);
+            double d = fabs (a - normal_angle (dp->default_value));
             if (d > M_PI)
               d = 2.0 * M_PI - d;
-            if (d > VALUE_EPSILON)
+            if (d <= VALUE_EPSILON)
+              break;
+            p->at_defaults = 0;
+            if (!is_allowed_value (dp, a))
               {
                 set_reason (p,
-                            "rotation property '%s': the placement data for "
-                            "a value other than the definition's (%g) is "
-                            "not written yet",
-                            dp->name, dp->default_value);
-                return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+                            "rotation property '%s': its value set doesn't "
+                            "allow %g",
+                            dp->name, v->value);
+                return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
               }
           }
           break;
@@ -757,24 +814,43 @@ place_point (const Dynblock_Placement *p, const BITCODE_3BD *base,
 }
 
 /* The insertion and alignment points of attdef's ATTRIB, placed by p in
-   the block with base point base. Text left-aligned on the baseline doesn't
-   use its alignment point: AutoCAD keeps it (0,0), which
-   dwg_set_dataflags () leaves out (dataflags 0x02). */
+   the block with base point base, from attdef's points in the block,
+   ins_pt and alignment_pt. Text left-aligned on the baseline doesn't use
+   its alignment point: AutoCAD keeps it (0,0), which dwg_set_dataflags ()
+   leaves out (dataflags 0x02). */
 static void
 place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
-              const Dwg_Entity_ATTDEF *attdef, BITCODE_3BD *pt,
+              const Dwg_Entity_ATTDEF *attdef, const BITCODE_2DPOINT *ins_pt,
+              const BITCODE_2DPOINT *alignment_pt, BITCODE_3BD *pt,
               BITCODE_3BD *align)
 {
-  place_point (p, base, attdef->ins_pt.x, attdef->ins_pt.y, attdef->elevation,
-               pt);
+  place_point (p, base, ins_pt->x, ins_pt->y, attdef->elevation, pt);
   if (!attdef->horiz_alignment && !attdef->vert_alignment)
     {
       align->x = align->y = 0.0;
       align->z = pt->z;
     }
   else
-    place_point (p, base, attdef->alignment_pt.x, attdef->alignment_pt.y,
+    place_point (p, base, alignment_pt->x, alignment_pt->y,
                  attdef->elevation, align);
+}
+
+/* Where the evaluation moves the definition's ATTDEF attdef, its
+   representation block's copy: the moved points into *ins_ptp and
+   *alignment_ptp, or attdef's own when it doesn't move it. */
+static void
+attdef_place (const Dynblock_Placement *p, const BITCODE_RLL handle,
+              const Dwg_Entity_ATTDEF *attdef, BITCODE_2DPOINT *ins_ptp,
+              BITCODE_2DPOINT *alignment_ptp)
+{
+  *ins_ptp = attdef->ins_pt;
+  *alignment_ptp = attdef->alignment_pt;
+  for (BITCODE_BL i = 0; i < p->evaluated.num_attdefs; i++)
+    if (p->evaluated.attdefs[i].entity == handle)
+      {
+        *ins_ptp = p->evaluated.attdefs[i].ins_pt;
+        *alignment_ptp = p->evaluated.attdefs[i].alignment_pt;
+      }
 }
 
 /* Checks atts against def's attribute definitions: each tag names one, is
@@ -783,8 +859,7 @@ place_attdef (const Dynblock_Placement *p, const BITCODE_3BD *base,
    dwg_add_ATTRIB () takes, which are fewer than AutoCAD allows, and be
    placed at points, a height and a thickness that a double holds, so that
    a refusal comes before anything is added. The representation block's
-   attribute definitions are where def's are, as only visibility states
-   change at the values check_values () takes. */
+   attribute definitions are def's, moved as the evaluation moves them. */
 static int
 check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                   const BITCODE_BL num_atts)
@@ -796,6 +871,7 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       const Dwg_Object *ent = ref_object (dwg, def->entities[i]);
       const Dwg_Entity_ATTDEF *attdef;
       BITCODE_3BD pt, align;
+      BITCODE_2DPOINT ins_pt, alignment_pt;
       char *tag;
       int valid;
       if (!is_placed_attdef (ent))
@@ -810,7 +886,9 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                       ent->handle.value);
           return INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
-      place_attdef (p, &def->base_pt, attdef, &pt, &align);
+      attdef_place (p, ent->handle.value, attdef, &ins_pt, &alignment_pt);
+      place_attdef (p, &def->base_pt, attdef, &ins_pt, &alignment_pt, &pt,
+                    &align);
       if (!isfinite (pt.x) || !isfinite (pt.y) || !isfinite (pt.z)
           || !isfinite (align.x) || !isfinite (align.y)
           || !isfinite (attdef->height * p->scale)
@@ -1262,8 +1340,23 @@ record_string (const Dwg_Data *dwg, Dwg_Object_XRECORD *xrec, const short dxf,
   return 0;
 }
 
+/* Point i of the parameter node as the evaluation leaves it, or def, the
+   definition's, for a parameter the evaluation gives no points. */
+static const BITCODE_3BD *
+evaluated_point (const Dynblock_Placement *p, const BITCODE_RLL node,
+                 const BITCODE_BL i, const BITCODE_3BD *def)
+{
+  for (BITCODE_BL j = 0; j < p->evaluated.num_nodes; j++)
+    if (p->evaluated.nodes[j].handle == node
+        && i < p->evaluated.nodes[j].num_points)
+      return &p->evaluated.nodes[j].points[i];
+  return def;
+}
+
 /* Adds the ACAD_ENHANCEDBLOCKDATA XRECORD of graph node node, of class
-   record rec, to data, the dictionary with handle data_handle. */
+   record rec, to data, the dictionary with handle data_handle. A
+   parameter's points are those the evaluation leaves it, as AutoCAD
+   stores them; an action's record is the same at every value. */
 static int
 add_node_record (Dynblock_Placement *p, Dwg_Object_DICTIONARY *data,
                  const BITCODE_RLL data_handle, const BITCODE_RLL node_handle,
@@ -1300,12 +1393,15 @@ add_node_record (Dynblock_Placement *p, Dwg_Object_DICTIONARY *data,
       {
         // the two-point parameters share BLOCK2PTPARAMETER_fields
         const Dynblock_2Pt_Param *_p = (const Dynblock_2Pt_Param *)element;
-        error |= record_point (xrec, &_p->def_basept);
-        error |= record_point (xrec, &_p->def_endpt);
+        error |= record_point (
+            xrec, evaluated_point (p, node_handle, 0, &_p->def_basept));
+        error |= record_point (
+            xrec, evaluated_point (p, node_handle, 1, &_p->def_endpt));
         // AutoCAD writes (0, 0, -1) here
         error |= record_point (xrec, &normal);
         if (rec->kind == RECORD_FLIP)
           error |= dwg_add_XRECORD_int16 (xrec, 70, 0) ? 0 : DWG_ERR_OUTOFMEM;
+        // the base angle point, which the evaluation leaves where it is
         else if (rec->kind == RECORD_ROTATION)
           error |= record_point (xrec, &node->tio.object->tio
                                             .BLOCKROTATIONPARAMETER
@@ -1320,7 +1416,8 @@ add_node_record (Dynblock_Placement *p, Dwg_Object_DICTIONARY *data,
         for (BITCODE_BL j = 0; j < p->num_params; j++)
           if (p->params[j].handle == node_handle && p->state[j])
             state = p->state[j] - 1;
-        error |= record_point (xrec, &_vis->def_pt);
+        error |= record_point (
+            xrec, evaluated_point (p, node_handle, 0, &_vis->def_pt));
         error |= record_string (
             dwg, xrec, 1,
             _vis->states && state < _vis->num_states ? _vis->states[state].name
@@ -1329,7 +1426,10 @@ add_node_record (Dynblock_Placement *p, Dwg_Object_DICTIONARY *data,
       break;
     case RECORD_POINT:
       error |= record_point (
-          xrec, &node->tio.object->tio.BLOCKBASEPOINTPARAMETER->def_pt);
+          xrec,
+          evaluated_point (
+              p, node_handle, 0,
+              &node->tio.object->tio.BLOCKBASEPOINTPARAMETER->def_pt));
       break;
     case RECORD_FLIP_GRIP:
       if (!dwg_add_XRECORD_int16 (xrec, 70, 0)
@@ -1523,7 +1623,9 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       for (BITCODE_BL k = 0; k < num_atts && !value; k++)
         if (strEQ (atts[k].tag, tag))
           value = atts[k].value;
-      place_attdef (p, &base, attdef, &pt, &align);
+      // the block's ATTDEFs are already where the evaluation put them
+      place_attdef (p, &base, attdef, &attdef->ins_pt, &attdef->alignment_pt,
+                    &pt, &align);
       if (etags)
         has_etag = etag_index (dwg, defobj, &etag_value, &etag);
       ins.x = pt.x;
@@ -1636,6 +1738,11 @@ place (Dynblock_Placement *p, const Dwg_DynValue *values,
       error = INSERT_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
 #endif
+  // the evaluation planned, and its refusals, before anything is added
+  if (!error && !p->at_defaults)
+    error = dynblock_evaluated_state (dwg, p->def, values, num_values,
+                                      &p->evaluated, p->reason,
+                                      sizeof (p->reason));
   if (!error && !p->at_defaults)
     error = check_representation (p);
   if (!error)
@@ -1763,6 +1870,7 @@ dwg_dynblock_insert (Dwg_Object_BLOCK_HEADER *owner,
               (unsigned)error);
   dwg_dynblock_free_params (p.params, p.num_params);
   free (p.state);
+  dynblock_free_state (&p.evaluated);
   if (errorp)
     *errorp = error;
   return insert;
