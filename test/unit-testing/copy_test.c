@@ -5161,8 +5161,9 @@ table_blocks (const Dwg_Data *dwg, const int dynamic, BITCODE_BL *nump)
                 ? dwg_resolve_handle (dwg, ctrl->entries[i]->absolute_ref)
                 : NULL;
       size_t len;
+      BITCODE_RS codepage;
       if (obj && obj->fixedtype == DWG_TYPE_BLOCK_HEADER
-          && (!dynamic || true_name (dwg, obj, &len)))
+          && (!dynamic || true_name (dwg, obj, &len, &codepage)))
         blocks[(*nump)++] = obj;
     }
   return blocks;
