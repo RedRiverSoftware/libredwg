@@ -1224,8 +1224,19 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
           mtext_buf_append_char (&b, (char)c);
           continue;
         }
+      /* dwg_codepage_is_twobyte () takes some single-byte characters for
+         lead bytes, such as ANSI_936's euro sign 0x80, so a pair the
+         codepage doesn't define is taken one byte at a time. */
       if (*s && dwg_codepage_is_twobyte (cp, (unsigned char)c))
-        c = (uint16_t)(c << 8 | *s++);
+        {
+          wc = dwg_codepage_uwc (cp, (uint16_t)(c << 8 | *s));
+          if (wc)
+            {
+              mtext_buf_append_codepoint (&b, (unsigned int)wc);
+              s++;
+              continue;
+            }
+        }
       /* dwg_codepage_uwc () asserts for these two, which have no table. */
       if (cp == CP_ISO_8859_1)
         wc = (wchar_t)c;
