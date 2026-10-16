@@ -713,6 +713,8 @@ test_mtext_codepage (void)
       "r2004 ANSI_936 lead byte at the end" },
     { CP_ANSI_936, "\x80" "A \xB7 B", "\xE2\x82\xAC" "A \xEF\xBF\xBD B",
       "r2004 ANSI_936 euro sign and a lead byte without its second" },
+    { CP_JOHAB, "\x88\x61 A", "\xEA\xB0\x80 A", "r2004 JOHAB" },
+    { CP_ANSI_1361, "\x88\x61 A", "\xEA\xB0\x80 A", "r2004 ANSI_1361" },
     { CP_ANSI_932, "\x95\x5C" "P1", "\xE8\xA1\xA8P1",
       "r2004 ANSI_932 second byte a backslash, not \\P" },
     { CP_ISO_8859_1, "caf\xE9", "caf\xC3\xA9", "r2004 ISO_8859_1" },

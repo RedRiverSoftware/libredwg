@@ -1225,9 +1225,12 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
           continue;
         }
       /* dwg_codepage_is_twobyte () takes some single-byte characters for
-         lead bytes, such as ANSI_936's euro sign 0x80, so a pair the
-         codepage doesn't define is taken one byte at a time. */
-      if (*s && dwg_codepage_is_twobyte (cp, (unsigned char)c))
+         lead bytes, such as ANSI_936's euro sign 0x80, and misses most of
+         Johab's, so a pair is tried for Johab too, and one the codepage
+         doesn't define is taken one byte at a time. */
+      if (*s
+          && (dwg_codepage_is_twobyte (cp, (unsigned char)c)
+              || cp == CP_JOHAB || cp == CP_ANSI_1361))
         {
           wc = dwg_codepage_uwc (cp, (uint16_t)(c << 8 | *s));
           if (wc)
