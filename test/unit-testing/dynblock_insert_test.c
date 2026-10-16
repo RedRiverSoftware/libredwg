@@ -35,11 +35,12 @@ static int test_loglevel;
 #  include <unistd.h>
 #endif
 #include "dwg.h"
+#include "bits.h"
 #include "tests_common.h"
 #include "dwg_api.h"
 #include "dwg_dynblock_api.h"
 
-#define OK(...)                                                               \
+#define OK(...)                                                              \
   do                                                                          \
     {                                                                         \
       loglevel = test_loglevel;                                               \
@@ -298,19 +299,42 @@ typedef struct
 static Placement placements[MAX_PLACEMENTS];
 static unsigned num_placements;
 
+/* An XRECORD string of a document that holds its codepage, in UTF-8, as a
+   document built with the add API holds it: a new allocation of *lenp
+   bytes, or NULL. */
+static char *
+xrecord_string_utf8 (const Dwg_Resbuf *r, size_t *lenp)
+{
+  char *s = (char *)malloc ((size_t)r->value.str.size + 1);
+  char *u;
+  if (!s)
+    return NULL;
+  memcpy (s, r->value.str.u.data, r->value.str.size);
+  s[r->value.str.size] = '\0';
+  u = bit_TV_to_utf8 (s, r->value.str.codepage);
+  if (u != s)
+    free (s);
+  if (u)
+    *lenp = strlen (u);
+  return u;
+}
+
 /* Two XRECORDs hold the same items: the same bytes, or with a tolerance
    the reals and points within it, which *exactp then says aren't all the
-   same bytes. */
+   same bytes. With b_utf8, b is in a document that holds UTF-8 and a in
+   one that holds its codepage: b's strings are a's in UTF-8, and b's
+   xdata_size is a's and the bytes that adds. */
 static int
 same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
-              const double tolerance, int *exactp, char *what,
-              const size_t size)
+              const int b_utf8, const double tolerance, int *exactp,
+              char *what, const size_t size)
 {
   const Dwg_Resbuf *ra = a->xdata, *rb = b->xdata;
   unsigned i = 0;
+  size_t utf8_extra = 0;
   *exactp = 1;
-  if (a->num_xdata != b->num_xdata || a->xdata_size != b->xdata_size
-      || a->cloning != b->cloning)
+  if (a->num_xdata != b->num_xdata || a->cloning != b->cloning
+      || (!b_utf8 && a->xdata_size != b->xdata_size))
     {
       snprintf (what, size, "%u items of %u bytes, cloning %u: AutoCAD's %u "
                 "of %u, cloning %u",
@@ -326,9 +350,20 @@ same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
         switch (dwg_resbuf_value_type (ra->type))
           {
           case DWG_VT_STRING:
-            same = ra->value.str.size == rb->value.str.size
-                   && !memcmp (ra->value.str.u.data, rb->value.str.u.data,
-                               ra->value.str.size);
+            if (b_utf8 && ra->value.str.u.data)
+              {
+                size_t len = 0;
+                char *u = xrecord_string_utf8 (ra, &len);
+                same = u && rb->value.str.size == len
+                       && !memcmp (u, rb->value.str.u.data, len);
+                if (u && len > ra->value.str.size)
+                  utf8_extra += len - ra->value.str.size;
+                free (u);
+              }
+            else
+              same = ra->value.str.size == rb->value.str.size
+                     && !memcmp (ra->value.str.u.data, rb->value.str.u.data,
+                                 ra->value.str.size);
             break;
           case DWG_VT_POINT3D:
             same = !memcmp (ra->value.pt, rb->value.pt, sizeof (ra->value.pt));
@@ -375,13 +410,23 @@ same_xrecord (const Dwg_Object_XRECORD *a, const Dwg_Object_XRECORD *b,
           return 0;
         }
     }
+  if (b_utf8 && b->xdata_size != a->xdata_size + utf8_extra)
+    {
+      snprintf (what, size, "%u bytes in UTF-8: AutoCAD's %u and %u for its "
+                "strings in UTF-8",
+                (unsigned)b->xdata_size, (unsigned)a->xdata_size,
+                (unsigned)utf8_extra);
+      return 0;
+    }
   return 1;
 }
 
 /* The ACAD_ENHANCEDBLOCKDATA of placement ours, in dwg, has the records
    that AutoCAD stored for its placement theirs, in fixture: the same
    names, in the same order, each XRECORD with the same items, their bytes
-   the same, or with a tolerance the reals and points within it. */
+   the same, or with a tolerance the reals and points within it. A
+   document built with the add API holds the strings in UTF-8, and writes
+   them in the codepage. */
 static int
 check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
                const Dwg_Data *fixture_dwg, const Dwg_Object *theirs,
@@ -390,6 +435,8 @@ check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
   const Dwg_Object *a = enhanced_block_data (fixture_dwg, theirs);
   const Dwg_Object *b = enhanced_block_data (dwg, ours);
   const Dwg_Object_DICTIONARY *da, *db;
+  const int b_utf8 = (dwg->opts & DWG_OPTS_INJSON)
+                     && !(fixture_dwg->opts & DWG_OPTS_INJSON);
   unsigned exact = 0;
   char why[512] = "";
   if (!a || !b)
@@ -416,7 +463,7 @@ check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
           || xa->fixedtype != DWG_TYPE_XRECORD
           || xb->fixedtype != DWG_TYPE_XRECORD
           || !same_xrecord (xa->tio.object->tio.XRECORD,
-                            xb->tio.object->tio.XRECORD, tolerance,
+                            xb->tio.object->tio.XRECORD, b_utf8, tolerance,
                             &same_bytes, why, sizeof (why)))
         {
           FAIL ("%s: record '%s' differs from AutoCAD's record '%s': %s",
@@ -426,12 +473,13 @@ check_records (const char *what, const Dwg_Data *dwg, const Dwg_Object *ours,
       exact += same_bytes;
     }
   if (exact == da->numitems)
-    OK ("%s: its %u records are AutoCAD's, byte for byte", what,
-        (unsigned)da->numitems);
+    OK ("%s: its %u records are AutoCAD's, byte for byte%s", what,
+        (unsigned)da->numitems, b_utf8 ? ", strings in UTF-8" : "");
   else
     OK ("%s: its %u records are AutoCAD's, %u byte for byte and the others "
-        "within %g",
-        what, (unsigned)da->numitems, exact, tolerance);
+        "within %g%s",
+        what, (unsigned)da->numitems, exact, tolerance,
+        b_utf8 ? ", strings in UTF-8" : "");
   return 0;
 }
 
@@ -766,21 +814,6 @@ copy_of (BITCODE_RLL map[][2], const unsigned num_map, const BITCODE_RLL def)
   return 0;
 }
 
-/* Whether placement pl is at a visibility state whose name has a character
-   outside ASCII, as the Door's "Open 30\xC2\xBA" has. A document built with
-   the add API writes such a name without it (runbook task P3-06, which
-   fixes that), so the values and records of such a placement are checked
-   before writing only. */
-static int
-has_non_ascii_state (const Placement *pl)
-{
-  for (BITCODE_BL i = 0; i < pl->num_values; i++)
-    for (const char *c = pl->values[i].state; c && *c; c++)
-      if ((unsigned char)*c >= 0x80)
-        return 1;
-  return 0;
-}
-
 /* Places in dst, at AutoCAD's values for its placement autocad of src,
    the copy of its definition, at ins_pt, scale and rotation, or, with
    ins_pt NULL, where AutoCAD placed it. The records, which are in the
@@ -943,14 +976,6 @@ test_placements (Dwg_Data *src)
           snprintf (what, sizeof (what), "read back placement " FORMAT_HV,
                     pl->insert);
           failures += check_structure (what, &readback, pl);
-          if (has_non_ascii_state (pl))
-            {
-              if (test_loglevel >= 2)
-                printf ("  # %s: its values and records not checked: they "
-                        "were before writing\n",
-                        what);
-              continue;
-            }
           failures += check_values (what, &readback, pl);
           if (pl->autocad && !pl->at_defaults)
             failures += check_records (
