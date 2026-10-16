@@ -160,9 +160,9 @@ test_mtext_46 (void)
     unlink (file);
 }
 
-/* name under test/test-data with the value of the line after the first line
-   that starts with match replaced by text, NUL-terminated, or NULL after a
-   failed check. Caller frees. */
+/* name under test/test-data with everything from the first occurrence of
+   match to the end of that line replaced by text, NUL-terminated, or NULL
+   after a failed check. Caller frees. */
 static char *
 test_data_with (const char *name, const char *match, const char *text)
 {

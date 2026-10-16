@@ -1256,7 +1256,9 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
    text as the writer expects it (see IS_FROM_TU in bits.h): UTF-16 when read
    from an r2007+ DWG; UTF-8 when built with the add API, imported from JSON,
    or imported from an r2007+ DXF; otherwise in the drawing's codepage.
-   Caller frees; NULL when out of memory. */
+   Caller frees.  NULL when the UTF-16 conversion or the UTF-8 copy runs out
+   of memory; the codepage conversion truncates instead, as the Mtext_Buf
+   helpers do. */
 static char *
 mtext_text_utf8 (const Dwg_Data *dwg, const char *text)
 {
@@ -1788,8 +1790,10 @@ utf8_advance (const char *s, size_t len, size_t pos, size_t nchars)
    Widths count UTF-8 characters, not bytes, and a break never splits one.
 
    `cwf` is a char-width factor — proportional fonts ≈ 0.55, monospace ≈ 0.6.
-   Width estimation is rough (we don't run the real font metrics), so the
-   factor errs on the early-wrap side rather than the overflow side.
+   Width estimation is rough (we don't run the real font metrics): every
+   character counts as an average Latin glyph, so for Latin text the factor
+   errs on the early-wrap side rather than the overflow side, but full-width
+   CJK characters, about one em each, can run past `rect_width`.
 
    Stacked-fraction runs (`denom != NULL`) are treated atomically.
 
@@ -2003,7 +2007,9 @@ output_MTEXT (Dwg_Object *obj)
   /* Word-wrap at the MTEXT box width.  Engineering-drawing MTEXT is usually
      ALL CAPS in Arial-family fonts where the average glyph occupies ~0.6 of
      the em-square; 0.65 for monospace.  Without real font metrics we err on
-     the early-wrap side so text never overflows the box. */
+     the early-wrap side so Latin text stays inside the box.  Every character
+     counts as one such glyph, so full-width CJK text, about one em a
+     character, can overflow it. */
   {
     int monospace = (fontfamily && (strcmp (fontfamily, "Courier") == 0
                                     || strcmp (fontfamily, "Lucida Console")

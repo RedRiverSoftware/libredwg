@@ -18,10 +18,10 @@
    - one write longer than dwg_svg_printf's 8 KB stack buffer (a long TEXT
      value) reaches the SVG whole;
    - MTEXT comes out as UTF-8 whichever way the document holds its text: in
-     the codepage (read from a pre-r2007 DWG), in UTF-16 (read from an
-     r2007+ DWG) or in UTF-8 (built with the add API), at the top level and
-     in a block, and word wrap counts characters, not bytes. indxf_test
-     checks DXF imports. */
+     the codepage (read from a pre-r2007 DWG) or in UTF-16 (read from an
+     r2007+ DWG), at the top level and in a block, or in UTF-8 (built with
+     the add API), at the top level; and word wrap counts characters, not
+     bytes. indxf_test checks DXF imports. */
 
 #define SVG_API_TEST_C
 #include <math.h>
