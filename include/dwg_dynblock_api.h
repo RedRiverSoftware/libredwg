@@ -343,6 +343,17 @@ typedef struct _dwg_attvalue
 {
   char *tag; /* the attribute definition's tag, as it has it */
   char *value;
+  /* The value's width as AutoCAD lays it out in its text style's font, at
+     a height of 1 and a width factor of 1, which places text justified
+     centre, right or middle as AutoCAD does (see dwg_dynblock_insert ()).
+     For a TrueType font: from the start of the text to the end of its
+     last character, that is the sum of the characters' advance widths, or
+     to the right edge of the last character's outline where that reaches
+     further, in font units, divided by the height of the font's capital A
+     (AutoCAD draws a capital A as tall as the text): 1466 of Arial's 2048
+     units. AutoCAD applies no kerning. 0 for none, so zero the struct
+     before filling it. */
+  double width;
 } Dwg_AttValue;
 
 /* Places dynamic block definition def in block owner, such as model space,
@@ -389,6 +400,37 @@ typedef struct _dwg_attvalue
    each ATTRIB gets the AcDbBlockRepETag index of its definition, as
    AutoCAD's do. They are added with dwg_add_ATTRIB (), which links them to
    the INSERT as AutoCAD does.
+
+   Where text justified centre, right or middle starts, its insertion
+   point, AutoCAD derives from its alignment point and the width it
+   measures for the text in its font, and draws a stored ATTRIB from that
+   insertion point. LibreDWG has no fonts, so for such an attribute give
+   the value's width in atts (Dwg_AttValue's width). The ATTRIB then starts
+   where AutoCAD starts it: back from its alignment point along the
+   baseline (forward for backward text) by that width at the ATTRIB's
+   height and width factor, or by half of it when centred or middle; and
+   across the baseline as far as the definition's text does. Two things
+   AutoCAD measures that a width doesn't hold: it centres text on its
+   first character's outline where that starts left of the text's start,
+   so a centred value beginning with such a character, as Arial's A, j
+   and _ do (by 3, 94 and 31 of its 2048 units), sits half that overhang
+   off; and it centres middle text on the height of its characters too,
+   which LibreDWG takes from the definition's text, so a value whose
+   characters reach lower or higher than those, such as one with
+   descenders against capitals, sits off its alignment point across the
+   baseline, by up to about half the height. Text in a vertical style
+   starts where the definition's does. With no width (0), or for an
+   attribute atts don't give, the ATTRIB starts where the definition's
+   text starts, which AutoCAD laid out for the definition's tag or default
+   value: a value of another width then sits off its alignment point along
+   the baseline in AutoCAD, though not in LibreDWG's SVG output, which
+   places such text by its alignment point. To place a default value as
+   AutoCAD does, give it in atts with its width. Text left-aligned,
+   aligned or fit starts where the definition's does whatever the width.
+   A width that is negative or isn't finite, or at which the text's start,
+   or a coordinate of its offset from its alignment point, would be
+   beyond what a double holds, is refused, with nothing added
+   (DWG_ERR_VALUEOUTOFBOUNDS).
 
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
    document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
@@ -537,9 +579,11 @@ typedef struct _dwg_dynblock_check_report
    both are finite, and the insertion point of an attribute definition
    that isn't constant, justified other than left, aligned or fit (centre,
    right or middle), where the alignment point matches and the insertion
-   point differs only along the baseline. AutoCAD derives that insertion
-   point from the alignment point and the width of the tag in a
-   definition, but of the default value in the blocks it evaluates. The
+   point differs only along the baseline, or for middle text also across
+   it by up to the text's height. AutoCAD derives that insertion point
+   from the alignment point and the width of the tag in a definition, but
+   of the default value in the blocks it evaluates, and centres middle
+   text on the height of its characters too. The
    blocks' base points compare too: a difference there is
    a mismatch, though not of an entity. EED is not compared.
 

@@ -4832,10 +4832,12 @@ is_measured_extent (const char *structname, const char *field)
    from that point and the width of the string it measures: for an
    attribute definition, the tag in a definition, but the default value in
    the blocks it evaluates. That moves the insertion point along the
-   baseline only. Left-justified text starts where it is placed whatever
-   its width, at any vertical alignment. Only an attribute definition that
-   isn't constant: an INSERT draws its ATTRIB instead, but draws a
-   constant one from its block. */
+   baseline, and for middle text, which AutoCAD also centres on the height
+   of the string's characters, across it too, by up to the text's height.
+   Left-justified text starts where it is placed whatever its width, at
+   any vertical alignment. Only an attribute definition that isn't
+   constant: an INSERT draws its ATTRIB instead, but draws a constant one
+   from its block. */
 static int
 is_measured_ins_pt (const Dynblock_Compare *c, const Dwg_Entity_ATTDEF *a,
                     const Dwg_Entity_ATTDEF *b)
@@ -4849,7 +4851,7 @@ is_measured_ins_pt (const Dynblock_Compare *c, const Dwg_Entity_ATTDEF *a,
     return 0;
   // the difference across the baseline, at AutoCAD's rotation
   return fabs (dy * cos (a->rotation) - dx * sin (a->rotation))
-         <= c->tolerance;
+         <= (h == 4 ? fabs (a->height) : 0.0) + c->tolerance;
 }
 
 static void

@@ -64,6 +64,7 @@ static int test_loglevel;
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
 #define WRITTEN_R11 "dynblock_insert_test_r11.dwg"
+#define WRITTEN_WIDTHS "dynblock_insert_test_widths.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -1945,6 +1946,296 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
   return 1;
 }
 
+/* An attribute definition for test_attribute_widths and the value placed
+   for it. The offsets are where text starts, its insertion point, from its
+   alignment point, along and across its baseline, in text heights: where
+   AutoCAD 2027 starts TEXT in Arial at a height of 2.5, unless said
+   otherwise. A width is as a caller measures it: the sum of the value's
+   Arial advance widths over the height of Arial's A, 1466 units. AutoCAD
+   centres text on its first character's outline where that starts left of
+   the text's start, as Arial's A does by 3 units (overhang), which a width
+   doesn't hold: such a centred value starts half the overhang further
+   back than AutoCAD's, or further forward for backward text. */
+typedef struct
+{
+  const char *tag;
+  BITCODE_BS horiz, vert, generation;
+  double rotation, oblique, width_factor;
+  const char *dflt;               // the definition's default value
+  double dflt_along, dflt_across; // where the definition's text starts
+  const char *value;              // NULL for none given
+  double width;
+  double along, across; // where the ATTRIB starts, but for the overhang
+  double overhang;      // of the value's first character, in font units
+  int vertical;         // in a vertical text style
+} Width_Case;
+
+static const Width_Case width_cases[] = {
+  // centred on the middle, a longer value
+  { "CENTRED", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJKLMNOPQRST-0001", 32548.0 / 1466.0, -11.0999317872, -0.5, 3.0,
+    0 },
+  // centred on the baseline, a shorter value without an overhang
+  { "SHORT", 1, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, 0.0, "iii",
+    1365.0 / 1466.0, -0.4655525239, 0.0, 0.0, 0 },
+  // right on the top, turned, at a width factor of 0.8, a shorter value
+  { "RIGHT", 2, 3, 0, 0.3, 0.0, 0.8, "ABCDEFGHIJ", -7.0788540246, -1.0, "AB",
+    2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
+  // the same, oblique by 15 degrees, as AutoCAD lays it out turned 0.5
+  { "OBLIQUE", 2, 3, 0, 0.5, 0.2617993878, 0.8, "ABCDEFGHIJ", -7.0788540246,
+    -1.0, "AB", 2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
+  // middle, a longer value of capitals
+  { "MIDDLE", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -4.4232605730, -0.5, 3.0, 0 },
+  // middle, a value with descenders: AutoCAD's across is -0.3530013642,
+  // the middle of its characters; the definition's is kept
+  { "LOW", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABgy",
+    4895.0 / 1466.0, -1.6684856753, -0.5, 3.0, 0 },
+  // centred and backward
+  { "BACKWARD", 1, 0, 2, 0.0, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
+    4895.0 / 1466.0, 1.6684856753, 0.0, 3.0, 0 },
+  // no width: the definition's start, though the value is longer
+  { "NOWIDTH", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 0.0, -0.9307639836, -0.5, 0.0, 0 },
+  // no value: the definition's default and start
+  { "DEFAULT", 2, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0, NULL, 0.0,
+    -1.8635743516, 0.0, 0.0, 0 },
+  // left on the middle, aligned (spanning the definition's advance width)
+  // and in a vertical style, they start where the definitions do
+  { "LEFTMID", 0, 2, 0, 0.0, 0.0, 1.0, "AB", 0.0, -0.5, "ABCDEFGHIJ",
+    12972.0 / 1466.0, 0.0, -0.5, 0.0, 0 },
+  { "ALIGNED", 3, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -1.8635743516, 0.0, 0.0, 0 },
+  { "VERTICAL", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -0.9307639836, -0.5, 0.0, 1 },
+};
+#define NUM_WIDTH_CASES (sizeof (width_cases) / sizeof (width_cases[0]))
+
+/* The ATTRIBs of placement insert, at ins_pt, scale and rotation in block,
+   holding width_cases' definitions at height 2.5: each aligned at its
+   definition's alignment point placed, with its value, and starting where
+   the case says. */
+static int
+check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
+              const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
+              const double scale, const double rotation)
+{
+  const Dwg_Object *insobj = object (dwg, insert);
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
+  const Dwg_Entity_INSERT *_ins;
+  const double c = cos (rotation), s = sin (rotation);
+  const double height = 2.5 * scale;
+  int failures = 0;
+  if (!insobj || insobj->fixedtype != DWG_TYPE_INSERT || !blk)
+    {
+      FAIL ("%s: no INSERT " FORMAT_HV " or block " FORMAT_HV, what, insert,
+            block);
+      return 1;
+    }
+  _ins = insobj->tio.entity->tio.INSERT;
+  if (_ins->num_owned != NUM_WIDTH_CASES)
+    {
+      FAIL ("%s: %u ATTRIBs, expected %u", what, (unsigned)_ins->num_owned,
+            (unsigned)NUM_WIDTH_CASES);
+      return 1;
+    }
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      const Dwg_Entity_ATTDEF *d = NULL;
+      const Dwg_Entity_ATTRIB *a = NULL;
+      const double r = wc->rotation + rotation;
+      // a width alone starts text half the overhang back, or forward when
+      // backward
+      const double along
+          = wc->along
+            + (wc->generation & 2 ? 0.5 : -0.5) * wc->overhang / 1466.0
+                  * wc->width_factor;
+      double ax, ay, x, y;
+      for (BITCODE_BL i = 0; !d && i < blk->num_owned; i++)
+        {
+          const Dwg_Object *ent = object (dwg, ref (blk->entities[i]));
+          if (ent && ent->fixedtype == DWG_TYPE_ATTDEF
+              && !strcmp (ent->tio.entity->tio.ATTDEF->tag, wc->tag))
+            d = ent->tio.entity->tio.ATTDEF;
+        }
+      for (BITCODE_BL i = 0; !a && i < _ins->num_owned; i++)
+        {
+          const Dwg_Object *att = object (dwg, ref (_ins->attribs[i]));
+          if (att && att->fixedtype == DWG_TYPE_ATTRIB
+              && !strcmp (att->tio.entity->tio.ATTRIB->tag, wc->tag))
+            a = att->tio.entity->tio.ATTRIB;
+        }
+      if (!d || !a)
+        {
+          FAIL ("%s: %s has no %s", what, wc->tag,
+                d ? "ATTRIB" : "attribute definition");
+          failures++;
+          continue;
+        }
+      ax = ins_pt->x
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * c
+                    - (d->alignment_pt.y - blk->base_pt.y) * s);
+      ay = ins_pt->y
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * s
+                    + (d->alignment_pt.y - blk->base_pt.y) * c);
+      x = ax + height * (along * cos (r) - wc->across * sin (r));
+      y = ay + height * (along * sin (r) + wc->across * cos (r));
+      // AutoCAD's offsets have 10 decimals
+      if (strcmp (a->text_value, wc->value ? wc->value : wc->dflt)
+          || fabs (a->alignment_pt.x - ax) > 1e-9
+          || fabs (a->alignment_pt.y - ay) > 1e-9
+          || fabs (a->ins_pt.x - x) > 1e-8 || fabs (a->ins_pt.y - y) > 1e-8
+          || fabs (a->height - height) > 1e-9
+          || a->generation != wc->generation
+          || a->horiz_alignment != wc->horiz || a->vert_alignment != wc->vert)
+        {
+          FAIL ("%s: %s '%s' starts at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g, expected '%s' at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g",
+                what, wc->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
+                a->alignment_pt.x, a->alignment_pt.y, a->height,
+                wc->value ? wc->value : wc->dflt, x, y, ax, ay, height);
+          failures++;
+        }
+    }
+  if (!failures)
+    OK ("%s: %u ATTRIBs start where AutoCAD starts them for their widths, "
+        "or where their definitions do",
+        what, (unsigned)NUM_WIDTH_CASES);
+  return failures;
+}
+
+/* Attribute values given with their widths start where AutoCAD starts
+   them: centred, right-aligned, middle and backward text, long and short
+   values, turned definitions, oblique and with a width factor; without a
+   width, without a value, left on the middle, aligned or in a vertical
+   style, where the definition's text starts; on a copy of Trees, placed at
+   its values, unscaled, and at Shrub (Plan), scaled and turned, and read
+   back. */
+static int
+test_attribute_widths (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def;
+  Dwg_Object_STYLE *vertical;
+  Dwg_AttValue given[NUM_WIDTH_CASES];
+  BITCODE_BL num_given = 0;
+  const BITCODE_3BD at1 = { 10.0, 20.0, 0.0 }, at2 = { -30.0, 15.0, 0.0 };
+  Dwg_DynValue v;
+  Dwg_Entity_INSERT *ins1, *ins2;
+  BITCODE_RLL h1, h2, block2;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("attribute widths: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  vertical = dwg_add_STYLE (dst, "VERTICAL");
+  if (!vertical)
+    {
+      FAIL ("attribute widths: adding a text style failed");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  vertical->is_vertical = 1;
+  memset (given, 0, sizeof (given));
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      // each aligned at a point of its own, in a column
+      const double ax = def->base_pt.x + 5.0, ay = def->base_pt.y - 10.0 * k;
+      const double c = cos (wc->rotation), s = sin (wc->rotation);
+      const dwg_point_3d ins
+          = { ax + 2.5 * (wc->dflt_along * c - wc->dflt_across * s),
+              ay + 2.5 * (wc->dflt_along * s + wc->dflt_across * c), 0.0 };
+      Dwg_Entity_ATTDEF *attdef = dwg_add_ATTDEF (def, 2.5, 0, "Prompt", &ins,
+                                                  wc->tag, wc->dflt);
+      if (!attdef)
+        {
+          FAIL ("attribute widths: adding %s failed", wc->tag);
+          free_dwg (dst);
+          free (dst);
+          return 1;
+        }
+      attdef->horiz_alignment = wc->horiz;
+      attdef->vert_alignment = wc->vert;
+      attdef->generation = wc->generation;
+      attdef->rotation = wc->rotation;
+      attdef->oblique_angle = wc->oblique;
+      attdef->width_factor = wc->width_factor;
+      attdef->alignment_pt.x = ax;
+      attdef->alignment_pt.y = ay;
+      if (wc->vertical)
+        attdef->style
+            = dwg_add_handleref (dst, 5, handle_of (dst, vertical), NULL);
+      if (wc->value)
+        {
+          given[num_given].tag = (char *)wc->tag;
+          given[num_given].value = (char *)wc->value;
+          given[num_given].width = wc->width;
+          num_given++;
+        }
+    }
+
+  loglevel = tracelevel;
+  ins1 = dwg_dynblock_insert (model_space (dst), def, &at1, 1.0, 0.0, NULL, 0,
+                              given, num_given, &error);
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  if (ins1 && !error)
+    ins2 = dwg_dynblock_insert (model_space (dst), def, &at2, 2.0, 0.5, &v, 1,
+                                given, num_given, &error);
+  else
+    ins2 = NULL;
+  loglevel = test_loglevel;
+  if (!ins1 || !ins2 || error)
+    {
+      FAIL ("attribute widths: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  h1 = handle_of (dst, ins1);
+  h2 = handle_of (dst, ins2);
+  block2 = ref (object (dst, h2)->tio.entity->tio.INSERT->block_header);
+  failures += check_widths ("attribute widths at the definition's values",
+                            dst, h1, def_h, &at1, 1.0, 0.0);
+  failures += check_widths ("attribute widths at Shrub (Plan)", dst, h2,
+                            block2, &at2, 2.0, 0.5);
+
+  error = write_dwg (WRITTEN_WIDTHS, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_WIDTHS, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("attribute widths: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      failures += check_widths ("read back attribute widths at the "
+                                "definition's values",
+                                &readback, h1, def_h, &at1, 1.0, 0.0);
+      failures += check_widths ("read back attribute widths at Shrub (Plan)",
+                                &readback, h2, block2, &at2, 2.0, 0.5);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_WIDTHS);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
 /* Attributes, on a copy of Trees given attribute definitions: a plain one,
    left-aligned with no alignment point stored (dataflags 0x02), as AutoCAD
    stores one; a constant one, which gets no ATTRIB; one centred, rotated,
@@ -1965,7 +2256,7 @@ test_attributes (Dwg_Data *src)
   Dwg_Entity_ATTDEF *number, *constant, *centred, *label, *mark;
   Dwg_Object_LAYER *layer;
   const BITCODE_3BD at1 = { 50.0, 60.0, 0.0 }, at2 = { -20.0, 10.0, 5.0 };
-  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7" } };
+  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7", 0.0 } };
   const Expected_Attrib expected1[] = { { "NUMBER", "EL-7" },
                                         { "RATING", "10W" },
                                         { "LABEL", "L1" },
@@ -2302,9 +2593,11 @@ test_attributes_non_ascii (Dwg_Data *src)
   Dwg_Entity_ATTDEF *cable, *note;
   const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
   const Dwg_AttValue given[]
-      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9" },
-          { (char *)"NOTE", (char *)"30\xC2\xB0 Stra\xC3\x9F"
-                                    "e \xE2\x82\xAC 5" } };
+      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9", 0.0 },
+          { (char *)"NOTE",
+            (char *)"30\xC2\xB0 Stra\xC3\x9F"
+                    "e \xE2\x82\xAC 5",
+            0.0 } };
   const Expected_Attrib utf8[]
       = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9" },
           { "NOTE", "30\xC2\xB0 Stra\xC3\x9F"
@@ -2932,6 +3225,30 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
 
 /* Places def in dwg's model space with the given values, which must
    succeed. */
+/* Places def at the origin at scale with atts, and gets the insertion
+   point of its only ATTRIB into *x and *y. Returns 0 when it is placed. */
+static int
+attrib_start (Dwg_Data *dwg, Dwg_Object_BLOCK_HEADER *def, const double scale,
+              const Dwg_AttValue *atts, const BITCODE_BL natts, double *x,
+              double *y)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  int error = 0;
+  const Dwg_Entity_INSERT *ins;
+  const Dwg_Object *att = NULL;
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dwg), def, &pt, scale, 0.0, NULL, 0,
+                             atts, natts, &error);
+  loglevel = test_loglevel;
+  if (ins && !error && ins->num_owned == 1)
+    att = object (dwg, ref (ins->attribs[0]));
+  if (!att || att->fixedtype != DWG_TYPE_ATTRIB)
+    return 1;
+  *x = att->tio.entity->tio.ATTRIB->ins_pt.x;
+  *y = att->tio.entity->tio.ATTRIB->ins_pt.y;
+  return 0;
+}
+
 static int
 test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
                const Dwg_DynValue *values, const BITCODE_BL n,
@@ -3204,6 +3521,107 @@ test_definition_refusals (Dwg_Data *src)
                                   NULL, 0, a, 1,
                                   REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                   "an attribute without a value");
+        a[0].value = (char *)"1";
+        a[0].width = -1.0;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a negative width");
+        a[0].width = (double)NAN;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a width that isn't a number");
+        a[0].width = (double)INFINITY;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an infinite width");
+        // centred, a width that starts the text beyond a double
+        attdef->horiz_alignment = 1;
+        a[0].width = 1e308;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 10.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute started beyond a double by "
+                                  "its width");
+        // centred, starts that a double holds, though a product on the
+        // way to them doesn't: aligned at the origin, half the width at
+        // the ATTRIB's height back
+        attdef->alignment_pt.x = at.x;
+        attdef->alignment_pt.y = at.y;
+        {
+          double x = 0.0, y = 1.0;
+          // the ATTRIB 1e306 high, 10 wide
+          attdef->height = 1e308;
+          a[0].width = 10.0;
+          if (!attrib_start (dst, def, 0.01, a, 1, &x, &y)
+              && fabs (x + 5e306) <= 5e294 && y == 0.0)
+            OK ("insert starts a 1e306 high attribute value 10 wide at %g",
+                x);
+          else
+            {
+              FAIL ("insert of a 1e306 high attribute value 10 wide: (%g, "
+                    "%g), expected (-5e306, 0)",
+                    x, y);
+              failures++;
+            }
+          // 2 high, 1e308 wide
+          attdef->height = 2.0;
+          a[0].width = 1e308;
+          x = 0.0;
+          y = 1.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308) <= 1e296 && y == 0.0)
+            OK ("insert starts a 2 high attribute value 1e308 wide at %g",
+                x);
+          else
+            {
+              FAIL ("insert of a 2 high attribute value 1e308 wide: (%g, "
+                    "%g), expected (-1e308, 0)",
+                    x, y);
+              failures++;
+            }
+          // right-aligned and turned 45 degrees, 2 high and 1e308 wide:
+          // the offset, 2e308, isn't held, but each coordinate is
+          attdef->horiz_alignment = 2;
+          attdef->rotation = M_PI / 4.0;
+          x = y = 0.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308 * (2.0 * cos (M_PI / 4.0))) <= 2e296
+              && fabs (y + 1e308 * (2.0 * sin (M_PI / 4.0))) <= 2e296)
+            OK ("insert starts a turned 2 high attribute value 1e308 wide "
+                "at (%g, %g)",
+                x, y);
+          else
+            {
+              FAIL ("insert of a turned 2 high attribute value 1e308 wide: "
+                    "(%g, %g), expected (-1.4142e308, -1.4142e308)",
+                    x, y);
+              failures++;
+            }
+          attdef->horiz_alignment = 1;
+          attdef->rotation = 0.0;
+          attdef->height = 1.0;
+        }
+        attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
+        // left-aligned, a width doesn't move it
+        attdef->horiz_alignment = 0;
+        {
+          double x = 1.0, y = 1.0;
+          if (!attrib_start (dst, def, 10.0, a, 1, &x, &y) && x == pt.x
+              && y == pt.y)
+            OK ("insert accepts a width on left-aligned text, which starts "
+                "where its definition does");
+          else
+            {
+              FAIL ("insert of a width on left-aligned text: its ATTRIB at "
+                    "(%g, %g), expected (%g, %g)",
+                    x, y, pt.x, pt.y);
+              failures++;
+            }
+        }
+        a[0].width = 0.0;
 
         // at a scale of 1e300, a point 1e10 from the base point
         attdef->ins_pt.x = at.x + 1e10;
@@ -4290,6 +4708,56 @@ test_moved_parameters (Dwg_Data *src)
             failures++;
           }
       }
+      // centred and given a width of 2, its ATTRIB is aligned where the
+      // evaluation moved the ATTDEF's alignment point, and starts half the
+      // width at height 2.5 back from it
+      attdef->horiz_alignment = 1;
+      attdef->alignment_pt.x = attdef_pt.x;
+      attdef->alignment_pt.y = attdef_pt.y;
+      {
+        const BITCODE_3BD base = block_header (dst, def_h)->base_pt;
+        const double ax = at.x + attdef_pt.x - 12.0 - base.x;
+        const double ay = at.y + attdef_pt.y - base.y;
+        const Dwg_Object *attrib;
+        const Dwg_Entity_ATTRIB *_attrib;
+        Dwg_AttValue a;
+        memset (&a, 0, sizeof (a));
+        a.tag = (char *)"MARK";
+        a.value = (char *)"MM";
+        a.width = 2.0;
+        loglevel = tracelevel;
+        insert = dwg_dynblock_insert (model_space (dst),
+                                      block_header (dst, def_h), &at, 1.0,
+                                      0.0, &v, 1, &a, 1, &error);
+        loglevel = test_loglevel;
+        attrib = insert && insert->num_owned
+                     ? object (dst, ref (insert->attribs[0]))
+                     : NULL;
+        _attrib = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+                      ? attrib->tio.entity->tio.ATTRIB
+                      : NULL;
+        if (_attrib && !error
+            && fabs (_attrib->alignment_pt.x - ax) <= RECORD_TOLERANCE
+            && fabs (_attrib->alignment_pt.y - ay) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.x - (ax - 2.5)) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.y - ay) <= RECORD_TOLERANCE)
+          OK ("moved parameters: a centred ATTRIB with a width starts back "
+              "from where the evaluation moved its alignment point");
+        else
+          {
+            FAIL ("moved parameters: the centred ATTRIB at (%g, %g) "
+                  "aligned at (%g, %g), expected (%g, %g) aligned at (%g, "
+                  "%g): 0x%x",
+                  _attrib ? _attrib->ins_pt.x : 0.0,
+                  _attrib ? _attrib->ins_pt.y : 0.0,
+                  _attrib ? _attrib->alignment_pt.x : 0.0,
+                  _attrib ? _attrib->alignment_pt.y : 0.0, ax - 2.5, ay, ax,
+                  ay, error);
+            failures++;
+          }
+      }
+      attdef->horiz_alignment = 0;
+      attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
       // at a scale of 1e300, the ATTDEF's own place is held, and one moved
       // 1e10 to the right isn't, with Window Width's value set made to
       // allow that value
@@ -4352,6 +4820,7 @@ main (int argc, char *argv[])
   failures += test_is_xref_ref (&src);
   failures += test_add_insert_block ();
   failures += test_add_insert_block_r11 ();
+  failures += test_attribute_widths (&src);
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);

@@ -805,6 +805,72 @@ is_placed_attdef (const Dwg_Object *ent)
          && !(ent->tio.entity->tio.ATTDEF->flags & 2);
 }
 
+/* The width atts give the value of the attribute tagged tag, or 0 when
+   they give none: a width that isn't finite or is negative, which
+   check_attributes () refuses, counts as none. */
+static double
+att_width (const Dwg_AttValue *atts, const BITCODE_BL num_atts,
+           const char *tag)
+{
+  for (BITCODE_BL i = 0; i < num_atts; i++)
+    if (atts[i].tag && strEQ (atts[i].tag, tag))
+      return isfinite (atts[i].width) && atts[i].width > 0.0 ? atts[i].width
+                                                             : 0.0;
+  return 0.0;
+}
+
+/* The product of finite a, b and c, which is infinite only when it is
+   beyond what a double holds: their exponents are added apart from their
+   mantissas, so that no partial product overflows. */
+static double
+product3 (const double a, const double b, const double c)
+{
+  int ea, eb, ec;
+  const double m = frexp (a, &ea) * frexp (b, &eb) * frexp (c, &ec);
+  return ldexp (m, ea + eb + ec);
+}
+
+/* Moves *pt, the insertion point of attdef's ATTRIB placed by p, aligned
+   at *align, to where AutoCAD starts text of the given width (as
+   Dwg_AttValue has it) that is centred, right-aligned or middle: back
+   from its alignment point along the baseline by the width at the
+   ATTRIB's height and width factor, or half of it when centred or middle,
+   forward for backward text, and across the baseline as far as the
+   definition's text starts. That offset doesn't depend on the text,
+   except for middle text, which AutoCAD also centres on the height of its
+   characters. Without a width, for other text, or for text in a vertical
+   style, which runs down instead, *pt stays where the definition's text
+   starts. */
+static void
+start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
+                const double width, BITCODE_3BD *pt, const BITCODE_3BD *align)
+{
+  const BITCODE_BS h = attdef->horiz_alignment;
+  const double rotation = attdef->rotation + p->rotation;
+  const double c = cos (rotation), s = sin (rotation);
+  const Dwg_Object *style = ref_object (p->dwg, attdef->style);
+  double across, share, width_factor, height;
+  if (!(width > 0.0) || (h != 1 && h != 2 && h != 4)
+      || attdef->vert_alignment > 3
+      || (style && style->fixedtype == DWG_TYPE_STYLE
+          && style->tio.object->tio.STYLE->is_vertical))
+    return;
+  across = (pt->y - align->y) * c - (pt->x - align->x) * s;
+  // AutoCAD's width factor is positive; the add API leaves it 0
+  width_factor = attdef->width_factor > 0.0 ? attdef->width_factor : 1.0;
+  // the share of the width the text starts from its alignment point along
+  // the baseline: back, or forward for backward text
+  share = (h == 2 ? -1.0 : -0.5) * width_factor;
+  if (attdef->generation & 2)
+    share = -share;
+  // the ATTRIB's height, which check_attributes () finds finite. Each
+  // coordinate's part of the offset is multiplied out on its own, as it
+  // can be held where the offset can't.
+  height = attdef->height * p->scale;
+  pt->x = align->x + product3 (width, share * c, height) - across * s;
+  pt->y = align->y + product3 (width, share * s, height) + across * c;
+}
+
 /* The WCS point of block point (x, y, z), placed by p in the block with
    base point base. */
 static void
@@ -909,6 +975,21 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       tag = utf8_copy (dwg, attdef->tag);
       if (!tag)
         return DWG_ERR_OUTOFMEM;
+      // where the value's width given starts the text
+      {
+        const double width = att_width (atts, num_atts, tag);
+        start_at_width (p, attdef, width, &pt, &align);
+        if (!isfinite (pt.x) || !isfinite (pt.y))
+          {
+            set_reason (p,
+                        "attribute definition " FORMAT_HV " placed at a "
+                        "scale of %g starts beyond what a double holds at "
+                        "the width given, %g",
+                        ent->handle.value, p->scale, width);
+            free (tag);
+            return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+          }
+      }
       valid = dwg_is_valid_tag (tag);
       if (!valid)
         set_reason (p,
@@ -926,6 +1007,14 @@ check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
         {
           set_reason (p, "attribute %u has no %s", (unsigned)i,
                       atts[i].tag ? "value" : "tag");
+          return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+      if (!isfinite (atts[i].width) || atts[i].width < 0.0)
+        {
+          set_reason (p,
+                      "attribute '%s' has a width of %g, which isn't a "
+                      "finite number of 0 or more",
+                      atts[i].tag, atts[i].width);
           return INSERT_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
       for (BITCODE_BL k = 0; k < i; k++)
@@ -1635,6 +1724,7 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                     &pt, &align);
       if (etags)
         has_etag = etag_index (dwg, defobj, &etag_value, &etag);
+      start_at_width (p, attdef, att_width (atts, num_atts, tag), &pt, &align);
       ins.x = pt.x;
       ins.y = pt.y;
       ins.z = pt.z;
