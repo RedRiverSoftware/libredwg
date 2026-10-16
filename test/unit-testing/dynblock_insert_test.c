@@ -2155,9 +2155,11 @@ test_attributes_non_ascii (Dwg_Data *src)
   Dwg_Entity_ATTDEF *cable, *note;
   const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
   const Dwg_AttValue given[]
-      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9" },
-          { (char *)"NOTE", (char *)"30\xC2\xB0 Stra\xC3\x9F"
-                                    "e \xE2\x82\xAC 5" } };
+      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9", 0.0 },
+          { (char *)"NOTE",
+            (char *)"30\xC2\xB0 Stra\xC3\x9F"
+                    "e \xE2\x82\xAC 5",
+            0.0 } };
   const Expected_Attrib utf8[]
       = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9" },
           { "NOTE", "30\xC2\xB0 Stra\xC3\x9F"
