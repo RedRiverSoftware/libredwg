@@ -418,8 +418,9 @@ typedef struct _dwg_attvalue
    places such text by its alignment point. To place a default value as
    AutoCAD does, give it in atts with its width. Text left-aligned,
    aligned or fit starts where the definition's does whatever the width.
-   A width that is negative or isn't finite, or at which the text would
-   start beyond what a double holds, is refused, with nothing added
+   A width that is negative or isn't finite, or at which the text's start,
+   or a coordinate of its offset from its alignment point, would be
+   beyond what a double holds, is refused, with nothing added
    (DWG_ERR_VALUEOUTOFBOUNDS).
 
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
