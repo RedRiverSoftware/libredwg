@@ -1209,6 +1209,34 @@ bit_TV_to_utf8_tests (void)
     if (p && p != literal)
       free (p);
   }
+
+  /* A string more than half again as long in UTF-8, converted in full:
+     64 \xE9 in codepage 1252, and the same after 0x81, which codepage 1252
+     leaves undefined. A build without a working iconv converts both with
+     its own tables, which stopped at 1.5 times the source's length. */
+  for (int undefined = 0; undefined < 2; undefined++)
+    {
+      char src[66];
+      size_t len;
+      int all = 1;
+      memset (src, 0xE9, sizeof (src));
+      if (undefined)
+        src[0] = (char)0x81;
+      src[undefined + 64] = '\0';
+      p = bit_TV_to_utf8 (src, CP_ANSI_1252);
+      len = p ? strlen (p) : 0;
+      for (int k = 0; k < 64 && len >= 128; k++)
+        if (memcmp (p + len - 128 + 2 * k, "\xC3\xA9", 2))
+          all = 0;
+      if (p && len >= 128 && all)
+        ok ("bit_TV_to_utf8 64 \\xE9%s in full", undefined ? " after 0x81" : "");
+      else
+        fail ("bit_TV_to_utf8 64 \\xE9%s: %u bytes of UTF-8, not ending in "
+              "64 \\xC3\\xA9",
+              undefined ? " after 0x81" : "", (unsigned)len);
+      if (p && p != src)
+        free (p);
+    }
 }
 
 static void

@@ -3579,7 +3579,9 @@ bit_TV_to_utf8_codepage (const char *restrict src, const BITCODE_RS codepage)
 {
   const bool is_asian_cp = dwg_codepage_isasian ((const Dwg_Codepage)codepage);
   const size_t srclen = strlen (src);
-  size_t destlen = is_asian_cp ? srclen * 3 : trunc (srclen * 1.5);
+  /* A byte, or a two-byte character, is at most 3 bytes of UTF-8: the loop
+     below stops at destlen. */
+  size_t destlen = srclen * 3;
   size_t i = 0;
   char *str = (char *)calloc (destlen + 1, 1);
   unsigned char *tmp = (unsigned char *)src;
