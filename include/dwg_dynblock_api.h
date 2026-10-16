@@ -413,8 +413,10 @@ typedef struct _dwg_attvalue
    value whose end point is at its base point, or a parameter that a
    rotate action turns and another action moves or turns too
    (DWG_ERR_NOTYETSUPPORTED), or that would move
-   a parameter's point beyond what a double holds
-   (DWG_ERR_VALUEOUTOFBOUNDS); an attribute definition whose extrusion
+   a parameter's point beyond what a double holds, or leave the points of
+   a parameter given a value that don't hold it, as at coordinates so large
+   that they round (DWG_ERR_VALUEOUTOFBOUNDS); an attribute definition
+   whose extrusion
    isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()
    refuses, such as one with a period (DWG_ERR_NOTYETSUPPORTED); an
    attribute definition whose placed position, alignment point, height or

@@ -3667,6 +3667,77 @@ is_at (const BITCODE_3BD *pt, const double x, const double y, const double z)
          && fabs (pt->z - z) <= RECORD_TOLERANCE;
 }
 
+/* A value whose parameter's points after the evaluation round to points
+   that don't hold it: Window Width's points moved to x 1e16 and 1e16 + 36,
+   where a double holds every second integer, so that a width of 1 puts the
+   end point 0 or 2 from the base point, while 24 is held; and the Toilet's
+   Angle with its base point at (1e16, 1e16) and its end point 2 from it,
+   which a turn of 1 puts on the grid's diagonal. Each is refused before
+   anything is added. */
+static int
+test_round_trip (Dwg_Data *src)
+{
+  const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, WINDOW, &def_h);
+  Dwg_Object *obj
+      = dst ? named_node (dst, def_h, DWG_TYPE_BLOCKLINEARPARAMETER,
+                          "winwidth")
+            : NULL;
+  Dwg_DynValue v;
+  int failures = 0;
+  memset (&v, 0, sizeof (v));
+  if (!obj)
+    {
+      FAIL ("round trip: the Window's Window Width not found");
+      free_document (dst);
+      return 1;
+    }
+  {
+    Dwg_Object_BLOCKLINEARPARAMETER *width
+        = obj->tio.object->tio.BLOCKLINEARPARAMETER;
+    width->value_set.flags = 0;
+    width->def_basept.x = 1e16;
+    width->def_endpt.x = 1e16 + 36.0;
+  }
+  v.name = (char *)"Window Width";
+  v.value = 1.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &pt, 1.0, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a linear value its rounded points don't hold");
+  v.value = 24.0;
+  failures += test_accepted (dst, def_h, 1.0, &v, 1,
+                             "a linear value its points far out hold");
+  free_document (dst);
+
+  dst = document_with (src, TOILET, &def_h);
+  obj = dst ? graph_node (dst, def_h, DWG_TYPE_BLOCKROTATIONPARAMETER, NULL)
+            : NULL;
+  if (!obj)
+    {
+      FAIL ("round trip: the Toilet's Angle not found");
+      free_document (dst);
+      return failures + 1;
+    }
+  {
+    Dwg_Object_BLOCKROTATIONPARAMETER *angle
+        = obj->tio.object->tio.BLOCKROTATIONPARAMETER;
+    angle->def_basept.x = angle->def_basept.y = 1e16;
+    angle->def_endpt = angle->def_basept;
+    angle->def_endpt.x += 2.0;
+    angle->def_base_angle_pt = angle->def_endpt;
+  }
+  v.name = (char *)"Angle";
+  v.value = 1.0;
+  failures += test_refusal (dst, model_space (dst), block_header (dst, def_h),
+                            &pt, 1.0, 0.0, &v, 1, NULL, 0,
+                            REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                            "a rotation value its rounded points don't hold");
+  free_document (dst);
+  return failures;
+}
+
 /* An ATTDEF at x -2^90 that two of the Window's stretch actions move, by
    2^90 and then by 2^32 ('Stretch Divider' made to take 2^-58 of the
    change), at Window Width 2^90 + 36: it ends at 2^32, while the sum of
@@ -3915,6 +3986,7 @@ test_moved_parameters (Dwg_Data *src)
     }
   free_document (dst);
   failures += test_attdef_moved_twice (src);
+  failures += test_round_trip (src);
   return failures;
 }
 

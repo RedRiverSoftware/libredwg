@@ -59,8 +59,12 @@ typedef struct _dynblock_state
    refused, with DWG_ERR_NOTYETSUPPORTED: an evaluation that moves a
    parameter in a way whose stored state AutoCAD's placements have not
    shown, such as a rotation parameter that another action moves, or a
-   parameter an action selects without listing it among those it moves.
-   Returns 0 or DWG_ERR_* bits, with the reason in reason. */
+   parameter an action selects without listing it among those it moves;
+   and with DWG_ERR_VALUEOUTOFBOUNDS, a point the actions would move
+   beyond what a double holds, or a LINEAR or ROTATION value that its
+   parameter's points don't hold after the evaluation, as at coordinates
+   so large that they round. Returns 0 or DWG_ERR_* bits, with the reason
+   in reason. */
 int dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
                               const Dwg_DynValue *values,
                               const BITCODE_BL num_values,

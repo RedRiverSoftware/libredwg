@@ -4246,6 +4246,55 @@ add_attdef_places (const Dynblock_Plan *plan, Dynblock_State *state)
   return 0;
 }
 
+/* Refuses a LINEAR or ROTATION value that its parameter's points after
+   the evaluation don't hold, as when they are so far from the origin that
+   they round: the record would read back as another value. */
+static int
+check_round_trip (const Dynblock_Plan *plan, char *reason,
+                  const size_t reason_size)
+{
+  for (BITCODE_BL i = 0; i < plan->num_linear; i++)
+    {
+      const Dynblock_Linear *l = &plan->linear[i];
+      const Dynblock_Node_State *s = find_state (plan, l->nodeid);
+      double d;
+      if (!l->given || !s || s->num_points != 2)
+        continue;
+      d = distance_3d (&s->points[0], &s->points[1]);
+      if (!(fabs (d - l->value)
+            <= DYNBLOCK_VALUE_EPSILON * fmax (1.0, fabs (l->value))))
+        {
+          set_reason (reason, reason_size,
+                      "linear property '%s': its points after the "
+                      "evaluation are %.17g apart, which would read back "
+                      "instead of %g",
+                      l->name, d, l->value);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+    }
+  for (BITCODE_BL i = 0; i < plan->num_rotations; i++)
+    {
+      const Dynblock_Rotation *r = &plan->rotations[i];
+      const Dynblock_Node_State *s = find_state (plan, r->nodeid);
+      double a;
+      if (!r->given || !s || s->num_points != 2)
+        continue;
+      a = rotation_angle (&s->points[0], &s->points[1],
+                          &r->obj->tio.object->tio.BLOCKROTATIONPARAMETER
+                               ->def_base_angle_pt);
+      if (!(angle_difference (a, r->value) <= DYNBLOCK_VALUE_EPSILON))
+        {
+          set_reason (reason, reason_size,
+                      "rotation property '%s': its points after the "
+                      "evaluation make an angle of %.17g, which would read "
+                      "back instead of %g",
+                      r->name, a, r->value);
+          return DYNBLOCK_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+    }
+  return 0;
+}
+
 int
 dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
                           const Dwg_DynValue *values,
@@ -4284,6 +4333,8 @@ dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
       if (s->num_points)
         state->nodes[state->num_nodes++] = *s;
     }
+  if (!error)
+    error = check_round_trip (&ev.plan, reason, reason_size);
   free_evaluation (&ev);
   if (error)
     dynblock_free_state (state);

@@ -3929,10 +3929,12 @@ test_rotate_other_rotation (Dwg_Data *src)
   nodeid = _angle->evalexpr.nodeid;
   free (_angle->angle_name);
   _angle->angle_name = strdup ("Angle B");
-  _angle->evalexpr.nodeid = 905;
-  nodes = (Dwg_EVAL_Node *)realloc (
-      graph->nodes, (graph->num_nodes + 1) * sizeof (Dwg_EVAL_Node));
-  if (!_angle->angle_name || !nodes)
+  nodes = _angle->angle_name
+              ? (Dwg_EVAL_Node *)realloc (graph->nodes,
+                                          (graph->num_nodes + 1)
+                                              * sizeof (Dwg_EVAL_Node))
+              : NULL;
+  if (!nodes)
     {
       fail ("rotate other rotation: out of memory");
       free_dwg (dst);
@@ -3940,6 +3942,7 @@ test_rotate_other_rotation (Dwg_Data *src)
       return 1;
     }
   graph->nodes = nodes;
+  _angle->evalexpr.nodeid = 905;
   num_nodes = graph->num_nodes;
   memset (&nodes[num_nodes], 0, sizeof (Dwg_EVAL_Node));
   nodes[num_nodes].evalexpr = dwg_add_handleref (dst, 5, angle_h, NULL);
