@@ -16,13 +16,19 @@
    - a rotated TEXT with a width factor is anchored at its insertion point,
      at the top level and in a block;
    - one write longer than dwg_svg_printf's 8 KB stack buffer (a long TEXT
-     value) reaches the SVG whole. */
+     value) reaches the SVG whole;
+   - MTEXT comes out as UTF-8 whichever way the document holds its text: in
+     the codepage (read from a pre-r2007 DWG or DXF), in UTF-16 (read from
+     an r2007+ DWG) or in UTF-8 (built with the add API, or read from an
+     r2007+ DXF), at the top level and in a block, and word wrap counts
+     characters, not bytes. */
 
 #define SVG_API_TEST_C
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 // the library sets loglevel from the document's opts; ok needs ours
 static unsigned int test_loglevel;
@@ -32,6 +38,7 @@ static unsigned int test_loglevel;
 #include "tests_common.h"
 #include "dwg_api.h"
 #include "dwg_svg_api.h"
+#include "codepages.h"
 
 /* The SVG transform matrix(a b c d e f): x' = a x + c y + e,
    y' = b x + d y + f. */
@@ -411,6 +418,523 @@ done:
   loglevel = test_loglevel;
 }
 
+/* Finds test/test-data/name from the build or source directory. */
+static int
+test_file (const char *name, char *path, const size_t size)
+{
+  struct stat st;
+  const char *top_srcdir = getenv ("top_srcdir");
+  const char *const prefixes[]
+      = { "../test-data", "../../test/test-data", "../../../test/test-data",
+          "../../../../test/test-data", NULL };
+  if (top_srcdir)
+    {
+      snprintf (path, size, "%s/test/test-data/%s", top_srcdir, name);
+      if (!stat (path, &st))
+        return 1;
+    }
+  for (const char *const *p = prefixes; *p; p++)
+    {
+      snprintf (path, size, "%s/%s", *p, name);
+      if (!stat (path, &st))
+        return 1;
+    }
+  return 0;
+}
+
+/* Reads test/test-data/name into dwg as dwg2SVG reads a drawing. Returns 0,
+   after a failed check, when it can't; dwg is for the caller to free either
+   way. */
+static int
+read_test_dwg (const char *name, Dwg_Data *dwg)
+{
+  char path[1024];
+  int error;
+  memset (dwg, 0, sizeof (Dwg_Data));
+  if (!test_file (name, path, sizeof (path)))
+    {
+      fail ("test-data/%s not found", name);
+      return 0;
+    }
+  error = dwg_read_file (path, dwg);
+  loglevel = test_loglevel;
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dwg_read_file %s: error 0x%x", name, error);
+      return 0;
+    }
+  return 1;
+}
+
+static void
+free_test_dwg (Dwg_Data *dwg)
+{
+  dwg_free (dwg);
+  loglevel = test_loglevel;
+}
+
+/* 1 when s is well-formed UTF-8. */
+static int
+utf8_valid (const char *s)
+{
+  const unsigned char *p = (const unsigned char *)s;
+  while (*p)
+    {
+      int n;
+      if (*p < 0x80)
+        n = 0;
+      else if (*p >= 0xC2 && *p <= 0xDF)
+        n = 1;
+      else if ((*p & 0xF0) == 0xE0)
+        n = 2;
+      else if (*p >= 0xF0 && *p <= 0xF4)
+        n = 3;
+      else
+        return 0;
+      p++;
+      while (n--)
+        {
+          if ((*p & 0xC0) != 0x80)
+            return 0;
+          p++;
+        }
+    }
+  return 1;
+}
+
+/* The characters of the <text> element dwg2SVG wrote for the object with
+   index objid, its tags left out, into out, and the number of <tspan>
+   elements in it into *tspans. Returns 0 when there is none. */
+static int
+text_content (const char *svg, unsigned objid, char *out, size_t size,
+              int *tspans)
+{
+  char id[64];
+  const char *p, *end;
+  size_t n = 0;
+
+  snprintf (id, sizeof (id), "<text id=\"dwg-object-%u\" ", objid);
+  p = strstr (svg, id);
+  if (!p)
+    return 0;
+  p = strchr (p, '>');
+  end = p ? strstr (p, "</text>") : NULL;
+  if (!end)
+    return 0;
+  *tspans = 0;
+  for (p++; p < end; p++)
+    {
+      if (*p == '<')
+        {
+          if (!strncmp (p, "<tspan", 6))
+            (*tspans)++;
+          p = strchr (p, '>');
+          if (!p || p > end)
+            return 0;
+          continue;
+        }
+      if (n + 1 >= size)
+        return 0;
+      out[n++] = *p;
+    }
+  out[n] = '\0';
+  return 1;
+}
+
+/* Whether the TEXT or MTEXT string t starts with the ASCII prefix, read as
+   UTF-16 when the document holds text that way. */
+static int
+text_starts_with (const Dwg_Data *dwg, const char *t, const char *prefix)
+{
+  if (!t)
+    return 0;
+  if (dwg->header.from_version >= R_2007 && !(dwg->opts & DWG_OPTS_IN))
+    {
+      const uint16_t *tu = (const uint16_t *)t;
+      size_t i;
+      for (i = 0; prefix[i]; i++)
+        if (tu[i] != (unsigned char)prefix[i])
+          return 0;
+      return 1;
+    }
+  return !strncmp (t, prefix, strlen (prefix));
+}
+
+/* The MTEXT of example_2004.dwg and example_2007.dwg, in model space. */
+static Dwg_Entity_MTEXT *
+example_mtext (Dwg_Data *dwg)
+{
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_MTEXT
+          && text_starts_with (dwg, obj->tio.entity->tio.MTEXT->text,
+                               "Teksto granda"))
+        return obj->tio.entity->tio.MTEXT;
+    }
+  fail ("no MTEXT \"Teksto granda ...\"");
+  return NULL;
+}
+
+/* The block of example_2004.dwg and example_2007.dwg that model space
+   inserts with attributes. */
+static Dwg_Object_BLOCK_HEADER *
+example_block (Dwg_Data *dwg)
+{
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg->object[i];
+      if (obj->fixedtype == DWG_TYPE_INSERT
+          && obj->tio.entity->tio.INSERT->has_attribs)
+        {
+          Dwg_Object *blk = dwg_ref_object (
+              dwg, obj->tio.entity->tio.INSERT->block_header);
+          if (blk && blk->fixedtype == DWG_TYPE_BLOCK_HEADER)
+            return blk->tio.object->tio.BLOCK_HEADER;
+        }
+    }
+  fail ("no INSERT with attributes");
+  return NULL;
+}
+
+/* Renders model space and checks the MTEXT's <text> holds expected: whole,
+   as UTF-8, in a well-formed UTF-8 SVG. Sets *tspans if not NULL. */
+static void
+check_mtext (Dwg_Data *dwg, const Dwg_Entity_MTEXT *mtext,
+             const char *expected, const char *what, int *tspans)
+{
+  char content[512];
+  int n = 0;
+  size_t len;
+  char *svg = render_mspace (dwg, &len);
+  if (!svg)
+    return;
+  if (!utf8_valid (svg))
+    fail ("%s: the SVG is not well-formed UTF-8", what);
+  else if (!text_content (svg, mtext->parent->objid, content,
+                          sizeof (content), &n))
+    fail ("%s: no <text> for the MTEXT", what);
+  else if (strcmp (content, expected))
+    fail ("%s: \"%s\", not \"%s\"", what, content, expected);
+  else
+    ok ("%s: \"%s\"", what, content);
+  if (tspans)
+    *tspans = n;
+  dwg_free_svg (svg);
+}
+
+/* Replaces the MTEXT's text with a copy of the n bytes at text, a string
+   as the document holds it. */
+static int
+set_mtext (Dwg_Entity_MTEXT *mtext, const void *text, size_t n)
+{
+  char *copy = (char *)malloc (n);
+  if (!copy)
+    {
+      fail ("out of memory");
+      return 0;
+    }
+  memcpy (copy, text, n);
+  free (mtext->text);
+  mtext->text = copy;
+  return 1;
+}
+
+/* example_2004.dwg holds text as AutoCAD wrote it, in its codepage. */
+static void
+test_mtext_codepage (void)
+{
+  static const struct
+  {
+    BITCODE_RS codepage;
+    const char *text;
+    const char *expected;
+    const char *what;
+  } cases[] = {
+    { CP_ANSI_1252, "caf\xE9 30\xB0 10 mm\xB2 \x80 5",
+      "caf\xC3\xA9 30\xC2\xB0 10 mm\xC2\xB2 \xE2\x82\xAC 5",
+      "r2004 ANSI_1252" },
+    { CP_ANSI_1252, "\\U+03B4 %%d %%c caf\xE9",
+      "\xCE\xB4 \xC2\xB0 \xE2\x8C\x80 caf\xC3\xA9",
+      "r2004 ANSI_1252 with \\U+, %%d and %%c" },
+    { CP_ANSI_1252, "a\x81z", "a\xEF\xBF\xBDz",
+      "r2004 ANSI_1252 byte it doesn't define" },
+    { CP_ANSI_1251, "\xCF\xF0\xE8\xE2\xE5\xF2",
+      "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82", "r2004 ANSI_1251" },
+    { CP_ANSI_936, "\xB7\xBF\xBC\xE4 2", "\xE6\x88\xBF\xE9\x97\xB4 2",
+      "r2004 ANSI_936 two-byte characters" },
+    { CP_ANSI_936, "A\xB7", "A\xEF\xBF\xBD",
+      "r2004 ANSI_936 lead byte at the end" },
+    { CP_ANSI_932, "\x95\x5C" "P1", "\xE8\xA1\xA8P1",
+      "r2004 ANSI_932 second byte a backslash, not \\P" },
+    { CP_ISO_8859_1, "caf\xE9", "caf\xC3\xA9", "r2004 ISO_8859_1" },
+    { CP_US_ASCII, "caf\xE9", "caf\xEF\xBF\xBD", "r2004 US_ASCII" },
+  };
+  Dwg_Data dwg;
+  Dwg_Entity_MTEXT *mtext, *added;
+  Dwg_Object_BLOCK_HEADER *blk;
+  const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
+  BITCODE_RS codepage;
+
+  if (!read_test_dwg ("example_2004.dwg", &dwg))
+    goto done;
+  if (dwg.header.codepage != CP_ANSI_1252)
+    {
+      fail ("example_2004.dwg: codepage %u, not ANSI_1252",
+            (unsigned)dwg.header.codepage);
+      goto done;
+    }
+  mtext = example_mtext (&dwg);
+  if (!mtext)
+    goto done;
+  check_mtext (&dwg, mtext,
+               "Teksto granda nur portesti.Alia linio.Alia pli.",
+               "r2004 example", NULL);
+
+  mtext->rect_width = 0.0; // one line
+  codepage = dwg.header.codepage;
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      dwg.header.codepage = cases[i].codepage;
+      if (set_mtext (mtext, cases[i].text, strlen (cases[i].text) + 1))
+        check_mtext (&dwg, mtext, cases[i].expected, cases[i].what, NULL);
+    }
+  dwg.header.codepage = codepage;
+
+  // the add API converts UTF-8 to the codepage for a document read from a
+  // file
+  blk = example_block (&dwg);
+  if (!blk)
+    goto done;
+  added = dwg_add_MTEXT (blk, &pt, 0.0, "Stra\xC3\x9F" "e caf\xC3\xA9");
+  loglevel = test_loglevel;
+  if (!added)
+    fail ("dwg_add_MTEXT in the block failed");
+  else if (strcmp (added->text, "Stra\xDF" "e caf\xE9"))
+    fail ("dwg_add_MTEXT in the block: not held in ANSI_1252");
+  else
+    check_mtext (&dwg, added, "Stra\xC3\x9F" "e caf\xC3\xA9",
+                 "r2004 MTEXT added to a block", NULL);
+done:
+  free_test_dwg (&dwg);
+}
+
+/* example_2007.dwg holds text in UTF-16. */
+static void
+test_mtext_utf16 (void)
+{
+  // "caf", e-acute, " 30", degree, " ", delta, " ", euro; then the MTEXT
+  // escapes for delta and degree
+  static const uint16_t cafe[] = { 'c', 'a', 'f',   0xE9, ' ', '3',    '0',
+                                   0xB0, ' ', 0x3B4, ' ',  0x20AC, 0 };
+  static const uint16_t escapes[]
+      = { '\\', 'U', '+', '0', '3', 'B', '4', ' ', '%', '%', 'd', 0 };
+  Dwg_Data dwg;
+  Dwg_Entity_MTEXT *mtext, *added;
+  Dwg_Object_BLOCK_HEADER *blk;
+  const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
+
+  if (!read_test_dwg ("example_2007.dwg", &dwg))
+    goto done;
+  mtext = example_mtext (&dwg);
+  if (!mtext)
+    goto done;
+  // every character, not the first only
+  check_mtext (&dwg, mtext,
+               "Teksto granda nur portesti.Alia linio.Alia pli.",
+               "r2007 example", NULL);
+
+  mtext->rect_width = 0.0; // one line
+  if (set_mtext (mtext, cafe, sizeof (cafe)))
+    check_mtext (&dwg, mtext,
+                 "caf\xC3\xA9 30\xC2\xB0 \xCE\xB4 \xE2\x82\xAC", "r2007",
+                 NULL);
+  if (set_mtext (mtext, escapes, sizeof (escapes)))
+    check_mtext (&dwg, mtext, "\xCE\xB4 \xC2\xB0",
+                 "r2007 with \\U+ and %%d", NULL);
+
+  // the add API converts UTF-8 to UTF-16 for a document read from a file
+  blk = example_block (&dwg);
+  if (!blk)
+    goto done;
+  added = dwg_add_MTEXT (blk, &pt, 0.0, "Stra\xC3\x9F" "e caf\xC3\xA9");
+  loglevel = test_loglevel;
+  if (!added)
+    fail ("dwg_add_MTEXT in the block failed");
+  else
+    check_mtext (&dwg, added, "Stra\xC3\x9F" "e caf\xC3\xA9",
+                 "r2007 MTEXT added to a block", NULL);
+done:
+  free_test_dwg (&dwg);
+}
+
+/* gh109_1.dwg, an r2013 drawing with Chinese MTEXT. */
+static void
+test_mtext_utf16_cjk (void)
+{
+  Dwg_Data dwg;
+  char *svg;
+  size_t len;
+
+  if (!read_test_dwg ("2013/gh109_1.dwg", &dwg))
+    goto done;
+  svg = render_mspace (&dwg, &len);
+  if (svg)
+    {
+      if (!utf8_valid (svg))
+        fail ("gh109_1: the SVG is not well-formed UTF-8");
+      // U+623F U+95F4
+      else if (!strstr (svg, ">\xE6\x88\xBF\xE9\x97\xB4</tspan>"))
+        fail ("gh109_1: no MTEXT \"\xE6\x88\xBF\xE9\x97\xB4\"");
+      else
+        ok ("gh109_1: MTEXT \"\xE6\x88\xBF\xE9\x97\xB4\"");
+      dwg_free_svg (svg);
+    }
+done:
+  free_test_dwg (&dwg);
+}
+
+/* A document built with the add API (DWG_OPTS_INJSON) holds text in UTF-8,
+   as the writer reads it, and the renderer takes it as it is. */
+static void
+test_mtext_utf8 (void)
+{
+  static const char text[]
+      = "caf\xC3\xA9 30\xC2\xB0 10 mm\xC2\xB2 \xE2\x82\xAC 5";
+  Dwg_Data *dwg;
+  Dwg_Object_BLOCK_HEADER *ms = new_document (&dwg);
+  Dwg_Entity_MTEXT *mtext;
+  const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
+
+  if (!ms)
+    goto done;
+  mtext = dwg_add_MTEXT (ms, &pt, 0.0, text);
+  loglevel = test_loglevel;
+  if (!mtext)
+    fail ("dwg_add_MTEXT failed");
+  else if (strcmp (mtext->text, text))
+    fail ("dwg_add_MTEXT: the text is not held in UTF-8");
+  else
+    check_mtext (dwg, mtext, text, "add API r2000 UTF-8", NULL);
+done:
+  if (dwg)
+    {
+      dwg_free (dwg);
+      free (dwg);
+    }
+  loglevel = test_loglevel;
+}
+
+/* A DXF import holds MTEXT as the file has it: an r2007+ DXF in UTF-8, an
+   older one in its codepage. */
+static void
+test_mtext_dxf (void)
+{
+  static const struct
+  {
+    const char *file, *text, *expected, *what;
+  } cases[] = {
+    { "example_2004.dxf", "caf\xE9 30\xB0", "caf\xC3\xA9 30\xC2\xB0",
+      "r2004 DXF import" },
+    { "example_2007.dxf", "caf\xC3\xA9 30\xC2\xB0", "caf\xC3\xA9 30\xC2\xB0",
+      "r2007 DXF import" },
+  };
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      Dwg_Data dwg;
+      Dwg_Entity_MTEXT *mtext;
+      char path[1024];
+      int error;
+
+      memset (&dwg, 0, sizeof (Dwg_Data));
+      if (!test_file (cases[i].file, path, sizeof (path)))
+        {
+          fail ("test-data/%s not found", cases[i].file);
+          continue;
+        }
+      error = dxf_read_file (path, &dwg);
+      loglevel = test_loglevel;
+      if (error >= DWG_ERR_CRITICAL)
+        fail ("dxf_read_file %s: error 0x%x", cases[i].file, error);
+      else if ((mtext = example_mtext (&dwg)))
+        {
+          mtext->rect_width = 0.0; // one line
+          if (set_mtext (mtext, cases[i].text, strlen (cases[i].text) + 1))
+            check_mtext (&dwg, mtext, cases[i].expected, cases[i].what,
+                         NULL);
+        }
+      free_test_dwg (&dwg);
+    }
+}
+
+/* Word wrap counts characters: an MTEXT of e-acute wraps where one of 'e'
+   does, and a break never splits a character. */
+static void
+test_mtext_wrap (void)
+{
+  static const struct
+  {
+    const char *ascii, *codepage, *utf8, *what;
+  } cases[] = {
+    { "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
+      "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
+      "\xE9\xE9\xE9\xE9\xE9\xE9",
+      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
+      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9",
+      "wrap inside a word" },
+    { "cafe cafe cafe cafe cafe cafe cafe cafe",
+      "caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9",
+      "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9"
+      "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9",
+      "wrap between words" },
+  };
+  Dwg_Data dwg;
+  Dwg_Entity_MTEXT *mtext;
+
+  if (!read_test_dwg ("example_2004.dwg", &dwg))
+    goto done;
+  mtext = example_mtext (&dwg);
+  if (!mtext)
+    goto done;
+  // about six characters a line
+  mtext->rect_width = 5.0 * mtext->text_height;
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      int ascii_lines = 0, lines = 0;
+      char what[64];
+      snprintf (what, sizeof (what), "%s, ASCII", cases[i].what);
+      if (!set_mtext (mtext, cases[i].ascii, strlen (cases[i].ascii) + 1))
+        continue;
+      // the expected text: the ASCII one less the spaces at the breaks
+      {
+        char expected[64];
+        size_t n = 0;
+        for (const char *p = cases[i].ascii; *p; p++)
+          if (*p != ' ')
+            expected[n++] = *p;
+        expected[n] = '\0';
+        check_mtext (&dwg, mtext, expected, what, &ascii_lines);
+      }
+      if (ascii_lines < 2)
+        fail ("%s: %d lines, the test needs it wrapped", what, ascii_lines);
+      snprintf (what, sizeof (what), "%s, ANSI_1252", cases[i].what);
+      if (!set_mtext (mtext, cases[i].codepage,
+                      strlen (cases[i].codepage) + 1))
+        continue;
+      check_mtext (&dwg, mtext, cases[i].utf8, what, &lines);
+      if (lines == ascii_lines)
+        ok ("%s: %d lines, as ASCII", what, lines);
+      else
+        fail ("%s: %d lines, ASCII has %d", what, lines, ascii_lines);
+    }
+done:
+  free_test_dwg (&dwg);
+}
+
 int
 main (void)
 {
@@ -418,5 +942,11 @@ main (void)
 
   test_rotated_text_anchor ();
   test_long_write ();
+  test_mtext_codepage ();
+  test_mtext_utf16 ();
+  test_mtext_utf16_cjk ();
+  test_mtext_utf8 ();
+  test_mtext_dxf ();
+  test_mtext_wrap ();
   return numfailed ();
 }
