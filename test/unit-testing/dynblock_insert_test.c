@@ -60,6 +60,7 @@ static int test_loglevel;
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
 #define WRITTEN_R11 "dynblock_insert_test_r11.dwg"
+#define WRITTEN_WIDTHS "dynblock_insert_test_widths.dwg"
 
 /* The fixture's definitions */
 #define ALTEZZA 0x9931
@@ -1637,6 +1638,254 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
   return 1;
 }
 
+/* An attribute definition for test_attribute_widths and the value placed
+   for it. The offsets are where text starts, its insertion point, from its
+   alignment point, along and across its baseline, in text heights: where
+   AutoCAD 2027 starts TEXT in Arial at a height of 2.5, unless said
+   otherwise. A width is as a caller measures it: the sum of the value's
+   Arial advance widths over Arial's cap height, 1467 units. */
+typedef struct
+{
+  const char *tag;
+  BITCODE_BS horiz, vert, generation;
+  double rotation, width_factor;
+  const char *dflt;            // the definition's default value
+  double dflt_along, dflt_across; // where the definition's text starts
+  const char *value;           // NULL for none given
+  double width;
+  double along, across; // where the ATTRIB starts
+  int measured; // the offsets are AutoCAD's, which measures text itself
+} Width_Case;
+
+static const Width_Case width_cases[] = {
+  // centred on the middle, a longer value
+  { "CENTRED", 1, 2, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJKLMNOPQRST-0001", 32548.0 / 1467.0, -11.0999317872, -0.5, 1 },
+  // right on the top, turned, at a width factor of 0.8, a shorter value
+  { "RIGHT", 2, 3, 0, 0.3, 0.8, "ABCDEFGHIJ", -7.0788540246, -1.0, "AB",
+    2732.0 / 1467.0, -1.4908594816, -1.0, 1 },
+  // middle, a longer value of capitals
+  { "MIDDLE", 4, 0, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABCDEFGHIJ",
+    12972.0 / 1467.0, -4.4232605730, -0.5, 1 },
+  // middle, a value with descenders: AutoCAD's across is -0.3530013642,
+  // the middle of its characters; the definition's is kept
+  { "LOW", 4, 0, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABgy",
+    4895.0 / 1467.0, -1.6684856753, -0.5, 1 },
+  // centred and backward
+  { "BACKWARD", 1, 0, 2, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
+    4895.0 / 1467.0, 1.6684856753, 0.0, 1 },
+  // no width: the definition's start, though the value is longer
+  { "NOWIDTH", 1, 2, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABCDEFGHIJ",
+    0.0, -0.9307639836, -0.5, 0 },
+  // no value: the definition's default and start
+  { "DEFAULT", 2, 0, 0, 0.0, 1.0, "AB", -1.8635743516, 0.0, NULL, 0.0,
+    -1.8635743516, 0.0, 0 },
+  // left on the middle, and aligned, start where the definition's do
+  { "LEFTMID", 0, 2, 0, 0.0, 1.0, "AB", 0.0, -0.5, "ABCDEFGHIJ",
+    12972.0 / 1467.0, 0.0, -0.5, 0 },
+  // (the definition's aligned text spanning its advance width)
+  { "ALIGNED", 3, 0, 0, 0.0, 1.0, "AB", -1.8623040218, 0.0, "ABCDEFGHIJ",
+    12972.0 / 1467.0, -1.8623040218, 0.0, 0 },
+};
+#define NUM_WIDTH_CASES (sizeof (width_cases) / sizeof (width_cases[0]))
+
+/* The ATTRIBs of placement insert, at ins_pt, scale and rotation in a block
+   with base point 0 holding width_cases' definitions at height 2.5: each
+   aligned at its definition's alignment point placed, with its value, and
+   starting where the case says. AutoCAD's offsets are allowed 0.1 percent
+   of the value's width, by which AutoCAD's measuring and the advance
+   widths differ. */
+static int
+check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
+              const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
+              const double scale, const double rotation)
+{
+  const Dwg_Entity_INSERT *_ins = object (dwg, insert)->tio.entity->tio.INSERT;
+  const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
+  const double c = cos (rotation), s = sin (rotation);
+  const double height = 2.5 * scale;
+  int failures = 0;
+  if (_ins->num_owned != NUM_WIDTH_CASES)
+    {
+      FAIL ("%s: %u ATTRIBs, expected %u", what, (unsigned)_ins->num_owned,
+            (unsigned)NUM_WIDTH_CASES);
+      return 1;
+    }
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      const Dwg_Entity_ATTDEF *d = NULL;
+      const Dwg_Entity_ATTRIB *a = NULL;
+      const double r = wc->rotation + rotation;
+      double ax, ay, x, y, tolerance;
+      for (BITCODE_BL i = 0; !d && i < blk->num_owned; i++)
+        {
+          const Dwg_Object *ent = object (dwg, ref (blk->entities[i]));
+          if (ent && ent->fixedtype == DWG_TYPE_ATTDEF
+              && !strcmp (ent->tio.entity->tio.ATTDEF->tag, wc->tag))
+            d = ent->tio.entity->tio.ATTDEF;
+        }
+      for (BITCODE_BL i = 0; !a && i < _ins->num_owned; i++)
+        {
+          const Dwg_Object *att = object (dwg, ref (_ins->attribs[i]));
+          if (att && att->fixedtype == DWG_TYPE_ATTRIB
+              && !strcmp (att->tio.entity->tio.ATTRIB->tag, wc->tag))
+            a = att->tio.entity->tio.ATTRIB;
+        }
+      if (!d || !a)
+        {
+          FAIL ("%s: %s has no %s", what, wc->tag,
+                d ? "ATTRIB" : "attribute definition");
+          failures++;
+          continue;
+        }
+      ax = ins_pt->x
+           + scale * (d->alignment_pt.x * c - d->alignment_pt.y * s);
+      ay = ins_pt->y
+           + scale * (d->alignment_pt.x * s + d->alignment_pt.y * c);
+      x = ax + height * (wc->along * cos (r) - wc->across * sin (r));
+      y = ay + height * (wc->along * sin (r) + wc->across * cos (r));
+      tolerance = 1e-9;
+      if (wc->measured)
+        tolerance += 1e-3 * wc->width * wc->width_factor * height;
+      if (strcmp (a->text_value, wc->value ? wc->value : wc->dflt)
+          || fabs (a->alignment_pt.x - ax) > 1e-9
+          || fabs (a->alignment_pt.y - ay) > 1e-9
+          || fabs (a->ins_pt.x - x) > tolerance
+          || fabs (a->ins_pt.y - y) > tolerance
+          || fabs (a->height - height) > 1e-9 || a->generation != wc->generation
+          || a->horiz_alignment != wc->horiz || a->vert_alignment != wc->vert)
+        {
+          FAIL ("%s: %s '%s' starts at (%.6f, %.6f), aligned at (%g, %g), "
+                "h %g, expected '%s' at (%.6f, %.6f) within %g, aligned at "
+                "(%g, %g), h %g",
+                what, wc->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
+                a->alignment_pt.x, a->alignment_pt.y, a->height,
+                wc->value ? wc->value : wc->dflt, x, y, tolerance, ax, ay,
+                height);
+          failures++;
+        }
+    }
+  if (!failures)
+    OK ("%s: %u ATTRIBs start where AutoCAD starts them for their widths, "
+        "or where their definitions do",
+        what, (unsigned)NUM_WIDTH_CASES);
+  return failures;
+}
+
+/* Attribute values given with their widths start where AutoCAD starts
+   them: centred, right-aligned, middle and backward text, long and short
+   values, a turned definition and one with a width factor; without a
+   width, without a value, left on the middle or aligned, where the
+   definition's text starts; on a copy of Trees, placed at its values,
+   unscaled, and at Shrub (Plan), scaled and turned, and read back. */
+static int
+test_attribute_widths (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def;
+  Dwg_AttValue given[NUM_WIDTH_CASES];
+  BITCODE_BL num_given = 0;
+  const BITCODE_3BD at1 = { 10.0, 20.0, 0.0 }, at2 = { -30.0, 15.0, 0.0 };
+  Dwg_DynValue v;
+  Dwg_Entity_INSERT *ins1, *ins2;
+  BITCODE_RLL h1, h2, block2;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("attribute widths: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  memset (given, 0, sizeof (given));
+  for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
+    {
+      const Width_Case *wc = &width_cases[k];
+      // each aligned at a point of its own, in a column
+      const double ax = 5.0, ay = -10.0 * k;
+      const double c = cos (wc->rotation), s = sin (wc->rotation);
+      const dwg_point_3d ins
+          = { ax + 2.5 * (wc->dflt_along * c - wc->dflt_across * s),
+              ay + 2.5 * (wc->dflt_along * s + wc->dflt_across * c), 0.0 };
+      Dwg_Entity_ATTDEF *attdef = dwg_add_ATTDEF (def, 2.5, 0, "Prompt", &ins,
+                                                  wc->tag, wc->dflt);
+      if (!attdef)
+        {
+          FAIL ("attribute widths: adding %s failed", wc->tag);
+          free_dwg (dst);
+          free (dst);
+          return 1;
+        }
+      attdef->horiz_alignment = wc->horiz;
+      attdef->vert_alignment = wc->vert;
+      attdef->generation = wc->generation;
+      attdef->rotation = wc->rotation;
+      attdef->width_factor = wc->width_factor;
+      attdef->alignment_pt.x = ax;
+      attdef->alignment_pt.y = ay;
+      if (wc->value)
+        {
+          given[num_given].tag = (char *)wc->tag;
+          given[num_given].value = (char *)wc->value;
+          given[num_given].width = wc->width;
+          num_given++;
+        }
+    }
+
+  loglevel = tracelevel;
+  ins1 = dwg_dynblock_insert (model_space (dst), def, &at1, 1.0, 0.0, NULL, 0,
+                              given, num_given, &error);
+  memset (&v, 0, sizeof (v));
+  v.name = (char *)"Type (view)";
+  v.state = (char *)"Shrub (Plan)";
+  if (ins1 && !error)
+    ins2 = dwg_dynblock_insert (model_space (dst), def, &at2, 2.0, 0.5, &v, 1,
+                                given, num_given, &error);
+  else
+    ins2 = NULL;
+  loglevel = test_loglevel;
+  if (!ins1 || !ins2 || error)
+    {
+      FAIL ("attribute widths: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  h1 = handle_of (dst, ins1);
+  h2 = handle_of (dst, ins2);
+  block2 = ref (object (dst, h2)->tio.entity->tio.INSERT->block_header);
+  failures += check_widths ("attribute widths at the definition's values",
+                            dst, h1, def_h, &at1, 1.0, 0.0);
+  failures += check_widths ("attribute widths at Shrub (Plan)", dst, h2,
+                            block2, &at2, 2.0, 0.5);
+
+  error = write_dwg (WRITTEN_WIDTHS, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_WIDTHS, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("attribute widths: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      failures += check_widths ("read back attribute widths at the "
+                                "definition's values",
+                                &readback, h1, def_h, &at1, 1.0, 0.0);
+      failures += check_widths ("read back attribute widths at Shrub (Plan)",
+                                &readback, h2, block2, &at2, 2.0, 0.5);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_WIDTHS);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
 /* Attributes, on a copy of Trees given attribute definitions: a plain one,
    left-aligned with no alignment point stored (dataflags 0x02), as AutoCAD
    stores one; a constant one, which gets no ATTRIB; one centred, rotated,
@@ -1657,7 +1906,7 @@ test_attributes (Dwg_Data *src)
   Dwg_Entity_ATTDEF *number, *constant, *centred, *label, *mark;
   Dwg_Object_LAYER *layer;
   const BITCODE_3BD at1 = { 50.0, 60.0, 0.0 }, at2 = { -20.0, 10.0, 5.0 };
-  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7" } };
+  const Dwg_AttValue given[] = { { (char *)"NUMBER", (char *)"EL-7", 0.0 } };
   const Expected_Attrib expected1[] = { { "NUMBER", "EL-7" },
                                         { "RATING", "10W" },
                                         { "LABEL", "L1" },
@@ -2404,16 +2653,18 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
 /* Places def in dwg's model space with the given values, which must
    succeed. */
 static int
-test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
-               const Dwg_DynValue *values, const BITCODE_BL n,
-               const char *what)
+test_accepted_with (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
+                    const Dwg_DynValue *values, const BITCODE_BL n,
+                    const Dwg_AttValue *atts, const BITCODE_BL natts,
+                    const char *what)
 {
   const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
   int error = 0;
   Dwg_Entity_INSERT *insert;
   loglevel = tracelevel;
   insert = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def),
-                                &pt, scale, 0.0, values, n, NULL, 0, &error);
+                                &pt, scale, 0.0, values, n, atts, natts,
+                                &error);
   loglevel = test_loglevel;
   if (insert && !error)
     {
@@ -2422,6 +2673,22 @@ test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
     }
   FAIL ("insert %s: 0x%x", what, error);
   return 1;
+}
+
+static int
+test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
+               const Dwg_DynValue *values, const BITCODE_BL n,
+               const char *what)
+{
+  return test_accepted_with (dwg, def, scale, values, n, NULL, 0, what);
+}
+
+static int
+test_accepted_atts (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
+                    const Dwg_AttValue *atts, const BITCODE_BL natts,
+                    const char *what)
+{
+  return test_accepted_with (dwg, def, scale, NULL, 0, atts, natts, what);
 }
 
 static void
@@ -2596,6 +2863,35 @@ test_definition_refusals (Dwg_Data *src)
                                   NULL, 0, a, 1,
                                   REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                   "an attribute without a value");
+        a[0].value = (char *)"1";
+        a[0].width = -1.0;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a negative width");
+        a[0].width = (double)NAN;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "a width that isn't a number");
+        a[0].width = (double)INFINITY;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 1.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an infinite width");
+        // centred, a width that starts the text beyond a double
+        attdef->horiz_alignment = 1;
+        a[0].width = 1e308;
+        failures += test_refusal (dst, model_space (dst), def, &pt, 10.0, 0.0,
+                                  NULL, 0, a, 1,
+                                  REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+                                  "an attribute started beyond a double by "
+                                  "its width");
+        attdef->horiz_alignment = 0;
+        failures += test_accepted_atts (dst, def_h, 10.0, a, 1,
+                                        "the same width, left-aligned, "
+                                        "which it doesn't move");
+        a[0].width = 0.0;
 
         // at a scale of 1e300, a point 1e10 from the base point
         attdef->ins_pt.x = at.x + 1e10;
@@ -2843,6 +3139,7 @@ main (int argc, char *argv[])
   failures += test_is_xref_ref (&src);
   failures += test_add_insert_block ();
   failures += test_add_insert_block_r11 ();
+  failures += test_attribute_widths (&src);
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);
