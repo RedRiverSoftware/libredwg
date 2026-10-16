@@ -530,11 +530,20 @@ dnl --disable-bindings
 AC_MSG_CHECKING([for --disable-bindings])
 AC_ARG_ENABLE([bindings],AS_HELP_STRING([--disable-bindings],[
     Disable SWIG bindings (default: no).]),[],[enable_bindings=yes])
+dnl The bindings wrap functions which --disable-write leaves out of the
+dnl library, such as dwg_write_file, so they would fail to load.
+AS_IF([test x$enable_write = xno && test x$enable_bindings != xno],
+  [enable_bindings=no
+   bindings_off="they wrap functions which --disable-write leaves out"
+   AC_MSG_RESULT([yes (implied by --disable-write)])
+   AC_MSG_WARN([bindings disabled: $bindings_off])],
+  [AS_IF([test x$enable_bindings = xno],
+     [bindings_off="--disable-bindings"
+      AC_MSG_RESULT([yes])],
+     [AC_MSG_RESULT([no (default)])])])
 AM_CONDITIONAL([DISABLE_BINDINGS], [test x$enable_bindings = xno])
 AS_IF([test x$enable_bindings = xno],
-  AC_DEFINE([DISABLE_BINDINGS],1,[Define to disable bindings.])
-  AC_MSG_RESULT([yes]),
-  AC_MSG_RESULT([no (default)]))
+  [AC_DEFINE([DISABLE_BINDINGS],1,[Define to disable bindings.])])
 
 dnl --disable-docs
 AC_MSG_CHECKING([for --disable-docs])
@@ -816,7 +825,19 @@ if test -n "$PYTHON_VERSION" && test x$enable_python != xno; then
   esac
 fi
 AC_SUBST([PYTHON_SO_LDFLAGS])
-AM_CONDITIONAL([HAVE_SWIG_PERL], [test -n "$SWIG" && test -n "$PERL_VERSION"])
+dnl A native Windows perl ($^O is MSWin32, as MSYS2's mingw perl) writes
+dnl Makefiles for cmd.exe, which cannot build the perl bindings from here.
+build_perl_bindings=no
+if test -n "$SWIG" && test -n "$PERL_VERSION"; then
+  [perl_osname=`"$PERL" -e'print $^O' 2>/dev/null`]
+  if test "x$perl_osname" = xMSWin32; then
+    perl_bindings_off="$PERL is a native Windows perl, whose Makefiles need cmd.exe"
+    AC_MSG_WARN([perl bindings disabled: $perl_bindings_off])
+  else
+    build_perl_bindings=yes
+  fi
+fi
+AM_CONDITIONAL([HAVE_SWIG_PERL], [test x$build_perl_bindings = xyes])
 AM_CONDITIONAL([HAVE_PERL], [test -n "$PERL"])
 dnl only needed with python bindings
 AM_CONDITIONAL([HAVE_PATCH], [test -n "$PATCH"])
@@ -1111,5 +1132,28 @@ if test "x$ac_cv_func_scandir" = xyes; then
 fi
 
 AC_OUTPUT
+
+dnl Said last, so that the log shows plainly which bindings are not built.
+if test x$enable_bindings = xno; then
+  python_bindings="no ($bindings_off)"
+  perl_bindings="no ($bindings_off)"
+else
+  AM_COND_IF([HAVE_SWIG_PYTHON], [python_bindings=yes],
+    [AS_IF([test x$cross_compiling = xyes],
+       [python_bindings="no (cross-compiling)"],
+       [test -z "$SWIG"], [python_bindings="no (no SWIG)"],
+       [python_bindings="no (no python, or --disable-python)"])])
+  if test "x$python_bindings" != xyes; then
+    perl_bindings="no (they are built only with the python bindings)"
+  elif test x$build_perl_bindings = xyes; then
+    perl_bindings=yes
+  elif test -n "$perl_bindings_off"; then
+    perl_bindings="no ($perl_bindings_off)"
+  else
+    perl_bindings="no (no perl)"
+  fi
+fi
+AC_MSG_NOTICE([python bindings: $python_bindings])
+AC_MSG_NOTICE([perl bindings: $perl_bindings])
 
 dnl configure.ac ends here

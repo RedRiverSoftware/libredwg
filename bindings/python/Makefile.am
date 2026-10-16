@@ -52,13 +52,19 @@ _LibreDWG_la_LIBADD = ../../src/libredwg.la $(PYTHON_LIBS) $(PYTHON_EXTRA_LIBS)
 
 ## not elegant, but works
 ## With macports gcc you need -I/opt/local/lib/gcc6/gcc/x86_64-apple-darwin15/6.4.0/include
+## The patch silences warnings in the output of SWIG 3.0.12. The output
+## of other SWIG versions is left as it is.
 SWIG_PYTHON_PATCH = $(top_srcdir)/build-aux/swig_python.patch
 $(dist_python_PYTHON) : swig_python.c
 if HAVE_PATCH
 swig_python.c : $(SWIG_SOURCES) Makefile.am
 	$(SWIG) -python -I$(top_srcdir)/include -o swig_python.c $(srcdir)/../dwg.i
-	-$(PATCH) -t --dry-run -N -p2 -i $(SWIG_PYTHON_PATCH) && \
-	  $(PATCH) -t -N -p2 -b -i $(SWIG_PYTHON_PATCH)
+	@if $(PATCH) -t --dry-run -N -p2 -i $(SWIG_PYTHON_PATCH) >/dev/null; then \
+	  echo "$(PATCH) -t -N -p2 -b -i $(SWIG_PYTHON_PATCH)"; \
+	  $(PATCH) -t -N -p2 -b -i $(SWIG_PYTHON_PATCH); \
+	else \
+	  echo "swig_python.c not patched: $(SWIG_PYTHON_PATCH) is for the output of SWIG 3.0.12"; \
+	fi
 CLEANFILES = swig_python.c.orig
 else
 swig_python.c : $(SWIG_SOURCES) Makefile.am
