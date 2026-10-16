@@ -765,8 +765,9 @@ att_width (const Dwg_AttValue *atts, const BITCODE_BL num_atts,
    forward for backward text, and across the baseline as far as the
    definition's text starts. That offset doesn't depend on the text,
    except for middle text, which AutoCAD also centres on the height of its
-   characters. Without a width, or for other text, *pt stays where the
-   definition's text starts. */
+   characters. Without a width, for other text, or for text in a vertical
+   style, which runs down instead, *pt stays where the definition's text
+   starts. */
 static void
 start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
                 const double width, BITCODE_3BD *pt, const BITCODE_3BD *align)
@@ -774,14 +775,17 @@ start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
   const BITCODE_BS h = attdef->horiz_alignment;
   const double rotation = attdef->rotation + p->rotation;
   const double c = cos (rotation), s = sin (rotation);
+  const Dwg_Object *style = ref_object (p->dwg, attdef->style);
   double across, along, width_factor;
   if (!(width > 0.0) || (h != 1 && h != 2 && h != 4)
-      || attdef->vert_alignment > 3)
+      || attdef->vert_alignment > 3
+      || (style && style->fixedtype == DWG_TYPE_STYLE
+          && style->tio.object->tio.STYLE->is_vertical))
     return;
   across = (pt->y - align->y) * c - (pt->x - align->x) * s;
   // AutoCAD's width factor is positive; the add API leaves it 0
   width_factor = attdef->width_factor > 0.0 ? attdef->width_factor : 1.0;
-  along = width * attdef->height * p->scale * width_factor;
+  along = width * fabs (attdef->height) * p->scale * width_factor;
   if (h != 2)
     along /= 2.0;
   if (!(attdef->generation & 2))

@@ -1643,68 +1643,88 @@ show_in_first_state (Dwg_Data *dwg, const BITCODE_RLL def,
    alignment point, along and across its baseline, in text heights: where
    AutoCAD 2027 starts TEXT in Arial at a height of 2.5, unless said
    otherwise. A width is as a caller measures it: the sum of the value's
-   Arial advance widths over Arial's cap height, 1467 units. */
+   Arial advance widths over the height of Arial's A, 1466 units. AutoCAD
+   centres text on its first character's outline where that starts left of
+   the text's start, as Arial's A does by 3 units (overhang), which a width
+   doesn't hold: such a centred value starts half the overhang further
+   back than AutoCAD's, or further forward for backward text. */
 typedef struct
 {
   const char *tag;
   BITCODE_BS horiz, vert, generation;
-  double rotation, width_factor;
-  const char *dflt;            // the definition's default value
+  double rotation, oblique, width_factor;
+  const char *dflt;               // the definition's default value
   double dflt_along, dflt_across; // where the definition's text starts
-  const char *value;           // NULL for none given
+  const char *value;              // NULL for none given
   double width;
-  double along, across; // where the ATTRIB starts
-  int measured; // the offsets are AutoCAD's, which measures text itself
+  double along, across; // where the ATTRIB starts, but for the overhang
+  double overhang;      // of the value's first character, in font units
+  int vertical;         // in a vertical text style
 } Width_Case;
 
 static const Width_Case width_cases[] = {
   // centred on the middle, a longer value
-  { "CENTRED", 1, 2, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
-    "ABCDEFGHIJKLMNOPQRST-0001", 32548.0 / 1467.0, -11.0999317872, -0.5, 1 },
+  { "CENTRED", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJKLMNOPQRST-0001", 32548.0 / 1466.0, -11.0999317872, -0.5, 3.0,
+    0 },
+  // centred on the baseline, a shorter value without an overhang
+  { "SHORT", 1, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, 0.0, "iii",
+    1365.0 / 1466.0, -0.4655525239, 0.0, 0.0, 0 },
   // right on the top, turned, at a width factor of 0.8, a shorter value
-  { "RIGHT", 2, 3, 0, 0.3, 0.8, "ABCDEFGHIJ", -7.0788540246, -1.0, "AB",
-    2732.0 / 1467.0, -1.4908594816, -1.0, 1 },
+  { "RIGHT", 2, 3, 0, 0.3, 0.0, 0.8, "ABCDEFGHIJ", -7.0788540246, -1.0, "AB",
+    2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
+  // the same, oblique by 15 degrees, as AutoCAD lays it out turned 0.5
+  { "OBLIQUE", 2, 3, 0, 0.5, 0.2617993878, 0.8, "ABCDEFGHIJ", -7.0788540246,
+    -1.0, "AB", 2732.0 / 1466.0, -1.4908594816, -1.0, 0.0, 0 },
   // middle, a longer value of capitals
-  { "MIDDLE", 4, 0, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABCDEFGHIJ",
-    12972.0 / 1467.0, -4.4232605730, -0.5, 1 },
+  { "MIDDLE", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -4.4232605730, -0.5, 3.0, 0 },
   // middle, a value with descenders: AutoCAD's across is -0.3530013642,
   // the middle of its characters; the definition's is kept
-  { "LOW", 4, 0, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABgy",
-    4895.0 / 1467.0, -1.6684856753, -0.5, 1 },
+  { "LOW", 4, 0, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABgy",
+    4895.0 / 1466.0, -1.6684856753, -0.5, 3.0, 0 },
   // centred and backward
-  { "BACKWARD", 1, 0, 2, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
-    4895.0 / 1467.0, 1.6684856753, 0.0, 1 },
+  { "BACKWARD", 1, 0, 2, 0.0, 0.0, 1.0, "AB", 0.9307639836, 0.0, "ABgy",
+    4895.0 / 1466.0, 1.6684856753, 0.0, 3.0, 0 },
   // no width: the definition's start, though the value is longer
-  { "NOWIDTH", 1, 2, 0, 0.0, 1.0, "AB", -0.9307639836, -0.5, "ABCDEFGHIJ",
-    0.0, -0.9307639836, -0.5, 0 },
+  { "NOWIDTH", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 0.0, -0.9307639836, -0.5, 0.0, 0 },
   // no value: the definition's default and start
-  { "DEFAULT", 2, 0, 0, 0.0, 1.0, "AB", -1.8635743516, 0.0, NULL, 0.0,
-    -1.8635743516, 0.0, 0 },
-  // left on the middle, and aligned, start where the definition's do
-  { "LEFTMID", 0, 2, 0, 0.0, 1.0, "AB", 0.0, -0.5, "ABCDEFGHIJ",
-    12972.0 / 1467.0, 0.0, -0.5, 0 },
-  // (the definition's aligned text spanning its advance width)
-  { "ALIGNED", 3, 0, 0, 0.0, 1.0, "AB", -1.8623040218, 0.0, "ABCDEFGHIJ",
-    12972.0 / 1467.0, -1.8623040218, 0.0, 0 },
+  { "DEFAULT", 2, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0, NULL, 0.0,
+    -1.8635743516, 0.0, 0.0, 0 },
+  // left on the middle, aligned (spanning the definition's advance width)
+  // and in a vertical style, they start where the definitions do
+  { "LEFTMID", 0, 2, 0, 0.0, 0.0, 1.0, "AB", 0.0, -0.5, "ABCDEFGHIJ",
+    12972.0 / 1466.0, 0.0, -0.5, 0.0, 0 },
+  { "ALIGNED", 3, 0, 0, 0.0, 0.0, 1.0, "AB", -1.8635743516, 0.0,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -1.8635743516, 0.0, 0.0, 0 },
+  { "VERTICAL", 1, 2, 0, 0.0, 0.0, 1.0, "AB", -0.9307639836, -0.5,
+    "ABCDEFGHIJ", 12972.0 / 1466.0, -0.9307639836, -0.5, 0.0, 1 },
 };
 #define NUM_WIDTH_CASES (sizeof (width_cases) / sizeof (width_cases[0]))
 
-/* The ATTRIBs of placement insert, at ins_pt, scale and rotation in a block
-   with base point 0 holding width_cases' definitions at height 2.5: each
-   aligned at its definition's alignment point placed, with its value, and
-   starting where the case says. AutoCAD's offsets are allowed 0.1 percent
-   of the value's width, by which AutoCAD's measuring and the advance
-   widths differ. */
+/* The ATTRIBs of placement insert, at ins_pt, scale and rotation in block,
+   holding width_cases' definitions at height 2.5: each aligned at its
+   definition's alignment point placed, with its value, and starting where
+   the case says. */
 static int
 check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
               const BITCODE_RLL block, const BITCODE_3BD *ins_pt,
               const double scale, const double rotation)
 {
-  const Dwg_Entity_INSERT *_ins = object (dwg, insert)->tio.entity->tio.INSERT;
+  const Dwg_Object *insobj = object (dwg, insert);
   const Dwg_Object_BLOCK_HEADER *blk = block_header (dwg, block);
+  const Dwg_Entity_INSERT *_ins;
   const double c = cos (rotation), s = sin (rotation);
   const double height = 2.5 * scale;
   int failures = 0;
+  if (!insobj || insobj->fixedtype != DWG_TYPE_INSERT || !blk)
+    {
+      FAIL ("%s: no INSERT " FORMAT_HV " or block " FORMAT_HV, what, insert,
+            block);
+      return 1;
+    }
+  _ins = insobj->tio.entity->tio.INSERT;
   if (_ins->num_owned != NUM_WIDTH_CASES)
     {
       FAIL ("%s: %u ATTRIBs, expected %u", what, (unsigned)_ins->num_owned,
@@ -1717,7 +1737,13 @@ check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
       const Dwg_Entity_ATTDEF *d = NULL;
       const Dwg_Entity_ATTRIB *a = NULL;
       const double r = wc->rotation + rotation;
-      double ax, ay, x, y, tolerance;
+      // a width alone starts text half the overhang back, or forward when
+      // backward
+      const double along
+          = wc->along
+            + (wc->generation & 2 ? 0.5 : -0.5) * wc->overhang / 1466.0
+                  * wc->width_factor;
+      double ax, ay, x, y;
       for (BITCODE_BL i = 0; !d && i < blk->num_owned; i++)
         {
           const Dwg_Object *ent = object (dwg, ref (blk->entities[i]));
@@ -1740,29 +1766,30 @@ check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
           continue;
         }
       ax = ins_pt->x
-           + scale * (d->alignment_pt.x * c - d->alignment_pt.y * s);
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * c
+                    - (d->alignment_pt.y - blk->base_pt.y) * s);
       ay = ins_pt->y
-           + scale * (d->alignment_pt.x * s + d->alignment_pt.y * c);
-      x = ax + height * (wc->along * cos (r) - wc->across * sin (r));
-      y = ay + height * (wc->along * sin (r) + wc->across * cos (r));
-      tolerance = 1e-9;
-      if (wc->measured)
-        tolerance += 1e-3 * wc->width * wc->width_factor * height;
+           + scale
+                 * ((d->alignment_pt.x - blk->base_pt.x) * s
+                    + (d->alignment_pt.y - blk->base_pt.y) * c);
+      x = ax + height * (along * cos (r) - wc->across * sin (r));
+      y = ay + height * (along * sin (r) + wc->across * cos (r));
+      // AutoCAD's offsets have 10 decimals
       if (strcmp (a->text_value, wc->value ? wc->value : wc->dflt)
           || fabs (a->alignment_pt.x - ax) > 1e-9
           || fabs (a->alignment_pt.y - ay) > 1e-9
-          || fabs (a->ins_pt.x - x) > tolerance
-          || fabs (a->ins_pt.y - y) > tolerance
-          || fabs (a->height - height) > 1e-9 || a->generation != wc->generation
+          || fabs (a->ins_pt.x - x) > 1e-8 || fabs (a->ins_pt.y - y) > 1e-8
+          || fabs (a->height - height) > 1e-9
+          || a->generation != wc->generation
           || a->horiz_alignment != wc->horiz || a->vert_alignment != wc->vert)
         {
-          FAIL ("%s: %s '%s' starts at (%.6f, %.6f), aligned at (%g, %g), "
-                "h %g, expected '%s' at (%.6f, %.6f) within %g, aligned at "
-                "(%g, %g), h %g",
+          FAIL ("%s: %s '%s' starts at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g, expected '%s' at (%.9f, %.9f), aligned at (%g, %g), "
+                "h %g",
                 what, wc->tag, a->text_value, a->ins_pt.x, a->ins_pt.y,
                 a->alignment_pt.x, a->alignment_pt.y, a->height,
-                wc->value ? wc->value : wc->dflt, x, y, tolerance, ax, ay,
-                height);
+                wc->value ? wc->value : wc->dflt, x, y, ax, ay, height);
           failures++;
         }
     }
@@ -1775,16 +1802,18 @@ check_widths (const char *what, const Dwg_Data *dwg, const BITCODE_RLL insert,
 
 /* Attribute values given with their widths start where AutoCAD starts
    them: centred, right-aligned, middle and backward text, long and short
-   values, a turned definition and one with a width factor; without a
-   width, without a value, left on the middle or aligned, where the
-   definition's text starts; on a copy of Trees, placed at its values,
-   unscaled, and at Shrub (Plan), scaled and turned, and read back. */
+   values, turned definitions, oblique and with a width factor; without a
+   width, without a value, left on the middle, aligned or in a vertical
+   style, where the definition's text starts; on a copy of Trees, placed at
+   its values, unscaled, and at Shrub (Plan), scaled and turned, and read
+   back. */
 static int
 test_attribute_widths (Dwg_Data *src)
 {
   BITCODE_RLL def_h = 0;
   Dwg_Data *dst = document_with (src, TREES, &def_h);
   Dwg_Object_BLOCK_HEADER *def;
+  Dwg_Object_STYLE *vertical;
   Dwg_AttValue given[NUM_WIDTH_CASES];
   BITCODE_BL num_given = 0;
   const BITCODE_3BD at1 = { 10.0, 20.0, 0.0 }, at2 = { -30.0, 15.0, 0.0 };
@@ -1800,12 +1829,21 @@ test_attribute_widths (Dwg_Data *src)
       return 1;
     }
   def = block_header (dst, def_h);
+  vertical = dwg_add_STYLE (dst, "VERTICAL");
+  if (!vertical)
+    {
+      FAIL ("attribute widths: adding a text style failed");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  vertical->is_vertical = 1;
   memset (given, 0, sizeof (given));
   for (unsigned k = 0; k < NUM_WIDTH_CASES; k++)
     {
       const Width_Case *wc = &width_cases[k];
       // each aligned at a point of its own, in a column
-      const double ax = 5.0, ay = -10.0 * k;
+      const double ax = def->base_pt.x + 5.0, ay = def->base_pt.y - 10.0 * k;
       const double c = cos (wc->rotation), s = sin (wc->rotation);
       const dwg_point_3d ins
           = { ax + 2.5 * (wc->dflt_along * c - wc->dflt_across * s),
@@ -1823,9 +1861,13 @@ test_attribute_widths (Dwg_Data *src)
       attdef->vert_alignment = wc->vert;
       attdef->generation = wc->generation;
       attdef->rotation = wc->rotation;
+      attdef->oblique_angle = wc->oblique;
       attdef->width_factor = wc->width_factor;
       attdef->alignment_pt.x = ax;
       attdef->alignment_pt.y = ay;
+      if (wc->vertical)
+        attdef->style
+            = dwg_add_handleref (dst, 5, handle_of (dst, vertical), NULL);
       if (wc->value)
         {
           given[num_given].tag = (char *)wc->tag;
@@ -2653,18 +2695,16 @@ graph_node (const Dwg_Data *dwg, const BITCODE_RLL def,
 /* Places def in dwg's model space with the given values, which must
    succeed. */
 static int
-test_accepted_with (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
-                    const Dwg_DynValue *values, const BITCODE_BL n,
-                    const Dwg_AttValue *atts, const BITCODE_BL natts,
-                    const char *what)
+test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
+               const Dwg_DynValue *values, const BITCODE_BL n,
+               const char *what)
 {
   const BITCODE_3BD pt = { 0.0, 0.0, 0.0 };
   int error = 0;
   Dwg_Entity_INSERT *insert;
   loglevel = tracelevel;
   insert = dwg_dynblock_insert (model_space (dwg), block_header (dwg, def),
-                                &pt, scale, 0.0, values, n, atts, natts,
-                                &error);
+                                &pt, scale, 0.0, values, n, NULL, 0, &error);
   loglevel = test_loglevel;
   if (insert && !error)
     {
@@ -2673,22 +2713,6 @@ test_accepted_with (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
     }
   FAIL ("insert %s: 0x%x", what, error);
   return 1;
-}
-
-static int
-test_accepted (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
-               const Dwg_DynValue *values, const BITCODE_BL n,
-               const char *what)
-{
-  return test_accepted_with (dwg, def, scale, values, n, NULL, 0, what);
-}
-
-static int
-test_accepted_atts (Dwg_Data *dwg, const BITCODE_RLL def, const double scale,
-                    const Dwg_AttValue *atts, const BITCODE_BL natts,
-                    const char *what)
-{
-  return test_accepted_with (dwg, def, scale, NULL, 0, atts, natts, what);
 }
 
 static void
@@ -2887,10 +2911,31 @@ test_definition_refusals (Dwg_Data *src)
                                   REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                   "an attribute started beyond a double by "
                                   "its width");
+        // left-aligned, the same width doesn't move it
         attdef->horiz_alignment = 0;
-        failures += test_accepted_atts (dst, def_h, 10.0, a, 1,
-                                        "the same width, left-aligned, "
-                                        "which it doesn't move");
+        {
+          int err = 0;
+          const Dwg_Entity_INSERT *ins;
+          const Dwg_Object *att = NULL;
+          loglevel = tracelevel;
+          ins = dwg_dynblock_insert (model_space (dst), def, &pt, 10.0, 0.0,
+                                     NULL, 0, a, 1, &err);
+          loglevel = test_loglevel;
+          if (ins && !err && ins->num_owned == 1)
+            att = object (dst, ref (ins->attribs[0]));
+          if (att && att->fixedtype == DWG_TYPE_ATTRIB
+              && att->tio.entity->tio.ATTRIB->ins_pt.x == pt.x
+              && att->tio.entity->tio.ATTRIB->ins_pt.y == pt.y)
+            OK ("insert accepts the same width on left-aligned text, which "
+                "starts where its definition does");
+          else
+            {
+              FAIL ("insert of the same width on left-aligned text: 0x%x, "
+                    "its ATTRIB %s",
+                    err, att ? "moved" : "missing");
+              failures++;
+            }
+        }
         a[0].width = 0.0;
 
         // at a scale of 1e300, a point 1e10 from the base point

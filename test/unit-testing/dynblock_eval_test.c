@@ -5122,7 +5122,7 @@ enum
   M_CENTRED_90,  // the same, turned a quarter turn
   M_CENTRED_30,  // ATTDEF centred on the baseline, turned 30 degrees
   M_RIGHT,       // ATTDEF right on the top
-  M_MIDDLE,      // ATTDEF middle
+  M_MIDDLE,      // ATTDEF middle, turned 30 degrees
   M_LEFT,        // ATTDEF left on the baseline
   M_BOTTOM_LEFT, // ATTDEF left on the bottom
   M_MIDDLE_LEFT, // ATTDEF left on the middle
@@ -5155,7 +5155,7 @@ measured_entity (Dwg_Object *obj, const int k)
     case M_RIGHT:
       return line_to_attdef (obj, 2, 3, 0.0, 1.0, 14.0, 3.0, 15.0);
     case M_MIDDLE:
-      return line_to_attdef (obj, 4, 0, 0.0, 1.0, 16.0, 2.0, 16.5);
+      return line_to_attdef (obj, 4, 0, M_PI / 6.0, 1.0, 16.0, 2.0, 16.5);
     case M_LEFT:
       return line_to_attdef (obj, 0, 0, 0.0, 1.0, 4.0, 0.0, 0.0);
     case M_BOTTOM_LEFT:
@@ -5270,10 +5270,11 @@ test_check_measured (Dwg_Data *dwg)
     a->ins_pt.y += 0.4 * sin (M_PI / 6.0);
     rep_entity (dwg, 0xCFF7, idx[M_RIGHT])->tio.entity->tio.ATTDEF->ins_pt.x
         -= 0.4;
-    // middle text moves across the baseline too, by less than its height
+    // middle text moves across the baseline too, by less than its height:
+    // 0.4 along and 0.3 across, at 30 degrees
     a = rep_entity (dwg, 0xCFF7, idx[M_MIDDLE])->tio.entity->tio.ATTDEF;
-    a->ins_pt.x += 0.4;
-    a->ins_pt.y += 0.3;
+    a->ins_pt.x += 0.4 * cos (M_PI / 6.0) - 0.3 * sin (M_PI / 6.0);
+    a->ins_pt.y += 0.4 * sin (M_PI / 6.0) + 0.3 * cos (M_PI / 6.0);
   }
   {
     Dwg_Entity_MTEXT *m
@@ -5301,9 +5302,11 @@ test_check_measured (Dwg_Data *dwg)
     a->alignment_pt.x += 0.4;
     rep_entity (dwg, 0xD49D, idx[M_LEFT])->tio.entity->tio.ATTDEF->ins_pt.x
         += 0.4;
-    // middle text moved across the baseline by more than its height
-    rep_entity (dwg, 0xD49D, idx[M_MIDDLE])->tio.entity->tio.ATTDEF->ins_pt.y
-        += 1.5;
+    // middle text moved across the baseline by more than its height: 2
+    // along and 1.2 across, at 30 degrees
+    a = rep_entity (dwg, 0xD49D, idx[M_MIDDLE])->tio.entity->tio.ATTDEF;
+    a->ins_pt.x += 2.0 * cos (M_PI / 6.0) - 1.2 * sin (M_PI / 6.0);
+    a->ins_pt.y += 2.0 * sin (M_PI / 6.0) + 1.2 * cos (M_PI / 6.0);
     for (int k = M_BOTTOM_LEFT; k <= M_TOP_LEFT; k++)
       rep_entity (dwg, 0xD49D, idx[k])->tio.entity->tio.ATTDEF->ins_pt.x
           += 0.4;

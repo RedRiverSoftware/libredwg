@@ -339,11 +339,16 @@ typedef struct _dwg_attvalue
 {
   char *tag; /* the attribute definition's tag, as it has it */
   char *value;
-  /* The value's width in its text style's font, at a height of 1 and a
-     width factor of 1: for a TrueType font, the sum of its characters'
-     advance widths divided by the font's cap height. It places text
-     justified centre, right or middle as AutoCAD does (see
-     dwg_dynblock_insert ()). 0 for none. */
+  /* The value's width as AutoCAD lays it out in its text style's font, at
+     a height of 1 and a width factor of 1, which places text justified
+     centre, right or middle as AutoCAD does (see dwg_dynblock_insert ()).
+     For a TrueType font: from the start of the text to the end of its
+     last character, that is the sum of the characters' advance widths, or
+     to the right edge of the last character's outline where that reaches
+     further, in font units, divided by the height of the font's capital A
+     (AutoCAD draws a capital A as tall as the text): 1466 of Arial's 2048
+     units. AutoCAD applies no kerning. 0 for none, so zero the struct
+     before filling it. */
   double width;
 } Dwg_AttValue;
 
@@ -395,12 +400,18 @@ typedef struct _dwg_attvalue
    where AutoCAD starts it: back from its alignment point along the
    baseline (forward for backward text) by that width at the ATTRIB's
    height and width factor, or by half of it when centred or middle; and
-   across the baseline as far as the definition's text does.
-   AutoCAD also centres middle text on the height of its characters, which
-   LibreDWG takes from the definition's text: a value whose characters
+   across the baseline as far as the definition's text does. Two things
+   AutoCAD measures that a width doesn't hold: it centres text on its
+   first character's outline where that starts left of the text's start,
+   so a centred value beginning with such a character, as Arial's A, j
+   and _ do (by 3, 94 and 31 of its 2048 units), sits half that overhang
+   off; and it
+   centres middle text on the height of its characters too, which
+   LibreDWG takes from the definition's text, so a value whose characters
    reach lower or higher than those, such as one with descenders against
    capitals, sits off its alignment point across the baseline, by up to
-   about half the height. With no width (0), or for an attribute atts
+   about half the height. Text in a vertical style starts where the
+   definition's does. With no width (0), or for an attribute atts
    don't give, the ATTRIB starts where the definition's text starts, which
    AutoCAD laid out for the definition's tag or default value: a value of
    another width then sits off its alignment point along the baseline in
