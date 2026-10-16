@@ -669,6 +669,10 @@ test_mtext_codepage (void)
       "r2004 ANSI_932 second byte a backslash, not \\P" },
     { CP_ISO_8859_1, "caf\xE9", "caf\xC3\xA9", "r2004 ISO_8859_1" },
     { CP_US_ASCII, "caf\xE9", "caf\xEF\xBF\xBD", "r2004 US_ASCII" },
+    { CP_UTF8, "caf\xC3\xA9", "caf\xC3\xA9", "r2004 UTF8" },
+    // the tables map 0x5C (CP932) and 0x25 (CP864) to other characters
+    { CP_CP932, "A\\PB %%d", "AB \xC2\xB0", "r2004 CP932 keeps \\P and %%d" },
+    { CP_CP864, "50%%d", "50\xC2\xB0", "r2004 CP864 keeps %%d" },
   };
   Dwg_Data dwg;
   Dwg_Entity_MTEXT *mtext, *added;
@@ -687,6 +691,7 @@ test_mtext_codepage (void)
   mtext = example_mtext (&dwg);
   if (!mtext)
     goto done;
+  // its box wraps it after "por", and the space at the break isn't drawn
   check_mtext (&dwg, mtext,
                "Teksto granda nur portesti.Alia linio.Alia pli.",
                "r2004 example", NULL);
@@ -825,6 +830,7 @@ done:
   loglevel = test_loglevel;
 }
 
+#ifndef DISABLE_DXF
 /* A DXF import holds MTEXT as the file has it: an r2007+ DXF in UTF-8, an
    older one in its codepage. */
 static void
@@ -866,31 +872,37 @@ test_mtext_dxf (void)
       free_test_dwg (&dwg);
     }
 }
+#endif
+
+#define E10 "eeeeeeeeee"
+#define CP_E10 "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
+#define U8_E10                                                                \
+  "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"  \
+  "\xC3\xA9"
 
 /* Word wrap counts characters: an MTEXT of e-acute wraps where one of 'e'
-   does, and a break never splits a character. */
+   does, also after a run that ends part of the way along a line, and a
+   break never splits a character. The text is set in the codepage, and the
+   <text> holds it without the spaces at the breaks, in <tspan>s. */
 static void
 test_mtext_wrap (void)
 {
   static const struct
   {
-    const char *ascii, *codepage, *utf8, *what;
+    const char *ascii, *ascii_expected, *codepage, *utf8_expected, *what;
   } cases[] = {
-    { "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-      "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
-      "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
-      "\xE9\xE9\xE9\xE9\xE9\xE9",
-      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
-      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
-      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
-      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9"
-      "\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9\xC3\xA9",
-      "wrap inside a word" },
+    { E10 E10 E10 E10, E10 E10 E10 E10, CP_E10 CP_E10 CP_E10 CP_E10,
+      U8_E10 U8_E10 U8_E10 U8_E10, "wrap inside a word" },
     { "cafe cafe cafe cafe cafe cafe cafe cafe",
+      "cafecafecafecafecafecafecafecafe",
       "caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9 caf\xE9",
       "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9"
       "caf\xC3\xA9" "caf\xC3\xA9" "caf\xC3\xA9",
       "wrap between words" },
+    { "{\\C1;ee}" E10, "ee" E10, "{\\C1;\xE9\xE9}" CP_E10,
+      "\xC3\xA9\xC3\xA9" U8_E10, "wrap after a coloured run" },
+    { "\\See^2;" E10, "ee/2" E10, "\\S\xE9\xE9^2;" CP_E10,
+      "\xC3\xA9\xC3\xA9/2" U8_E10, "wrap after a stacked fraction" },
   };
   Dwg_Data dwg;
   Dwg_Entity_MTEXT *mtext;
@@ -900,7 +912,7 @@ test_mtext_wrap (void)
   mtext = example_mtext (&dwg);
   if (!mtext)
     goto done;
-  // about six characters a line
+  // a few characters a line
   mtext->rect_width = 5.0 * mtext->text_height;
   for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
     {
@@ -909,23 +921,14 @@ test_mtext_wrap (void)
       snprintf (what, sizeof (what), "%s, ASCII", cases[i].what);
       if (!set_mtext (mtext, cases[i].ascii, strlen (cases[i].ascii) + 1))
         continue;
-      // the expected text: the ASCII one less the spaces at the breaks
-      {
-        char expected[64];
-        size_t n = 0;
-        for (const char *p = cases[i].ascii; *p; p++)
-          if (*p != ' ')
-            expected[n++] = *p;
-        expected[n] = '\0';
-        check_mtext (&dwg, mtext, expected, what, &ascii_lines);
-      }
+      check_mtext (&dwg, mtext, cases[i].ascii_expected, what, &ascii_lines);
       if (ascii_lines < 2)
         fail ("%s: %d lines, the test needs it wrapped", what, ascii_lines);
       snprintf (what, sizeof (what), "%s, ANSI_1252", cases[i].what);
       if (!set_mtext (mtext, cases[i].codepage,
                       strlen (cases[i].codepage) + 1))
         continue;
-      check_mtext (&dwg, mtext, cases[i].utf8, what, &lines);
+      check_mtext (&dwg, mtext, cases[i].utf8_expected, what, &lines);
       if (lines == ascii_lines)
         ok ("%s: %d lines, as ASCII", what, lines);
       else
@@ -946,7 +949,9 @@ main (void)
   test_mtext_utf16 ();
   test_mtext_utf16_cjk ();
   test_mtext_utf8 ();
+#ifndef DISABLE_DXF
   test_mtext_dxf ();
+#endif
   test_mtext_wrap ();
   return numfailed ();
 }

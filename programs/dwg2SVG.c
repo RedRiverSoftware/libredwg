@@ -1201,9 +1201,11 @@ mtext_buf_reset (Mtext_Buf *b)
   b->cap = 0;
 }
 
-/* Text in the drawing's codepage as UTF-8.  Each character maps through the
-   codepage tables, as htmlescape () maps it for TEXT; one the codepage
-   doesn't define becomes U+FFFD.  Caller frees. */
+/* Text in the drawing's codepage as UTF-8.  ASCII stays as it is, so the
+   parser sees every formatting code, even where the codepage tables map
+   0x5C or 0x25 to another character.  The other characters map through the
+   tables as htmlescape () maps them for TEXT; one the codepage doesn't
+   define becomes U+FFFD.  Caller frees. */
 static char *
 mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
 {
@@ -1217,13 +1219,18 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
     {
       uint16_t c = *s++;
       wchar_t wc;
+      if (c < 0x80)
+        {
+          mtext_buf_append_char (&b, (char)c);
+          continue;
+        }
       if (*s && dwg_codepage_is_twobyte (cp, (unsigned char)c))
         c = (uint16_t)(c << 8 | *s++);
       /* dwg_codepage_uwc () asserts for these two, which have no table. */
       if (cp == CP_ISO_8859_1)
         wc = (wchar_t)c;
       else if (cp == CP_US_ASCII)
-        wc = (wchar_t)(c < 0x80 ? c : 0);
+        wc = 0;
       else
         wc = dwg_codepage_uwc (cp, c);
       mtext_buf_append_codepoint (&b, wc ? (unsigned int)wc : 0xFFFD);
