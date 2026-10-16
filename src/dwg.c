@@ -3575,13 +3575,15 @@ ATTRIBUTE_MALLOC
 char *
 split_filepath (const char *filepath, char **extp)
 {
-  char *copy, *base, *dot;
+  char *copy, *base, *name, *dot;
   // int len;
 #ifndef HAVE_NONNULL
   if (!filepath)
     return NULL;
 #endif
   copy = strdup (filepath);
+  if (!copy)
+    return NULL;
 #ifdef HAVE_BASENAME
   base = basename (copy);
 #else
@@ -3589,13 +3591,18 @@ split_filepath (const char *filepath, char **extp)
 #endif
   if (!base)
     base = copy;
-  // len = strlen (base);
-  if ((dot = strrchr (base, '.')) && *dot)
+  // base points into copy, or to basename's static storage
+  name = strdup (base);
+  free (copy);
+  if (!name)
+    return NULL;
+  // len = strlen (name);
+  if ((dot = strrchr (name, '.')) && *dot)
     {
       *extp = dot + 1;
       *dot = '\0';
     }
-  return base;
+  return name;
 }
 
 int
