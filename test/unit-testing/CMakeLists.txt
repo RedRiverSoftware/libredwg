@@ -127,6 +127,9 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     ../../src/classes.c tests_common.h)
   if(NOT MSVC)
     add_test(svg_api_test ${TARGET_SYSTEM_EMULATOR} svg_api_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds the drawings in test/test-data
+    set_tests_properties(svg_api_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
   endif()
   add_executable(add_test
     add_test.c

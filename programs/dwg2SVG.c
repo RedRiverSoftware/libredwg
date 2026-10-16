@@ -1201,6 +1201,75 @@ mtext_buf_reset (Mtext_Buf *b)
   b->cap = 0;
 }
 
+/* Text in the drawing's codepage as UTF-8.  ASCII stays as it is, so the
+   parser sees every formatting code, even where the codepage tables map
+   0x5C or 0x25 to another character.  The other characters map through the
+   tables as htmlescape () maps them for TEXT; one the codepage doesn't
+   define becomes U+FFFD.  Caller frees. */
+static char *
+mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
+{
+  const unsigned char *s = (const unsigned char *)src;
+  Mtext_Buf b;
+
+  if (cp == CP_UTF8)
+    return strdup (src);
+  mtext_buf_init (&b);
+  while (*s)
+    {
+      uint16_t c = *s++;
+      wchar_t wc;
+      if (c < 0x80)
+        {
+          mtext_buf_append_char (&b, (char)c);
+          continue;
+        }
+      /* dwg_codepage_is_twobyte () takes some single-byte characters for
+         lead bytes, such as ANSI_936's euro sign 0x80, and misses most of
+         Johab's, so a pair is tried for Johab too, and one the codepage
+         doesn't define is taken one byte at a time. */
+      if (*s
+          && (dwg_codepage_is_twobyte (cp, (unsigned char)c)
+              || cp == CP_JOHAB || cp == CP_ANSI_1361))
+        {
+          wc = dwg_codepage_uwc (cp, (uint16_t)(c << 8 | *s));
+          if (wc)
+            {
+              mtext_buf_append_codepoint (&b, (unsigned int)wc);
+              s++;
+              continue;
+            }
+        }
+      /* dwg_codepage_uwc () asserts for these two, which have no table. */
+      if (cp == CP_ISO_8859_1)
+        wc = (wchar_t)c;
+      else if (cp == CP_US_ASCII)
+        wc = 0;
+      else
+        wc = dwg_codepage_uwc (cp, c);
+      mtext_buf_append_codepoint (&b, wc ? (unsigned int)wc : 0xFFFD);
+    }
+  return mtext_buf_steal (&b);
+}
+
+/* The MTEXT contents as UTF-8, which mtext_parse () takes.  A document holds
+   text as the writer expects it (see IS_FROM_TU in bits.h): UTF-16 when read
+   from an r2007+ DWG; UTF-8 when built with the add API, imported from JSON,
+   or imported from an r2007+ DXF; otherwise in the drawing's codepage.
+   Caller frees.  NULL when the UTF-16 conversion or the UTF-8 copy runs out
+   of memory; the codepage conversion truncates instead, as the Mtext_Buf
+   helpers do. */
+static char *
+mtext_text_utf8 (const Dwg_Data *dwg, const char *text)
+{
+  if (IS_FROM_TU_DWG (dwg))
+    return bit_convert_TU ((BITCODE_TU)text);
+  if ((dwg->opts & DWG_OPTS_INJSON)
+      || ((dwg->opts & DWG_OPTS_INDXF) && dwg->header.from_version >= R_2007))
+    return strdup (text);
+  return mtext_codepage_to_utf8 (text, (Dwg_Codepage)dwg->header.codepage);
+}
+
 static void
 mtext_runs_append (Mtext_Runs *rs, Mtext_Run r)
 {
@@ -1688,13 +1757,43 @@ mtext_parse (const char *src, double base_text_height)
   return p.runs;
 }
 
+/* Number of characters in the n bytes of UTF-8 at s: every byte that doesn't
+   continue a multi-byte sequence starts one. */
+static size_t
+utf8_nchars (const char *s, size_t n)
+{
+  size_t i, count = 0;
+  for (i = 0; i < n; i++)
+    if (((unsigned char)s[i] & 0xC0) != 0x80)
+      count++;
+  return count;
+}
+
+/* The offset nchars characters on from pos in the len bytes of UTF-8 at s,
+   or len when the text ends first. */
+static size_t
+utf8_advance (const char *s, size_t len, size_t pos, size_t nchars)
+{
+  while (pos < len && nchars > 0)
+    {
+      pos++;
+      while (pos < len && ((unsigned char)s[pos] & 0xC0) == 0x80)
+        pos++;
+      nchars--;
+    }
+  return pos;
+}
+
 /* Word-wrap pass.  Walks `in` and splits any run whose text would push the
    visual line width past `rect_width` (in drawing units), inserting wrap-
    induced line breaks (newlines_before = 1) at the most recent whitespace.
+   Widths count UTF-8 characters, not bytes, and a break never splits one.
 
    `cwf` is a char-width factor — proportional fonts ≈ 0.55, monospace ≈ 0.6.
-   Width estimation is rough (we don't run the real font metrics), so the
-   factor errs on the early-wrap side rather than the overflow side.
+   Width estimation is rough (we don't run the real font metrics): every
+   character counts as an average Latin glyph, so for Latin text the factor
+   errs on the early-wrap side rather than the overflow side, but full-width
+   CJK characters, about one em each, can run past `rect_width`.
 
    Stacked-fraction runs (`denom != NULL`) are treated atomically.
 
@@ -1739,7 +1838,7 @@ mtext_runs_wrap (Mtext_Runs in, double font_size, double rect_width,
           mtext_style_copy (&nr.style, &src->style);
           mtext_runs_append (&out, nr);
           if (text)
-            cur_line_width += strlen (text) * cw;
+            cur_line_width += utf8_nchars (text, strlen (text)) * cw;
           continue;
         }
 
@@ -1751,7 +1850,7 @@ mtext_runs_wrap (Mtext_Runs in, double font_size, double rect_width,
           size_t max_chars = (avail > 0.0 && cw > 0.0)
                                  ? (size_t)(avail / cw)
                                  : 0;
-          size_t end = pos + max_chars;
+          size_t end = utf8_advance (text, tlen, pos, max_chars);
           size_t break_at;
           size_t rlen;
           Mtext_Run nr;
@@ -1768,24 +1867,19 @@ mtext_runs_wrap (Mtext_Runs in, double font_size, double rect_width,
               mtext_style_init (&nr.style);
               mtext_style_copy (&nr.style, &src->style);
               mtext_runs_append (&out, nr);
-              cur_line_width += rlen * cw;
+              cur_line_width += utf8_nchars (text + pos, rlen) * cw;
               break;
             }
 
           /* Need a wrap point.  Prefer the last whitespace at or before
              `end`; if there isn't one within the current run, hard-break
-             at `end` (or pos+1 to guarantee progress). */
+             at `end` (or after one character, to guarantee progress). */
           break_at = end;
           while (break_at > pos && text[break_at - 1] != ' ')
             break_at--;
           if (break_at <= pos)
-            {
-              break_at = (max_chars > 0) ? end : pos + 1;
-              if (break_at > tlen)
-                break_at = tlen;
-              if (break_at == pos)
-                break_at = pos + 1;
-            }
+            break_at = (max_chars > 0) ? end
+                                       : utf8_advance (text, tlen, pos, 1);
 
           rlen = break_at - pos;
           while (rlen > 0 && text[pos + rlen - 1] == ' ')
@@ -1903,11 +1997,19 @@ output_MTEXT (Dwg_Object *obj)
     line_dy = 1.2 * lsf;
   }
 
-  runs = mtext_parse (mtext->text, mtext->text_height);
+  {
+    char *text = mtext_text_utf8 (dwg, mtext->text);
+    if (!text)
+      return;
+    runs = mtext_parse (text, mtext->text_height);
+    free (text);
+  }
   /* Word-wrap at the MTEXT box width.  Engineering-drawing MTEXT is usually
      ALL CAPS in Arial-family fonts where the average glyph occupies ~0.6 of
      the em-square; 0.65 for monospace.  Without real font metrics we err on
-     the early-wrap side so text never overflows the box. */
+     the early-wrap side so Latin text stays inside the box.  Every character
+     counts as one such glyph, so full-width CJK text, about one em a
+     character, can overflow it. */
   {
     int monospace = (fontfamily && (strcmp (fontfamily, "Courier") == 0
                                     || strcmp (fontfamily, "Lucida Console")
