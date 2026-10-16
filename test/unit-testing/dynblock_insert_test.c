@@ -3065,6 +3065,26 @@ test_definition_refusals (Dwg_Data *src)
                     x, y);
               failures++;
             }
+          // right-aligned and turned 45 degrees, 2 high and 1e308 wide:
+          // the offset, 2e308, isn't held, but each coordinate is
+          attdef->horiz_alignment = 2;
+          attdef->rotation = M_PI / 4.0;
+          x = y = 0.0;
+          if (!attrib_start (dst, def, 1.0, a, 1, &x, &y)
+              && fabs (x + 1e308 * (2.0 * cos (M_PI / 4.0))) <= 2e296
+              && fabs (y + 1e308 * (2.0 * sin (M_PI / 4.0))) <= 2e296)
+            OK ("insert starts a turned 2 high attribute value 1e308 wide "
+                "at (%g, %g)",
+                x, y);
+          else
+            {
+              FAIL ("insert of a turned 2 high attribute value 1e308 wide: "
+                    "(%g, %g), expected (-1.4142e308, -1.4142e308)",
+                    x, y);
+              failures++;
+            }
+          attdef->horiz_alignment = 1;
+          attdef->rotation = 0.0;
           attdef->height = 1.0;
         }
         attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;

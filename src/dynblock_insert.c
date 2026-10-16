@@ -787,7 +787,7 @@ start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
   const double rotation = attdef->rotation + p->rotation;
   const double c = cos (rotation), s = sin (rotation);
   const Dwg_Object *style = ref_object (p->dwg, attdef->style);
-  double across, along, width_factor;
+  double across, share, width_factor, height;
   if (!(width > 0.0) || (h != 1 && h != 2 && h != 4)
       || attdef->vert_alignment > 3
       || (style && style->fixedtype == DWG_TYPE_STYLE
@@ -796,13 +796,17 @@ start_at_width (const Dynblock_Placement *p, const Dwg_Entity_ATTDEF *attdef,
   across = (pt->y - align->y) * c - (pt->x - align->x) * s;
   // AutoCAD's width factor is positive; the add API leaves it 0
   width_factor = attdef->width_factor > 0.0 ? attdef->width_factor : 1.0;
-  // the ATTRIB's height, which check_attributes () finds finite
-  along = product3 (width, (h == 2 ? 1.0 : 0.5) * width_factor,
-                    attdef->height * p->scale);
-  if (!(attdef->generation & 2))
-    along = -along;
-  pt->x = align->x + along * c - across * s;
-  pt->y = align->y + along * s + across * c;
+  // the share of the width the text starts from its alignment point along
+  // the baseline: back, or forward for backward text
+  share = (h == 2 ? -1.0 : -0.5) * width_factor;
+  if (attdef->generation & 2)
+    share = -share;
+  // the ATTRIB's height, which check_attributes () finds finite. Each
+  // coordinate's part of the offset is multiplied out on its own, as it
+  // can be held where the offset can't.
+  height = attdef->height * p->scale;
+  pt->x = align->x + product3 (width, share * c, height) - across * s;
+  pt->y = align->y + product3 (width, share * s, height) + across * c;
 }
 
 /* The WCS point of block point (x, y, z), placed by p in the block with
