@@ -37,40 +37,48 @@ EXTRA_DIST    += $(dist_perl_PERL)
 all-am: $(dist_perl_PERL)
 	@echo Making all for perl
 
-# building perl bindings is optional. Most setup's don't have all the deps, like
-# crypt.h, sys/wait.h on windows.
-# grep rem: with a command.com compat Makefile we cannot continue from bash
 perl/LibreDWG.$(OBJEXT): perl/LibreDWG.pm perl/Makefile
 	@echo Note LibreDWG.c is huge. This will need some time...
 	-if test -f perl/pm_to_blib; then rm perl/pm_to_blib; fi
 	-if test -d perl/blib; then rm -rf perl/blib; fi
-	-if grep "NOOP = rem" perl/Makefile; then false; else \
-	    cd perl && $(MAKE) PERL="$(PERL)" \
-	                       OPTIMIZE="-I$(abs_top_srcdir)/include -I$(abs_top_builddir)/src" \
-	                       OTHERLDFLAGS="-L$(abs_top_builddir)/src/.libs -lredwg"; fi
+	cd perl && $(MAKE) PERL="$(PERL)" \
+	                   OPTIMIZE="-I$(abs_top_srcdir)/include -I$(abs_top_builddir)/src" \
+	                   OTHERLDFLAGS="-L$(abs_top_builddir)/src/.libs -lredwg"
 
-perl/Makefile: perl/Makefile.PL
+# Makefile.PL only builds the sources beside it. In a VPATH build of the
+# tarball the distributed LibreDWG.c and LibreDWG.pm are in the source tree.
+# MakeMaker knows no INSTALLDIRS=no, so --with-perl-install=no passes none.
+perl/Makefile: perl/Makefile.PL perl/LibreDWG.c perl/LibreDWG.pm
 if !HAVE_INSRCDIR
-	-mkdir -p perl/t
-	-cp -f $(srcdir)/perl/t/0_basic.t perl/t/
+	mkdir -p perl/t
+	cp -f $(srcdir)/perl/t/0_basic.t perl/t/
+	for f in LibreDWG.c LibreDWG.pm; do \
+	  test -f perl/$$f || cp -f $(srcdir)/perl/$$f perl/ || exit 1; \
+	done
 endif
-	-cd perl && \
-	  $(PERL) Makefile.PL PERL="$(PERL)" INSTALLDIRS=@with_perl_install@
+	cd perl && \
+	if test x@with_perl_install@ = xno; then \
+	  $(PERL) Makefile.PL PERL="$(PERL)"; \
+	else \
+	  $(PERL) Makefile.PL PERL="$(PERL)" INSTALLDIRS=@with_perl_install@; \
+	fi
 
 # Maybe disable if LibreDWG.so was not installed yet.
 # rpath/LD_LIBRARY_PATH overrides are too troublesome
 check-am: $(dist_perl_PERL) perl/Makefile perl/LibreDWG.$(OBJEXT)
 	@echo Making check for perl
-	-if grep "NOOP = rem" perl/Makefile; then false; else \
-	    LD_LIBRARY_PATH="$(abs_top_builddir)/src/.libs" $(MAKE) -C perl test \
-	      PERL="$(PERL)" OPTIMIZE="-I$(abs_top_srcdir)/include -I$(abs_top_builddir)/src" \
-              OTHERLDFLAGS="-L$(abs_top_builddir)/src/.libs -lredwg"; fi
+	LD_LIBRARY_PATH="$(abs_top_builddir)/src/.libs" $(MAKE) -C perl test \
+	  PERL="$(PERL)" OPTIMIZE="-I$(abs_top_srcdir)/include -I$(abs_top_builddir)/src" \
+	  OTHERLDFLAGS="-L$(abs_top_builddir)/src/.libs -lredwg"
 
 install-am: $(dist_perl_PERL) perl/Makefile perl/LibreDWG.$(OBJEXT)
 	@echo Making install for perl
-	-if test x@with_perl_install@ != xno; then if grep "NOOP = rem" perl/Makefile; \
-            then false; \
-	    else $(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)"; fi; fi
+	@if test x@with_perl_install@ = xno; then \
+	  echo "perl bindings not installed: configured --with-perl-install=no"; \
+	else \
+	  echo '$(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)"'; \
+	  $(MAKE) -C perl install_@with_perl_install@ PERL="$(PERL)"; \
+	fi
 
 clean-am:
 	-$(MAKE) -C perl clean
@@ -79,6 +87,7 @@ distclean-am:
 	-$(MAKE) -C perl distclean
 if !HAVE_INSRCDIR
 	rm -rf perl/t
+	rm -f perl/LibreDWG.c perl/LibreDWG.pm
 endif
 
 PERL_sources =  $(top_srcdir)/bindings/dwg.i \
