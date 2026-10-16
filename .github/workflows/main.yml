@@ -244,7 +244,7 @@ jobs:
   mingw:
     name: mingw
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 55
     env:
       MSYS2_DIR: msys64
       MSYS2_ARCH: x86_64
@@ -305,7 +305,7 @@ jobs:
     # The make steps have time limits of their own: a step over its limit
     # fails the job, where a job over its limit is reported as cancelled.
     - shell: msys2 {0}
-      timeout-minutes: 25
+      timeout-minutes: 28
       run: make -j CC="ccache gcc"
     - if: failure()
       shell: msys2 {0}
