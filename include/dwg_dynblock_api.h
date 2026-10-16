@@ -405,22 +405,22 @@ typedef struct _dwg_attvalue
    first character's outline where that starts left of the text's start,
    so a centred value beginning with such a character, as Arial's A, j
    and _ do (by 3, 94 and 31 of its 2048 units), sits half that overhang
-   off; and it
-   centres middle text on the height of its characters too, which
-   LibreDWG takes from the definition's text, so a value whose characters
-   reach lower or higher than those, such as one with descenders against
-   capitals, sits off its alignment point across the baseline, by up to
-   about half the height. Text in a vertical style starts where the
-   definition's does. With no width (0), or for an attribute atts
-   don't give, the ATTRIB starts where the definition's text starts, which
-   AutoCAD laid out for the definition's tag or default value: a value of
-   another width then sits off its alignment point along the baseline in
-   AutoCAD, though not in LibreDWG's SVG output, which places such text by
-   its alignment point. To place a default value as AutoCAD does, give it
-   in atts with its width. Text left-aligned, aligned or fit starts where
-   the definition's does whatever the width. A width that is negative or
-   isn't finite, or at which the text would start beyond what a double
-   holds, is refused, with nothing added (DWG_ERR_VALUEOUTOFBOUNDS).
+   off; and it centres middle text on the height of its characters too,
+   which LibreDWG takes from the definition's text, so a value whose
+   characters reach lower or higher than those, such as one with
+   descenders against capitals, sits off its alignment point across the
+   baseline, by up to about half the height. Text in a vertical style
+   starts where the definition's does. With no width (0), or for an
+   attribute atts don't give, the ATTRIB starts where the definition's
+   text starts, which AutoCAD laid out for the definition's tag or default
+   value: a value of another width then sits off its alignment point along
+   the baseline in AutoCAD, though not in LibreDWG's SVG output, which
+   places such text by its alignment point. To place a default value as
+   AutoCAD does, give it in atts with its width. Text left-aligned,
+   aligned or fit starts where the definition's does whatever the width.
+   A width that is negative or isn't finite, or at which the text would
+   start beyond what a double holds, is refused, with nothing added
+   (DWG_ERR_VALUEOUTOFBOUNDS).
 
    Refused, with nothing added: owner or def not a BLOCK_HEADER of their
    document, or of different documents (DWG_ERR_INVALIDHANDLE); a drawing
