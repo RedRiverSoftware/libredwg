@@ -473,7 +473,8 @@ free_test_dwg (Dwg_Data *dwg)
   loglevel = test_loglevel;
 }
 
-/* 1 when s is well-formed UTF-8. */
+/* 1 when s is well-formed UTF-8: no overlong forms, surrogates or code
+   points above U+10FFFF. */
 static int
 utf8_valid (const char *s)
 {
@@ -481,17 +482,33 @@ utf8_valid (const char *s)
   while (*p)
     {
       int n;
+      // the range of the second byte of a multi-byte sequence
+      unsigned char lo = 0x80, hi = 0xBF;
       if (*p < 0x80)
         n = 0;
       else if (*p >= 0xC2 && *p <= 0xDF)
         n = 1;
-      else if ((*p & 0xF0) == 0xE0)
-        n = 2;
+      else if (*p >= 0xE0 && *p <= 0xEF)
+        {
+          n = 2;
+          if (*p == 0xE0)
+            lo = 0xA0;
+          else if (*p == 0xED)
+            hi = 0x9F;
+        }
       else if (*p >= 0xF0 && *p <= 0xF4)
-        n = 3;
+        {
+          n = 3;
+          if (*p == 0xF0)
+            lo = 0x90;
+          else if (*p == 0xF4)
+            hi = 0x8F;
+        }
       else
         return 0;
       p++;
+      if (n && (*p < lo || *p > hi))
+        return 0;
       while (n--)
         {
           if ((*p & 0xC0) != 0x80)
@@ -500,6 +517,35 @@ utf8_valid (const char *s)
         }
     }
   return 1;
+}
+
+/* utf8_valid, which the checks below rely on. */
+static void
+test_utf8_valid (void)
+{
+  static const struct
+  {
+    const char *s;
+    int valid;
+    const char *what;
+  } cases[] = {
+    { "caf\xC3\xA9 \xE2\x82\xAC", 1, "2 and 3 bytes" },
+    { "\xF4\x8F\xBF\xBF", 1, "U+10FFFF" },
+    { "caf\xE9", 0, "a codepage byte" },
+    { "\xC3", 0, "a cut sequence" },
+    { "\xA9", 0, "a lone continuation byte" },
+    { "\xC0\xAF", 0, "an overlong 2 bytes" },
+    { "\xE0\x80\x80", 0, "an overlong 3 bytes" },
+    { "\xED\xA0\x80", 0, "a surrogate" },
+    { "\xF0\x80\x80\x80", 0, "an overlong 4 bytes" },
+    { "\xF4\x90\x80\x80", 0, "above U+10FFFF" },
+  };
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    if (utf8_valid (cases[i].s) == cases[i].valid)
+      ok ("utf8_valid: %s", cases[i].what);
+    else
+      fail ("utf8_valid: %s taken as %s", cases[i].what,
+            cases[i].valid ? "not UTF-8" : "UTF-8");
 }
 
 /* The characters of the <text> element dwg2SVG wrote for the object with
@@ -945,6 +991,7 @@ main (void)
 
   test_rotated_text_anchor ();
   test_long_write ();
+  test_utf8_valid ();
   test_mtext_codepage ();
   test_mtext_utf16 ();
   test_mtext_utf16_cjk ();
