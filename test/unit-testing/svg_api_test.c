@@ -18,10 +18,10 @@
    - one write longer than dwg_svg_printf's 8 KB stack buffer (a long TEXT
      value) reaches the SVG whole;
    - MTEXT comes out as UTF-8 whichever way the document holds its text: in
-     the codepage (read from a pre-r2007 DWG or DXF), in UTF-16 (read from
-     an r2007+ DWG) or in UTF-8 (built with the add API, or read from an
-     r2007+ DXF), at the top level and in a block, and word wrap counts
-     characters, not bytes. */
+     the codepage (read from a pre-r2007 DWG), in UTF-16 (read from an
+     r2007+ DWG) or in UTF-8 (built with the add API), at the top level and
+     in a block, and word wrap counts characters, not bytes. indxf_test
+     checks DXF imports. */
 
 #define SVG_API_TEST_C
 #include <math.h>
@@ -606,7 +606,7 @@ text_starts_with (const Dwg_Data *dwg, const char *t, const char *prefix)
   return !strncmp (t, prefix, strlen (prefix));
 }
 
-/* The MTEXT of example_2004.dwg and example_2007.dwg, in model space. */
+/* The MTEXT of example_2004.dwg and example_2010.dwg, in model space. */
 static Dwg_Entity_MTEXT *
 example_mtext (Dwg_Data *dwg)
 {
@@ -622,7 +622,7 @@ example_mtext (Dwg_Data *dwg)
   return NULL;
 }
 
-/* The block of example_2004.dwg and example_2007.dwg that model space
+/* The block of example_2004.dwg and example_2010.dwg that model space
    inserts with attributes. */
 static Dwg_Object_BLOCK_HEADER *
 example_block (Dwg_Data *dwg)
@@ -770,7 +770,8 @@ done:
   free_test_dwg (&dwg);
 }
 
-/* example_2007.dwg holds text in UTF-16. */
+/* example_2010.dwg holds text in UTF-16, as every r2007+ DWG does. The same
+   drawing as r2007, example_2007.dwg, can't be read on big-endian hosts. */
 static void
 test_mtext_utf16 (void)
 {
@@ -785,7 +786,7 @@ test_mtext_utf16 (void)
   Dwg_Object_BLOCK_HEADER *blk;
   const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
 
-  if (!read_test_dwg ("example_2007.dwg", &dwg))
+  if (!read_test_dwg ("example_2010.dwg", &dwg))
     goto done;
   mtext = example_mtext (&dwg);
   if (!mtext)
@@ -793,16 +794,16 @@ test_mtext_utf16 (void)
   // every character, not the first only
   check_mtext (&dwg, mtext,
                "Teksto granda nur portesti.Alia linio.Alia pli.",
-               "r2007 example", NULL);
+               "r2010 example", NULL);
 
   mtext->rect_width = 0.0; // one line
   if (set_mtext (mtext, cafe, sizeof (cafe)))
     check_mtext (&dwg, mtext,
-                 "caf\xC3\xA9 30\xC2\xB0 \xCE\xB4 \xE2\x82\xAC", "r2007",
+                 "caf\xC3\xA9 30\xC2\xB0 \xCE\xB4 \xE2\x82\xAC", "r2010",
                  NULL);
   if (set_mtext (mtext, escapes, sizeof (escapes)))
     check_mtext (&dwg, mtext, "\xCE\xB4 \xC2\xB0",
-                 "r2007 with \\U+ and %%d", NULL);
+                 "r2010 with \\U+ and %%d", NULL);
 
   // the add API converts UTF-8 to UTF-16 for a document read from a file
   blk = example_block (&dwg);
@@ -814,7 +815,7 @@ test_mtext_utf16 (void)
     fail ("dwg_add_MTEXT in the block failed");
   else
     check_mtext (&dwg, added, "Stra\xC3\x9F" "e caf\xC3\xA9",
-                 "r2007 MTEXT added to a block", NULL);
+                 "r2010 MTEXT added to a block", NULL);
 done:
   free_test_dwg (&dwg);
 }
@@ -875,50 +876,6 @@ done:
     }
   loglevel = test_loglevel;
 }
-
-#ifndef DISABLE_DXF
-/* A DXF import holds MTEXT as the file has it: an r2007+ DXF in UTF-8, an
-   older one in its codepage. */
-static void
-test_mtext_dxf (void)
-{
-  static const struct
-  {
-    const char *file, *text, *expected, *what;
-  } cases[] = {
-    { "example_2004.dxf", "caf\xE9 30\xB0", "caf\xC3\xA9 30\xC2\xB0",
-      "r2004 DXF import" },
-    { "example_2007.dxf", "caf\xC3\xA9 30\xC2\xB0", "caf\xC3\xA9 30\xC2\xB0",
-      "r2007 DXF import" },
-  };
-  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
-    {
-      Dwg_Data dwg;
-      Dwg_Entity_MTEXT *mtext;
-      char path[1024];
-      int error;
-
-      memset (&dwg, 0, sizeof (Dwg_Data));
-      if (!test_file (cases[i].file, path, sizeof (path)))
-        {
-          fail ("test-data/%s not found", cases[i].file);
-          continue;
-        }
-      error = dxf_read_file (path, &dwg);
-      loglevel = test_loglevel;
-      if (error >= DWG_ERR_CRITICAL)
-        fail ("dxf_read_file %s: error 0x%x", cases[i].file, error);
-      else if ((mtext = example_mtext (&dwg)))
-        {
-          mtext->rect_width = 0.0; // one line
-          if (set_mtext (mtext, cases[i].text, strlen (cases[i].text) + 1))
-            check_mtext (&dwg, mtext, cases[i].expected, cases[i].what,
-                         NULL);
-        }
-      free_test_dwg (&dwg);
-    }
-}
-#endif
 
 #define E10 "eeeeeeeeee"
 #define CP_E10 "\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9\xE9"
@@ -996,9 +953,6 @@ main (void)
   test_mtext_utf16 ();
   test_mtext_utf16_cjk ();
   test_mtext_utf8 ();
-#ifndef DISABLE_DXF
-  test_mtext_dxf ();
-#endif
   test_mtext_wrap ();
   return numfailed ();
 }

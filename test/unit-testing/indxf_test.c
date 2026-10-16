@@ -12,8 +12,9 @@
 /*****************************************************************************/
 
 /* DXF import: fields the importer sets where the free spec did not look for
-   them, an r2000 LIGHT's colour, and what it keeps of a TABLESTYLE's cell
-   styles. Under LeakSanitizer, make check also finds what it would leak. */
+   them, MTEXT text as the SVG renderer reads it, an r2000 LIGHT's colour,
+   and what it keeps of a TABLESTYLE's cell styles. Under LeakSanitizer,
+   make check also finds what it would leak. */
 
 #define INDXF_TEST_C
 #include <stdio.h>
@@ -33,6 +34,7 @@ static unsigned int test_loglevel;
 #include "dwg.h"
 #include "tests_common.h"
 #include "dwg_api.h"
+#include "dwg_svg_api.h"
 #include "bits.h"
 #ifndef DISABLE_DXF
 #  include "out_dxf.h"
@@ -154,6 +156,100 @@ test_mtext_46 (void)
   else
     ok ("MTEXT with two 46 groups");
   dwg_free (&dwg);
+  if (!numfailed ())
+    unlink (file);
+}
+
+/* name under test/test-data with the value of the line after the first line
+   that starts with match replaced by text, NUL-terminated, or NULL after a
+   failed check. Caller frees. */
+static char *
+test_data_with (const char *name, const char *match, const char *text)
+{
+  char path[1024];
+  char *data, *out, *start, *end;
+  long size;
+  FILE *fp;
+  if (!find_test_data (name, path, sizeof (path))
+      || !(fp = fopen (path, "rb")))
+    {
+      fail ("test-data/%s not found", name);
+      return NULL;
+    }
+  fseek (fp, 0, SEEK_END);
+  size = ftell (fp);
+  fseek (fp, 0, SEEK_SET);
+  data = size > 0 ? (char *)calloc (size + 1, 1) : NULL;
+  if (!data || fread (data, 1, size, fp) != (size_t)size)
+    {
+      fclose (fp);
+      free (data);
+      fail ("reading test-data/%s", name);
+      return NULL;
+    }
+  fclose (fp);
+  start = strstr (data, match);
+  end = start ? strpbrk (start, "\r\n") : NULL;
+  out = end ? (char *)malloc (size + strlen (text) + 1) : NULL;
+  if (!out)
+    {
+      free (data);
+      fail ("test-data/%s: no line \"%s\"", name, match);
+      return NULL;
+    }
+  memcpy (out, data, start - data);
+  strcpy (out + (start - data), text);
+  strcat (out, end);
+  free (data);
+  return out;
+}
+
+/* An imported MTEXT renders as UTF-8 through dwg_data_to_svg: the import
+   keeps an r2007+ DXF's text in UTF-8, and an older DXF's in its codepage,
+   which the renderer converts. The public examples' MTEXT gets made-up
+   text in each file's encoding. */
+static void
+test_mtext_svg (void)
+{
+  static const struct
+  {
+    const char *name, *text, *what;
+  } cases[] = {
+    { "example_2004.dxf", "caf\xE9 30\xB0", "r2004 DXF, ANSI_1252" },
+    { "example_2007.dxf", "caf\xC3\xA9 30\xC2\xB0", "r2007 DXF, UTF-8" },
+  };
+  static const char expected[] = ">caf\xC3\xA9 30\xC2\xB0</text>";
+  const char *file = "indxf_test_mtext_svg.dxf";
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      Dwg_Data dwg;
+      char *svg = NULL;
+      size_t len = 0;
+      int error;
+      char *dxf
+          = test_data_with (cases[i].name, "Teksto granda", cases[i].text);
+      if (!dxf)
+        continue;
+      error = import_dxf (file, dxf, &dwg);
+      free (dxf);
+      if (error >= DWG_ERR_CRITICAL)
+        {
+          dwg_free (&dwg);
+          continue;
+        }
+      error = dwg_data_to_svg (&dwg, &svg, &len, 1);
+      loglevel = test_loglevel;
+      if (error || !svg)
+        fail ("%s: dwg_data_to_svg error %d", cases[i].what, error);
+      else if (!strstr (svg, expected))
+        fail ("%s: no MTEXT \"caf\xC3\xA9 30\xC2\xB0\" in the SVG",
+              cases[i].what);
+      else
+        ok ("%s: MTEXT \"caf\xC3\xA9 30\xC2\xB0\"", cases[i].what);
+      if (svg)
+        dwg_free_svg (svg);
+      dwg_free (&dwg);
+    }
   if (!numfailed ())
     unlink (file);
 }
@@ -349,6 +445,7 @@ main (void)
 #ifndef DISABLE_DXF
   test_r12_block_xref_pname ();
   test_mtext_46 ();
+  test_mtext_svg ();
   test_light_r2000_color ();
   test_tablestyle_cellstyles ();
 #else
