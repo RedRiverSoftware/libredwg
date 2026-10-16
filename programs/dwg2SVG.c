@@ -1221,9 +1221,9 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
         c = (uint16_t)(c << 8 | *s++);
       /* dwg_codepage_uwc () asserts for these two, which have no table. */
       if (cp == CP_ISO_8859_1)
-        wc = c;
+        wc = (wchar_t)c;
       else if (cp == CP_US_ASCII)
-        wc = c < 0x80 ? c : 0;
+        wc = (wchar_t)(c < 0x80 ? c : 0);
       else
         wc = dwg_codepage_uwc (cp, c);
       mtext_buf_append_codepoint (&b, wc ? (unsigned int)wc : 0xFFFD);
