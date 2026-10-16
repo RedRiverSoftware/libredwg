@@ -642,6 +642,7 @@ free_TABLESTYLE_r2010 (Bit_Chain *restrict dat, Dwg_Object *restrict obj)
               SUB_FIELD_CMTC (rowstyles[i].borders[j], color, 0);
             }
         FREE_IF (_obj->rowstyles[i].borders);
+        SUB_FIELD_TU (rowstyles[i], format_string, 1); // from the DXF importer
         // rowstyles[0].text_style, text_color and fill_color might be shallow
         // copies of the cellstyle content_format/bg_color made by
         // downconvert_TABLESTYLE. They are owned and freed via the spec free
@@ -1272,6 +1273,10 @@ dwg_free_object (Dwg_Object *obj)
             dwg_free_UNKNOWN_ENT (dat, obj);
           else if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ)
             dwg_free_UNKNOWN_OBJ (dat, obj);
+          // The DXF and JSON importers also create objects of the classes
+          // handled only with DEBUG_CLASSES, by name: free by fixedtype.
+          else
+            dwg_free_variable_no_class (obj->parent, obj);
         }
     }
   /* With indxf the dxfname is dynamic, just the name is const */

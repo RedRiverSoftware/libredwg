@@ -103,16 +103,6 @@ help (void)
   return 0;
 }
 
-// lsan/valgrind leaks still TODO. GH #151
-#if defined __SANITIZE_ADDRESS__ || __has_feature(address_sanitizer)
-const char *__asan_default_options (void);
-const char *
-__asan_default_options (void)
-{
-  return "detect_leaks=0";
-}
-#endif
-
 #ifdef __AFL_COMPILER
 __AFL_FUZZ_INIT ();
 // fastest mode via shared mem

@@ -4,7 +4,6 @@ abs_builddir="@abs_builddir@"
 top_builddir="@top_builddir@"
 EXEEXT="@EXEEXT@"
 TESTS_ENVIRONMENT="@AM_TESTS_ENVIRONMENT@"
-HAVE_ASAN="@HAVE_ASAN@"
 DISABLE_DXF="@DISABLE_DXF@"
 DISABLE_JSON="@DISABLE_JSON@"
 HAVE_ODA="@HAVE_ODA@"
@@ -72,13 +71,7 @@ dwgaddtest() {
             ret=$?
         fi
     else
-        #PRE=
-        #if test "$V" = "r1.4" -a -n $HAVE_ASAN
-        #then
-        #   PRE="env ASAN_OPTIONS=detect_leaks=0"
-        #fi
-        echo "$PRE" ./dwgadd --verify -a "$V" -o dwgadd_test.dwg "$FEX"
-        # shellcheck disable=SC2086
+        echo ./dwgadd --verify -a "$V" -o dwgadd_test.dwg "$FEX"
         $TESTPROG "${abs_builddir}/dwgadd${EXEEXT}" --verify \
                        -a "$V" -o dwgadd_test.dwg "$FEX"
         ret=$?
@@ -107,6 +100,20 @@ dwgaddtest() {
         echo PASS
     else
         echo FAIL "$ver != $MG"
+        exit 1
+    fi
+}
+
+# Runs a program from ../programs. A non-zero exit, such as a crash or a
+# sanitizer report, fails the test.
+runprog() {
+    prog="$1"
+    shift
+    echo ../programs/"$prog" "$@"
+    $TESTPROG "${abs_builddir}/../programs/$prog${EXEEXT}" "$@"
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        echo "FAIL: $prog exited with $ret"
         exit 1
     fi
 }
@@ -175,42 +182,25 @@ cat $tmp
 dwgaddtest AC1015 r2000 $tmp
 
 if [ -z "$DISABLE_DXF" ]; then
-    cd "$abs_builddir"/.. || exit 1
-    rm -f examples/dwgadd_test.dxf
-    ./dxf -o examples/dwgadd_test.dxf examples/dwgadd_test.dwg
-    rm -f -- ./dwgadd_test_examples.log
-    cd "$abs_builddir" || exit 1
+    rm -f dwgadd_test.dxf
+    runprog dwg2dxf -y -o dwgadd_test.dxf dwgadd_test.dwg
     if [ ! -f dwgadd_test.dxf ]; then
-        echo "FAIL: dxf did not convert dwgadd_test.dwg"
+        echo "FAIL: dwg2dxf did not convert dwgadd_test.dwg"
         exit 1
     fi
     echo "readdxf \"dwgadd_test.dxf\"" >$tmp
     echo "point (10 0 0)" >>$tmp
     cat $tmp
-    if [ "$HAVE_ASAN" = "yes" ]
-    then
-        # indxf still leaks, GH #151. env cannot run the dwgaddtest function,
-        # so set ASAN_OPTIONS in a subshell, which dwgaddtest's exit 1 leaves.
-        ( ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0"
-          export ASAN_OPTIONS
-          dwgaddtest AC1015 r2000 $tmp ) || exit 1
-    else
-        dwgaddtest AC1015 r2000 $tmp
-    fi
+    dwgaddtest AC1015 r2000 $tmp
 fi
 
 if [ -z "$DISABLE_DXF" ] && [ -z "$DISABLE_JSON" ]; then
-    cd "$abs_builddir"/.. || exit 1
-    cp examples/dwgadd_test.dwg .
-    rm -f dwgadd_test.json examples/dwgadd_test.json
-    ./json dwgadd_test.dwg
+    rm -f dwgadd_test.json
+    runprog dwgread -o dwgadd_test.json dwgadd_test.dwg
     if [ ! -f dwgadd_test.json ]; then
-        echo "FAIL: json did not convert dwgadd_test.dwg"
+        echo "FAIL: dwgread did not convert dwgadd_test.dwg"
         exit 1
     fi
-    mv dwgadd_test.json examples/
-    rm -f dwgadd_test.dwg dwgadd_test.log
-    cd "$abs_builddir" || exit 1
     echo "readjson \"dwgadd_test.json\"" >$tmp
     echo "point (20 0 0)" >>$tmp
     cat $tmp
