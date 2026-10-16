@@ -4547,6 +4547,56 @@ test_moved_parameters (Dwg_Data *src)
             failures++;
           }
       }
+      // centred and given a width of 2, its ATTRIB is aligned where the
+      // evaluation moved the ATTDEF's alignment point, and starts half the
+      // width at height 2.5 back from it
+      attdef->horiz_alignment = 1;
+      attdef->alignment_pt.x = attdef_pt.x;
+      attdef->alignment_pt.y = attdef_pt.y;
+      {
+        const BITCODE_3BD base = block_header (dst, def_h)->base_pt;
+        const double ax = at.x + attdef_pt.x - 12.0 - base.x;
+        const double ay = at.y + attdef_pt.y - base.y;
+        const Dwg_Object *attrib;
+        const Dwg_Entity_ATTRIB *_attrib;
+        Dwg_AttValue a;
+        memset (&a, 0, sizeof (a));
+        a.tag = (char *)"MARK";
+        a.value = (char *)"MM";
+        a.width = 2.0;
+        loglevel = tracelevel;
+        insert = dwg_dynblock_insert (model_space (dst),
+                                      block_header (dst, def_h), &at, 1.0,
+                                      0.0, &v, 1, &a, 1, &error);
+        loglevel = test_loglevel;
+        attrib = insert && insert->num_owned
+                     ? object (dst, ref (insert->attribs[0]))
+                     : NULL;
+        _attrib = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+                      ? attrib->tio.entity->tio.ATTRIB
+                      : NULL;
+        if (_attrib && !error
+            && fabs (_attrib->alignment_pt.x - ax) <= RECORD_TOLERANCE
+            && fabs (_attrib->alignment_pt.y - ay) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.x - (ax - 2.5)) <= RECORD_TOLERANCE
+            && fabs (_attrib->ins_pt.y - ay) <= RECORD_TOLERANCE)
+          OK ("moved parameters: a centred ATTRIB with a width starts back "
+              "from where the evaluation moved its alignment point");
+        else
+          {
+            FAIL ("moved parameters: the centred ATTRIB at (%g, %g) "
+                  "aligned at (%g, %g), expected (%g, %g) aligned at (%g, "
+                  "%g): 0x%x",
+                  _attrib ? _attrib->ins_pt.x : 0.0,
+                  _attrib ? _attrib->ins_pt.y : 0.0,
+                  _attrib ? _attrib->alignment_pt.x : 0.0,
+                  _attrib ? _attrib->alignment_pt.y : 0.0, ax - 2.5, ay, ax,
+                  ay, error);
+            failures++;
+          }
+      }
+      attdef->horiz_alignment = 0;
+      attdef->alignment_pt.x = attdef->alignment_pt.y = 0.0;
       // at a scale of 1e300, the ATTDEF's own place is held, and one moved
       // 1e10 to the right isn't, with Window Width's value set made to
       // allow that value
