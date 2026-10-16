@@ -3471,10 +3471,10 @@ check_inserts (const char *what, const Dwg_Data *dwg, const BITCODE_BL first)
    both allowed for. The encoder also takes its 8-bit strings to be UTF-8,
    as the add API makes them, and converts them to the codepage
    (bit_utf8_to_TV ()), while a copy holds its source's codepage bytes. A
-   byte from 0x80 to 0xBF, or from 0xF0 up, doesn't start a UTF-8 sequence
-   and is dropped: "Open 30\xBA" (0xBA is the masculine ordinal in codepage
-   1252) reads back as "Open 30". A byte from 0xC0 to 0xEF starts one,
-   takes the bytes after it along, and changes more than itself. Until the
+   byte that isn't part of a UTF-8 sequence is kept, so "Open 30\xBA" (0xBA
+   is the masculine ordinal in codepage 1252) reads back as it was, but
+   codepage bytes that happen to form one, such as 0xC3 0xA9, become a
+   single character. Until the
    copy converts its strings (runbook task P3-06, which makes these strict
    checks again), compare_string () reports a string that lost only its
    bytes from 0x80 up as TODO, and fails any other difference. */

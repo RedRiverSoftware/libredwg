@@ -287,12 +287,20 @@ EXPORT char *bit_TU_to_utf8_len (const BITCODE_TU restrict wstr,
 /** Converts UTF-8 (dxf,json) to ASCII TV.
     \uxxxx or other unicode => \U+XXXX if not representable in this codepage.
     If cquoted unquotes \" to ", undo json_cquote(),
+    Bytes that are not UTF-8 are kept as they are.
     Returns NULL if not enough room in dest. */
 EXPORT char *bit_utf8_to_TV (char *restrict dest,
                              const unsigned char *restrict src,
                              const size_t destlen, const size_t srclen,
                              const unsigned cquoted,
                              const BITCODE_RS codepage);
+/** bit_utf8_to_TV () into a buffer of the size it needs at most.
+    Returns NULL on error. Caller frees. */
+EXPORT char *bit_utf8_to_TV_alloc (const char *restrict src,
+                                   const size_t srclen,
+                                   const unsigned cquoted,
+                                   const BITCODE_RS codepage)
+    ATTRIBUTE_MALLOC;
 /** converts old codepage'd strings to UTF-8.
     convert \U+XXXX or \MnXXXX also if representable.
     returns NULL on errors, or the unchanged src string, or a copy.

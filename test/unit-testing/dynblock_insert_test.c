@@ -56,6 +56,7 @@ static int test_loglevel;
 #define FIXTURE "test/test-data/2004/Dynblocks.dwg"
 #define WRITTEN "dynblock_insert_test.dwg"
 #define WRITTEN_ATTRIBS "dynblock_insert_test_attribs.dwg"
+#define WRITTEN_NON_ASCII "dynblock_insert_test_non_ascii.dwg"
 #define WRITTEN_BLOCK "dynblock_insert_test_block.dwg"
 #define WRITTEN_SORT "dynblock_insert_test_sort.dwg"
 #define WRITTEN_MINSERT "dynblock_insert_test_minsert.dwg"
@@ -2140,6 +2141,96 @@ test_attributes (Dwg_Data *src)
   return failures;
 }
 
+/* Attribute values given in UTF-8 with characters outside ASCII, one ending
+   in a character whose codepage 1252 byte, 0xE9, starts a 3-byte UTF-8
+   sequence. The document built with the add API keeps them in UTF-8, and
+   the r2004 file written holds them in codepage 1252. */
+static int
+test_attributes_non_ascii (Dwg_Data *src)
+{
+  BITCODE_RLL def_h = 0;
+  Dwg_Data *dst = document_with (src, TREES, &def_h);
+  Dwg_Object_BLOCK_HEADER *def;
+  const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 };
+  Dwg_Entity_ATTDEF *cable, *note;
+  const BITCODE_3BD at = { 10.0, 20.0, 0.0 };
+  const Dwg_AttValue given[]
+      = { { (char *)"CABLE", (char *)"10 mm\xC2\xB2 caf\xC3\xA9" },
+          { (char *)"NOTE", (char *)"30\xC2\xB0 Stra\xC3\x9F"
+                                    "e \xE2\x82\xAC 5" } };
+  const Expected_Attrib utf8[]
+      = { { "CABLE", "10 mm\xC2\xB2 caf\xC3\xA9" },
+          { "NOTE", "30\xC2\xB0 Stra\xC3\x9F"
+                    "e \xE2\x82\xAC 5" } };
+  const Expected_Attrib cp1252[] = { { "CABLE", "10 mm\xB2 caf\xE9" },
+                                     { "NOTE", "30\xB0 Stra\xDF"
+                                               "e \x80 5" } };
+  Dwg_Entity_INSERT *ins;
+  BITCODE_RLL h;
+  Dwg_Data readback;
+  int failures = 0, error = 0;
+
+  if (!dst)
+    {
+      FAIL ("non-ASCII attributes: copying Trees failed");
+      return 1;
+    }
+  def = block_header (dst, def_h);
+  if (!(cable = dwg_add_ATTDEF (def, 2.5, 0, "Cable", &p1, "CABLE", "#"))
+      || !(note = dwg_add_ATTDEF (def, 2.5, 0, "Note", &p2, "NOTE", "-")))
+    {
+      FAIL ("non-ASCII attributes: adding the definitions failed");
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  // the add API leaves the width factor 0
+  cable->width_factor = note->width_factor = 1.0;
+
+  loglevel = tracelevel;
+  ins = dwg_dynblock_insert (model_space (dst), def, &at, 1.0, 0.0, NULL, 0,
+                             given, 2, &error);
+  loglevel = test_loglevel;
+  if (!ins || error)
+    {
+      FAIL ("non-ASCII attributes: placing failed: 0x%x", error);
+      free_dwg (dst);
+      free (dst);
+      return 1;
+    }
+  h = handle_of (dst, ins);
+  failures += check_attribs ("non-ASCII attributes, in UTF-8", dst, h, def_h,
+                             &at, 1.0, 0.0, utf8, 2, 1);
+
+  error = write_dwg (WRITTEN_NON_ASCII, dst);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_NON_ASCII, &readback);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("non-ASCII attributes: write or read back 0x%x", error);
+      failures++;
+    }
+  else
+    {
+      if (readback.header.codepage != CP_ANSI_1252)
+        {
+          FAIL ("non-ASCII attributes: read back with codepage %u",
+                (unsigned)readback.header.codepage);
+          failures++;
+        }
+      failures += check_attribs ("read back non-ASCII attributes, in "
+                                 "codepage 1252",
+                                 &readback, h, def_h, &at, 1.0, 0.0, cp1252,
+                                 2, 1);
+      free_dwg (&readback);
+    }
+  if (!failures)
+    unlink (WRITTEN_NON_ASCII);
+  free_dwg (dst);
+  free (dst);
+  return failures;
+}
+
 /* An IMAGE in a definition: its copy in the representation block gets an
    image definition reactor of its own, which the image definition lists,
    while the definition's IMAGE keeps its own. */
@@ -3188,6 +3279,7 @@ main (int argc, char *argv[])
   failures += test_placements (&src);
   failures += test_refusals (&src);
   failures += test_attributes (&src);
+  failures += test_attributes_non_ascii (&src);
   failures += test_image_reactors (&src);
   failures += test_sortents_entries (&src);
   failures += test_sortents_order (&src);
