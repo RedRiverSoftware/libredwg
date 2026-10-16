@@ -3623,10 +3623,13 @@ is_eed_string (const Dwg_Eed_Data *data, const char *text)
      leaves that item without data and skips the rest of the group;
    - a group whose later item is a string that claims more bytes than are
      left in the group: it leaves the string unread, and skips the items
-     after it.
+     after it;
+   - a group whose last item is a string that claims one byte more than
+     the group has left: left unread too, and the next group is read from
+     the group's end.
    What the items don't hold is only in the groups' raw bytes, so the copy
-   leaves both groups out, with DWG_ERR_INVALIDEED. The group before them,
-   which the decoder read whole, is copied. */
+   leaves these groups out, with DWG_ERR_INVALIDEED. The groups before and
+   after them, which the decoder read whole, are copied. */
 static int
 test_eed_partly_decoded (void)
 {
@@ -3637,24 +3640,24 @@ test_eed_partly_decoded (void)
   const BITCODE_RL long_value = 0x5A17C0DE;
   const unsigned char long_item[] = { 71, 0xDE, 0xC0, 0x17, 0x5A };
   const unsigned char unknown_code = 99;
-  unsigned char string_item[32];
-  size_t string_item_len = 0, size = 0;
+  unsigned char string_item[32], last_item[32];
+  size_t string_item_len = 0, last_item_len = 0, size = 0;
   unsigned char *bytes = NULL;
   const dwg_point_3d p0 = { 0.0, 0.0, 0.0 }, p1 = { 10.0, 0.0, 0.0 },
-                     p2 = { 0.0, 10.0, 0.0 };
+                     p2 = { 0.0, 10.0, 0.0 }, p3 = { 10.0, 10.0, 0.0 };
   Dwg_Data *src = dwg_new_Document (R_2000, 0, tracelevel);
   Dwg_Data *dst = NULL;
   Dwg_Data drawn;
   const Dwg_Object *mspace = src ? dwg_model_space_object (src) : NULL;
   Dwg_Object_APPID *appid1 = src ? dwg_add_APPID (src, "COPY_TEST") : NULL;
   Dwg_Object_APPID *appid2 = src ? dwg_add_APPID (src, "COPY_TEST_2") : NULL;
-  Dwg_Entity_LINE *line1 = NULL, *line2 = NULL;
+  Dwg_Entity_LINE *line1 = NULL, *line2 = NULL, *line3 = NULL;
   Dwg_Copy_Map *map = dwg_copy_map_new ();
   Dwg_Copy_Unresolved *unresolved = NULL;
-  BITCODE_BL num_unresolved = 0, num_eed1, num_eed2;
-  BITCODE_RLL handles[2];
-  const Dwg_Object *o1, *o2, *copy1, *copy2;
-  const Dwg_Eed *eed1, *eed2;
+  BITCODE_BL num_unresolved = 0, num_eed1, num_eed2, num_eed3;
+  BITCODE_RLL handles[3];
+  const Dwg_Object *o1, *o2, *o3, *copy1, *copy2, *copy3;
+  const Dwg_Eed *eed1, *eed2, *eed3;
   int error, made = 0;
 
   failed = 0;
@@ -3663,16 +3666,19 @@ test_eed_partly_decoded (void)
     {
       line1 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p1);
       line2 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p2);
+      line3 = dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p0, &p3);
     }
-  if (appid1 && appid2 && line1 && line2 && map)
+  if (appid1 && appid2 && line1 && line2 && line3 && map)
     {
       const BITCODE_RLL a1 = src->object[appid1->parent->objid].handle.value;
       const BITCODE_RLL a2 = src->object[appid2->parent->objid].handle.value;
       const BITCODE_RS cp = src->header.codepage;
       Dwg_Object_Entity *ent1 = src->object[line1->parent->objid].tio.entity;
       Dwg_Object_Entity *ent2 = src->object[line2->parent->objid].tio.entity;
+      Dwg_Object_Entity *ent3 = src->object[line3->parent->objid].tio.entity;
       handles[0] = src->object[line1->parent->objid].handle.value;
       handles[1] = src->object[line2->parent->objid].handle.value;
+      handles[2] = src->object[line3->parent->objid].handle.value;
       made = append_eed (ent1, a1, 1, new_eed_string ("kept group", cp))
              && append_eed (ent1, a1, 0, new_eed_real (1.5))
              && append_eed (ent1, a2, 1, new_eed_string ("read in part", cp))
@@ -3680,18 +3686,26 @@ test_eed_partly_decoded (void)
              && append_eed (ent1, a2, 0, new_eed_real (2.5))
              && append_eed (ent2, a1, 1, new_eed_string ("first string", cp))
              && append_eed (ent2, a1, 0, new_eed_string ("unread string", cp))
-             && append_eed (ent2, a1, 0, new_eed_real (4.25));
+             && append_eed (ent2, a1, 0, new_eed_real (4.25))
+             && append_eed (ent3, a1, 1, new_eed_string ("first", cp))
+             && append_eed (ent3, a1, 0, new_eed_string ("last string", cp))
+             && append_eed (ent3, a2, 1, new_eed_string ("next group", cp))
+             && append_eed (ent3, a2, 0, new_eed_real (8.5));
       string_item_len = eed_string_item (string_item, sizeof (string_item),
                                          "unread string", cp);
+      last_item_len = eed_string_item (last_item, sizeof (last_item),
+                                       "last string", cp);
     }
   if (made && write_dwg (written, src) < DWG_ERR_CRITICAL)
     bytes = read_file_bytes (written, &size);
-  // the long's code becomes one the decoder doesn't know, and the second
-  // string's length 255
-  made = bytes && string_item_len
+  // the long's code becomes one the decoder doesn't know, the second
+  // string's length 255, and the last string's one more than it has
+  made = bytes && string_item_len && last_item_len
          && patch_at_bit (bytes, size, long_item, sizeof (long_item), 0,
                           unknown_code)
          && patch_at_bit (bytes, size, string_item, string_item_len, 1, 0xFF)
+         && patch_at_bit (bytes, size, last_item, last_item_len, 1,
+                          (unsigned char)(last_item[1] + 1))
          && write_file_bytes (changed, bytes, size);
   free (bytes);
   if (made)
@@ -3705,20 +3719,29 @@ test_eed_partly_decoded (void)
   // the decoder reads them as the test expects
   o1 = dwg_resolve_handle (&drawn, handles[0]);
   o2 = dwg_resolve_handle (&drawn, handles[1]);
+  o3 = dwg_resolve_handle (&drawn, handles[2]);
   eed1 = o1 ? object_eed (o1, &num_eed1) : NULL;
   eed2 = o2 ? object_eed (o2, &num_eed2) : NULL;
+  eed3 = o3 ? object_eed (o3, &num_eed3) : NULL;
   if (!eed1 || num_eed1 != 4 || !is_eed_string (eed1[0].data, "kept group")
       || !eed1[2].size || !is_eed_string (eed1[2].data, "read in part")
       || eed1[3].size || eed1[3].data || !eed2 || num_eed2 != 2
       || !is_eed_string (eed2[0].data, "first string") || eed2[1].size
       || !eed2[1].data || eed2[1].data->code != 0
       || eed2[1].data->u.eed_0.length != 255
-      || eed2[1].data->u.eed_0.string[0])
+      || eed2[1].data->u.eed_0.string[0] || !eed3 || num_eed3 != 4
+      || !is_eed_string (eed3[0].data, "first") || eed3[1].size
+      || !eed3[1].data || eed3[1].data->code != 0
+      || eed3[1].data->u.eed_0.length != last_item[1] + 1
+      || eed3[1].data->u.eed_0.string[0] || !eed3[2].size
+      || !is_eed_string (eed3[2].data, "next group") || eed3[3].size
+      || !eed3[3].data || eed3[3].data->code != 40
+      || eed3[3].data->u.eed_40.real != 8.5)
     {
-      FAIL ("%s: the changed EED isn't read as the test expects: %u and %u "
-            "items",
+      FAIL ("%s: the changed EED isn't read as the test expects: %u, %u and "
+            "%u items",
             what, eed1 ? (unsigned)num_eed1 : 0,
-            eed2 ? (unsigned)num_eed2 : 0);
+            eed2 ? (unsigned)num_eed2 : 0, eed3 ? (unsigned)num_eed3 : 0);
       goto cleanup;
     }
 
@@ -3729,22 +3752,30 @@ test_eed_partly_decoded (void)
       goto cleanup;
     }
   loglevel = tracelevel;
-  error = dwg_copy_objects (dst, &drawn, handles, 2, map, &unresolved,
+  error = dwg_copy_objects (dst, &drawn, handles, 3, map, &unresolved,
                             &num_unresolved);
   copy1 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[0]));
   copy2 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[1]));
+  copy3 = dwg_resolve_handle (dst, dwg_copy_map_get (map, handles[2]));
   eed1 = copy1 ? object_eed (copy1, &num_eed1) : NULL;
   eed2 = copy2 ? object_eed (copy2, &num_eed2) : NULL;
+  eed3 = copy3 ? object_eed (copy3, &num_eed3) : NULL;
   if (error == DWG_ERR_INVALIDEED && eed1 && num_eed1 == 2 && eed1[0].size
       && is_eed_string (eed1[0].data, "kept group") && !eed1[1].size
       && eed1[1].data && eed1[1].data->code == 40
-      && eed1[1].data->u.eed_40.real == 1.5 && copy2 && !eed2 && !num_eed2)
-    OK ("%s: both groups left out, the one read whole copied (error 0x%x)",
+      && eed1[1].data->u.eed_40.real == 1.5 && copy2 && !eed2 && !num_eed2
+      && eed3 && num_eed3 == 2 && eed3[0].size
+      && is_eed_string (eed3[0].data, "next group") && !eed3[1].size
+      && eed3[1].data && eed3[1].data->code == 40
+      && eed3[1].data->u.eed_40.real == 8.5)
+    OK ("%s: the three groups left out, the two read whole copied (error "
+        "0x%x)",
         what, (unsigned)error);
   else
-    FAIL ("%s: error 0x%x, %u and %u EED items copied, expected 2 and 0", what,
-          (unsigned)error, eed1 ? (unsigned)num_eed1 : 0,
-          eed2 ? (unsigned)num_eed2 : 0);
+    FAIL ("%s: error 0x%x, %u, %u and %u EED items copied, expected 2, 0 "
+          "and 2",
+          what, (unsigned)error, eed1 ? (unsigned)num_eed1 : 0,
+          eed2 ? (unsigned)num_eed2 : 0, eed3 ? (unsigned)num_eed3 : 0);
 
 cleanup:
   free_dwg (&drawn);

@@ -6523,10 +6523,10 @@ dwg_encode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
                 }
               dest = bit_embed_TU_size (s, length);
               bit_write_RC (dat, length);
-              bit_write_RS (dat, dat->codepage);
+              bit_write_RS_BE (dat, dat->codepage);
               bit_write_TF (dat, (unsigned char *)dest, length);
               LOG_TRACE ("string: len=" FORMAT_RS " [RC] cp=" FORMAT_RS
-                         " [RS] \"%s\" [TF]",
+                         " [RS_BE] \"%s\" [TF]",
                          length, dat->codepage, dest);
               free (dest);
             }
@@ -6622,8 +6622,9 @@ dwg_encode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
       }
       LATER_VERSIONS
       {
-        bit_write_RLL (dat, data->u.eed_3.layer);
-        LOG_TRACE ("layer: " FORMAT_RLL " [RLL]", data->u.eed_3.layer);
+        // the layer's handle, big-endian as 1005's
+        bit_write_RLL_BE (dat, data->u.eed_3.layer);
+        LOG_TRACE ("layer: " FORMAT_HV " [RLL_BE]", data->u.eed_3.layer);
       }
       break;
     case 4:

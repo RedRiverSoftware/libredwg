@@ -221,4 +221,15 @@ if(NOT LIBREDWG_DISABLE_WRITE)
     set_tests_properties(copy_test PROPERTIES
       ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
   endif()
+  add_executable(eed_test
+    eed_test.c
+    ../../src/logging.c
+    ../../src/classes.c
+    tests_common.h)
+  if(NOT MSVC)
+    add_test(eed_test ${TARGET_SYSTEM_EMULATOR} eed_test${CMAKE_EXECUTABLE_SUFFIX})
+    # where the test finds test/test-data
+    set_tests_properties(eed_test PROPERTIES
+      ENVIRONMENT "top_srcdir=${CMAKE_CURRENT_SOURCE_DIR}/../..")
+  endif()
 endif(NOT LIBREDWG_DISABLE_WRITE)

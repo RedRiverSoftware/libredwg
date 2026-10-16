@@ -3523,6 +3523,360 @@ test_block_control_refresh (const Dwg_Version_Type version)
   return numfailed ();
 }
 
+/* A soft pointer that dwg_add_handle () and dwg_add_handleref () store
+   relative to its holder's handle, with codes 6, 8, 0xA or 0xC, when the
+   handles are 2^31 and more or further apart than that: it resolves to its
+   target. A target 2^32 away from the holder is not the holder itself. */
+static int
+test_add_handle_high (void)
+{
+  const struct
+  {
+    BITCODE_RLL holder, target;
+    BITCODE_RC code;
+    BITCODE_RLL value;
+  } cases[] = {
+    { 0x100000000ULL, 1, 12, 0xFFFFFFFFULL },
+    { 1, 0x80000001ULL, 10, 0x80000000ULL },
+    { 0x80000001ULL, 1, 12, 0x80000000ULL },
+    { 0x7FFFFFFFULL, 0x80000000ULL, 6, 0 },
+    { 0x80000000ULL, 0x7FFFFFFFULL, 8, 0 },
+    { 0x200000005ULL, 0x200000003ULL, 12, 2 },
+    { 0x10, 0x100000010ULL, 10, 0x100000000ULL },
+    { 2, 0xFFFFFFFFFFFFFFFFULL, 10, 0xFFFFFFFFFFFFFFFDULL },
+    { 0xFFFFFFFFFFFFFFFFULL, 1, 12, 0xFFFFFFFFFFFFFFFEULL },
+  };
+  const dwg_point_3d p1 = { 0.0, 0.0, 0.0 };
+  const dwg_point_3d p2 = { 1.0, 1.0, 0.0 };
+  Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+  Dwg_Object *mspace = dwg ? dwg_model_space_object (dwg) : NULL;
+  Dwg_Entity_LINE *line
+      = mspace ? dwg_add_LINE (mspace->tio.object->tio.BLOCK_HEADER, &p1, &p2)
+               : NULL;
+  Dwg_Object *obj;
+  Dwg_Handle saved;
+
+  failed = 0;
+  if (!line)
+    {
+      fail ("add_handle: no LINE added");
+      if (dwg)
+        {
+          dwg_free (dwg);
+          free (dwg);
+        }
+      return numfailed ();
+    }
+  obj = &dwg->object[line->parent->objid];
+  saved = obj->handle;
+  for (int i = 0; i < ARRAY_SIZE (cases); i++)
+    {
+      Dwg_Handle hdl = { 0 };
+      Dwg_Object_Ref ref = { 0 };
+      Dwg_Object_Ref *added;
+      obj->handle.value = cases[i].holder;
+      dwg_add_handle (&hdl, 4, cases[i].target, obj);
+      ref.handleref = hdl;
+      dwg_resolve_handleref (&ref, obj);
+      added = dwg_add_handleref (dwg, 4, cases[i].target, obj);
+      if (hdl.code == cases[i].code && hdl.value == cases[i].value
+          && ref.absolute_ref == cases[i].target && added
+          && added->handleref.code == cases[i].code
+          && added->handleref.value == cases[i].value
+          && added->absolute_ref == cases[i].target)
+        ok ("add_handle: " FORMAT_RLLx " from " FORMAT_RLLx
+            " as %u." FORMAT_RLLx,
+            cases[i].target, cases[i].holder, (unsigned)hdl.code, hdl.value);
+      else
+        fail ("add_handle: " FORMAT_RLLx " from " FORMAT_RLLx
+              " as %u." FORMAT_RLLx ", resolving to " FORMAT_RLLx
+              ", expected %u." FORMAT_RLLx,
+              cases[i].target, cases[i].holder, (unsigned)hdl.code, hdl.value,
+              ref.absolute_ref, (unsigned)cases[i].code, cases[i].value);
+    }
+  // no object has the handle 0x100000010, though the LINE had 0x10
+  if (dwg_resolve_handle (dwg, 0x100000010ULL))
+    fail ("add_handle: 100000010 resolves to an object");
+  else
+    ok ("add_handle: 100000010 resolves to no object");
+  obj->handle = saved;
+  dwg_free (dwg);
+  free (dwg);
+  return numfailed ();
+}
+
+#ifndef DISABLE_DXF
+/* A DXF export leaves an entity's version 2 (SAB) ACIS data as it is: the
+   DXF gets SAT version 1, converted into blocks of its own. A DWG written
+   after the export has the same SAB. example_2004.dwg has three such
+   entities. */
+static int
+test_dxf_keeps_sab (void)
+{
+  const char *name = "example_2004.dwg";
+  const char *dxffile = "add_sab_export.dxf";
+  const char *dwgfile = "add_sab_export.dwg";
+  // each entity's ACIS data in the DXF, its first line
+  const char *sat1 = "AcDbModelerGeometry\r\n 70\r\n     1\r\n  1\r\n";
+  enum
+  {
+    MAX_SAB = 8
+  };
+  BITCODE_RLL handles[MAX_SAB];
+  BITCODE_BL sizes[MAX_SAB];
+  unsigned char *sabs[MAX_SAB] = { NULL };
+  int num_sab = 0, in_dxf = 0;
+  char path[256];
+  Dwg_Data dwg, read;
+  Bit_Chain dat = { 0 };
+  int error;
+
+  failed = 0;
+  memset (&dwg, 0, sizeof (dwg));
+  memset (&read, 0, sizeof (read));
+  if (!test_data_file (name, path, sizeof (path)))
+    {
+      fail ("dxf_keeps_sab: %s not found", name);
+      return numfailed ();
+    }
+  dwg.opts = tracelevel;
+  error = dwg_read_file (path, &dwg);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: %s read error 0x%x", name, error);
+      goto cleanup;
+    }
+  for (BITCODE_BL i = 0; i < dwg.num_objects && num_sab < MAX_SAB; i++)
+    {
+      const Dwg_Object *obj = &dwg.object[i];
+      const Dwg_Entity_3DSOLID *_obj;
+      if (obj->fixedtype != DWG_TYPE__3DSOLID
+          && obj->fixedtype != DWG_TYPE_REGION
+          && obj->fixedtype != DWG_TYPE_BODY)
+        continue;
+      _obj = obj->tio.entity->tio._3DSOLID;
+      if (_obj->acis_empty || _obj->version != 2 || !_obj->acis_data
+          || !_obj->sab_size)
+        continue;
+      handles[num_sab] = obj->handle.value;
+      sizes[num_sab] = _obj->sab_size;
+      sabs[num_sab] = (unsigned char *)malloc (_obj->sab_size);
+      if (!sabs[num_sab])
+        break;
+      memcpy (sabs[num_sab], _obj->acis_data, _obj->sab_size);
+      num_sab++;
+    }
+  if (num_sab != 3)
+    {
+      fail ("dxf_keeps_sab: %s has %d SAB entities, expected 3", name,
+            num_sab);
+      goto cleanup;
+    }
+
+  dat.version = dat.from_version = dwg.header.version;
+  dat.codepage = dwg.header.codepage;
+  dat.opts = dwg.opts;
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    {
+      fail ("dxf_keeps_sab: cannot write %s", dxffile);
+      goto cleanup;
+    }
+  error = dwg_write_dxf (&dat, &dwg);
+  fclose (dat.fh);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: DXF write error 0x%x", error);
+      goto cleanup;
+    }
+  {
+    // the DXF has SAT version 1 for each of them
+    FILE *fp = fopen (dxffile, "rb");
+    long size = -1;
+    char *buf = NULL;
+    if (fp && !fseek (fp, 0, SEEK_END))
+      size = ftell (fp);
+    if (size > 0 && !fseek (fp, 0, SEEK_SET))
+      buf = (char *)calloc ((size_t)size + 1, 1);
+    if (buf && fread (buf, 1, (size_t)size, fp) == (size_t)size)
+      for (const char *p = strstr (buf, sat1); p; p = strstr (p + 1, sat1))
+        in_dxf++;
+    free (buf);
+    if (fp)
+      fclose (fp);
+  }
+  if (in_dxf == num_sab)
+    ok ("dxf_keeps_sab: %d entities with SAT version 1 in the DXF", in_dxf);
+  else
+    fail ("dxf_keeps_sab: %d entities with SAT version 1 in the DXF, "
+          "expected %d",
+          in_dxf, num_sab);
+
+  for (int k = 0; k < num_sab; k++)
+    {
+      const Dwg_Object *obj = dwg_resolve_handle (&dwg, handles[k]);
+      const Dwg_Entity_3DSOLID *_obj
+          = obj ? obj->tio.entity->tio._3DSOLID : NULL;
+      if (_obj && _obj->version == 2 && _obj->sab_size == sizes[k]
+          && !memcmp (_obj->acis_data, sabs[k], sizes[k])
+          && !_obj->encr_sat_data && !_obj->_dxf_sab_converted)
+        ok ("dxf_keeps_sab: %s " FORMAT_RLLx " keeps its SAB after the DXF "
+            "export",
+            obj->name, handles[k]);
+      else
+        fail ("dxf_keeps_sab: " FORMAT_RLLx " changed by the DXF export",
+              handles[k]);
+    }
+
+  unlink (dwgfile);
+  error = dwg_write_file (dwgfile, &dwg);
+  if (error < DWG_ERR_CRITICAL)
+    {
+      read.opts = tracelevel;
+      error = dwg_read_file (dwgfile, &read);
+    }
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      fail ("dxf_keeps_sab: DWG write or read back error 0x%x", error);
+      goto cleanup;
+    }
+  for (int k = 0; k < num_sab; k++)
+    {
+      const Dwg_Object *obj = dwg_resolve_handle (&read, handles[k]);
+      const Dwg_Entity_3DSOLID *_obj
+          = obj ? obj->tio.entity->tio._3DSOLID : NULL;
+      if (_obj && _obj->version == 2 && _obj->sab_size == sizes[k]
+          && !memcmp (_obj->acis_data, sabs[k], sizes[k]))
+        ok ("dxf_keeps_sab: " FORMAT_RLLx " written with its SAB",
+            handles[k]);
+      else
+        fail ("dxf_keeps_sab: " FORMAT_RLLx " written with other ACIS data",
+              handles[k]);
+    }
+
+cleanup:
+  for (int k = 0; k < num_sab; k++)
+    free (sabs[k]);
+  dwg_free (&read);
+  dwg_free (&dwg);
+  if (!numfailed ())
+    {
+      unlink (dxffile);
+      unlink (dwgfile);
+    }
+  return numfailed ();
+}
+
+/* SAB that the DXF writer can't convert, on a SAB entity of
+   example_2004.dwg: with no size, it isn't read at all, and the entity is
+   left as it is. And dwg_convert_SAB_to_SAT1 (), which converts in place,
+   leaves an entity as it is when the conversion gives no SAT at all, here
+   for an ident of length 0. */
+static int
+test_sab_not_converted (void)
+{
+  const char *name = "example_2004.dwg";
+  const char *dxffile = "add_sab_size_0.dxf";
+  // header, 3 empty strings, 3 doubles 1.0, then an ident of length 0
+  unsigned char sab[] = {
+    'A', 'C', 'I', 'S', ' ', 'B', 'i', 'n', 'a', 'r', 'y', 'F', 'i', 'l',
+    'e', 0x28, 0x55, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
+    7, 0, 7, 0, 7, 0,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    6, 0, 0, 0, 0, 0, 0, 0xF0, 0x3F,
+    13, 0
+  };
+  char path[256];
+  Dwg_Data dwg;
+  Dwg_Entity_3DSOLID *_obj = NULL;
+  Bit_Chain dat = { 0 };
+  BITCODE_RC *acis_data;
+  BITCODE_BL sab_size, block_size0;
+  BITCODE_BL *block_size;
+  int error;
+
+  failed = 0;
+  memset (&dwg, 0, sizeof (dwg));
+  if (!test_data_file (name, path, sizeof (path)))
+    {
+      fail ("sab_not_converted: %s not found", name);
+      return numfailed ();
+    }
+  dwg.opts = tracelevel;
+  error = dwg_read_file (path, &dwg);
+  for (BITCODE_BL i = 0;
+       error < DWG_ERR_CRITICAL && !_obj && i < dwg.num_objects; i++)
+    {
+      Dwg_Object *obj = &dwg.object[i];
+      if ((obj->fixedtype == DWG_TYPE__3DSOLID
+           || obj->fixedtype == DWG_TYPE_REGION
+           || obj->fixedtype == DWG_TYPE_BODY)
+          && obj->tio.entity->tio._3DSOLID->version == 2
+          && obj->tio.entity->tio._3DSOLID->block_size)
+        _obj = obj->tio.entity->tio._3DSOLID;
+    }
+  if (!_obj)
+    {
+      fail ("sab_not_converted: no SAB entity in %s, error 0x%x", name,
+            error);
+      dwg_free (&dwg);
+      return numfailed ();
+    }
+  acis_data = _obj->acis_data;
+  sab_size = _obj->sab_size;
+  block_size = _obj->block_size;
+  block_size0 = block_size[0];
+
+  // no size: not SAB the DXF writer can read
+  _obj->sab_size = 0;
+  _obj->block_size[0] = 0;
+  dat.version = dat.from_version = dwg.header.version;
+  dat.codepage = dwg.header.codepage;
+  dat.opts = dwg.opts;
+  dat.fh = fopen (dxffile, "wb");
+  if (!dat.fh)
+    fail ("sab_not_converted: cannot write %s", dxffile);
+  else
+    {
+      error = dwg_write_dxf (&dat, &dwg);
+      fclose (dat.fh);
+      if (error < DWG_ERR_CRITICAL && _obj->version == 2
+          && _obj->acis_data == acis_data && !_obj->sab_size
+          && _obj->block_size == block_size && !_obj->encr_sat_data)
+        ok ("sab_not_converted: SAB without a size not read, the entity "
+            "left as it is");
+      else
+        fail ("sab_not_converted: SAB without a size: error 0x%x, version "
+              "%u",
+              error, (unsigned)_obj->version);
+    }
+  _obj->sab_size = sab_size;
+  _obj->block_size[0] = block_size0;
+
+  // in place: no SAT from an ident of length 0
+  _obj->acis_data = sab;
+  _obj->sab_size = sizeof (sab);
+  error = dwg_convert_SAB_to_SAT1 (_obj);
+  if (!error && _obj->version == 2 && _obj->acis_data == sab
+      && _obj->sab_size == sizeof (sab) && _obj->block_size == block_size
+      && !_obj->encr_sat_data)
+    ok ("sab_not_converted: nothing converted in place, the entity left as "
+        "it is");
+  else
+    fail ("sab_not_converted: nothing converted in place: error %d, version "
+          "%u",
+          error, (unsigned)_obj->version);
+  _obj->acis_data = acis_data;
+  _obj->sab_size = sab_size;
+
+  dwg_free (&dwg);
+  if (!numfailed ())
+    unlink (dxffile);
+  return numfailed ();
+}
+#endif
+
 /* A layer's settings: frozen, off, frozen in new viewports, locked,
    plotted, and the lineweight index (31 Default, 11 0.50 mm, 0 0.00 mm). */
 typedef struct
@@ -3934,6 +4288,11 @@ main (int argc, char *argv[])
   error += test_non_ascii_text_r11 ();
   error += test_long_xrecord_string ();
   error += test_non_ascii_text_r2007 ();
+  error += test_add_handle_high ();
+#ifndef DISABLE_DXF
+  error += test_dxf_keeps_sab ();
+  error += test_sab_not_converted ();
+#endif
 
 #ifndef DISABLE_DXF
   for (; dxf < 2; dxf++)

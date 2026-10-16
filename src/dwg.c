@@ -2159,10 +2159,11 @@ EXPORT int
 dwg_add_handle (Dwg_Handle *restrict hdl, const BITCODE_RC code,
                 const BITCODE_RLL absref, const Dwg_Object *restrict obj)
 {
-  int offset = obj ? (absref - (int)obj->handle.value) : 0;
+  // read before hdl is set: hdl may be obj's own handle
+  const BITCODE_RLL holder = obj ? obj->handle.value : 0;
   hdl->code = code;
   hdl->value = absref;
-  if (obj && (code == 0 || !offset) && absref) // only if same obj
+  if (obj && (code == 0 || absref == holder) && absref) // only if same obj
     {
       Dwg_Data *dwg = obj->parent;
       uint64_t hashkey;
@@ -2185,39 +2186,23 @@ dwg_add_handle (Dwg_Handle *restrict hdl, const BITCODE_RC code,
     }
 
   dwg_set_handle_size (hdl);
-  if ((code == 4 || code > 5) && obj && absref)
+  // relative to the holder's handle: 6 the next one, 8 the one before, 10
+  // (0xA) and 12 (0xC) that plus or minus the value. The difference is
+  // taken in 64 bits, as handles are.
+  if ((code == 4 || code > 5) && obj && absref && absref != holder)
     {
-      // change code to 6.0.0 or 8.0.0
+      const BITCODE_RLL offset
+          = absref > holder ? absref - holder : holder - absref;
       if (offset == 1)
         {
-          hdl->code = 6;
+          hdl->code = absref > holder ? 6 : 8;
           hdl->value = 0;
           hdl->size = 0;
         }
-      else if (offset == -1)
+      else
         {
-          hdl->code = 8;
-          hdl->value = 0;
-          hdl->size = 0;
-        }
-      else if (offset > 0)
-        {
-          hdl->code = 10;
+          hdl->code = absref > holder ? 10 : 12;
           hdl->value = offset;
-          dwg_set_handle_size (hdl);
-        }
-      else if (offset < 0)
-        {
-          hdl->code = 12;
-          if ((unsigned)offset == 0x80000000) // invalid negation
-            {
-              LOG_ERROR ("HANDLE 12 overflow for object " FORMAT_RL,
-                         obj->index);
-              hdl->value = 0;
-              return 1;
-            }
-          else
-            hdl->value = -offset;
           dwg_set_handle_size (hdl);
         }
     }

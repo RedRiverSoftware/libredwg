@@ -3834,6 +3834,8 @@ eed_need_size (unsigned long need, BITCODE_BS have)
   return 0;
 }
 
+/* Decodes the EED item at dat into data. size is the number of bytes left
+   in its group from the item's code on, end the group's end. */
 static int
 dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
                      size_t end, BITCODE_BS size)
@@ -3853,15 +3855,15 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
           return DWG_ERR_INVALIDEED;
         data->u.eed_0.is_tu = 0;
         data->u.eed_0.length = lenc = bit_read_RC (dat);
-        if ((long)lenc > size - 3)
+        if ((long)lenc > size - 2)
           {
             LOG_ERROR ("Invalid EED string len %d, max %d", lenc,
-                       (int)size - 3);
+                       (int)size - 2);
             dat->byte = end;
             break;
           }
         /* code:1 + len:1 */
-        if (eed_need_size (lenc + 2, size))
+        if (eed_need_size (lenc + 1, size))
           return DWG_ERR_INVALIDEED;
         bit_read_fixed (dat, (BITCODE_RC *)data->u.eed_0.string, lenc);
         data->u.eed_0.string[lenc] = '\0';
@@ -3928,7 +3930,7 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
       }
       break;
     case 1:
-      if (eed_need_size (3, size))
+      if (eed_need_size (2, size))
         return DWG_ERR_INVALIDEED;
       data->u.eed_1.appid_index = bit_read_RS (dat);
       LOG_TRACE ("appid_index: " FORMAT_RS " [RS]", data->u.eed_1.appid_index);
@@ -3947,17 +3949,20 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
         }
       break;
     case 3:
-      if (eed_need_size (8, size))
-        return DWG_ERR_INVALIDEED;
       PRE (R_13b1)
       {
+        if (eed_need_size (2, size))
+          return DWG_ERR_INVALIDEED;
         data->u.eed_3.layer = (BITCODE_RLL)bit_read_RS (dat);
         LOG_TRACE ("layer: " FORMAT_RLL " [RS]", data->u.eed_3.layer);
       }
       LATER_VERSIONS
       {
-        data->u.eed_3.layer = bit_read_RLL (dat);
-        LOG_TRACE ("layer: " FORMAT_RLL " [RLL]", data->u.eed_3.layer);
+        if (eed_need_size (8, size))
+          return DWG_ERR_INVALIDEED;
+        // the layer's handle, big-endian as 1005's
+        data->u.eed_3.layer = bit_read_RLL_BE (dat);
+        LOG_TRACE ("layer: " FORMAT_HV " [RLL_BE]", data->u.eed_3.layer);
       }
       break;
     case 4:
@@ -4024,7 +4029,25 @@ dwg_decode_eed_data (Bit_Chain *restrict dat, Dwg_Eed_Data *restrict data,
   return 0;
 }
 
-/* for objects and entities */
+/* Whether the EED group from dat's position to the byte end runs past
+   eed_end, its object's end: also when it ends there but doesn't start on a
+   byte, so that its last bits lie past it. */
+static int
+eed_past_end (const Bit_Chain *restrict dat, const size_t end,
+              const size_t eed_end)
+{
+  return end > eed_end || (end == eed_end && dat->bit);
+}
+
+/* for objects and entities.
+   Returns DWG_ERR_INVALIDEED for an item or group that could not be decoded.
+   Such an item has no data, and the rest of its group is skipped: the
+   group's raw bytes still hold it, and the next group is read from the
+   group's end. A group whose APPID handle can't be read is dropped, with no
+   raw bytes kept, and reported as DWG_ERR_INVALIDHANDLE instead; the next
+   group is read from its end too. DWG_ERR_VALUEOUTOFBOUNDS comes with
+   DWG_ERR_INVALIDEED when the EED ran past its object or the data, or obj
+   has no document, so that what follows it can't be read. */
 int
 dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
 {
@@ -4034,15 +4057,22 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
   Dwg_Data *dwg = obj->dwg;
   Dwg_Object *_obj;
   size_t sav_byte = dat->byte;
+  size_t eed_end;
 
   if (!dwg)
-    return DWG_ERR_INVALIDEED;
+    return DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS;
   _obj = &dwg->object[obj->objid]; /* Note that obj->objid may be 0 */
+  // The EED lies within its object. From r13 on dat holds just the object;
+  // before, the EED ends no more than the object's size after its start.
+  eed_end = dat->byte + _obj->size;
+  if (eed_end > dat->size)
+    eed_end = dat->size;
   obj->num_eed = 0;
   while (1)
     {
       BITCODE_BS j;
       size_t end;
+      const size_t size_pos = bit_position (dat);
 
       if (dat->from_version >= R_13b1)
         {
@@ -4060,11 +4090,13 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
         }
 
       LOG_RPOS
-      if (size > _obj->size || dat->byte == sav_byte)
+      // no progress, compared in bits: a BS of 256 takes 2 bits, which can
+      // leave dat->byte as it was
+      if (size > _obj->size || bit_position (dat) == size_pos)
         {
           LOG_ERROR ("Invalid EED size " FORMAT_BS " > %u", size, _obj->size);
           obj->num_eed = idx;
-          return DWG_ERR_INVALIDEED;
+          return error | DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS;
         }
 
       obj->num_eed = idx + 1;
@@ -4081,9 +4113,12 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
       obj->eed[idx].size = size;
       if (dat->from_version >= R_13b1)
         {
-          error |= bit_read_H (dat, &obj->eed[idx].handle);
+          const int handle_error = bit_read_H (dat, &obj->eed[idx].handle);
+          error |= handle_error;
           end = dat->byte + size;
-          if (error)
+          if (eed_past_end (dat, end, eed_end))
+            goto past_object;
+          if (handle_error)
             {
               LOG_ERROR ("No EED[%d].handle", idx);
               obj->eed[idx].size = 0;
@@ -4140,6 +4175,8 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
       else
         {
           end = dat->byte + size;
+          if (eed_past_end (dat, end, eed_end))
+            goto past_object;
         }
 
       sav_byte = dat->byte;
@@ -4152,21 +4189,25 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
 
       while (dat->byte < end)
         {
+          int item_error;
           obj->eed[idx].data = (Dwg_Eed_Data *)calloc (size + 8, 1);
           LOG_TRACE ("EED[%u] ", idx);
-          error |= dwg_decode_eed_data (dat, obj->eed[idx].data, end, size);
+          item_error
+              = dwg_decode_eed_data (dat, obj->eed[idx].data, end, size);
           // overflow or no advance
-          if (dat->byte >= dat->size || dat->byte == sav_byte)
-            error |= DWG_ERR_INVALIDEED;
-          if (error & DWG_ERR_INVALIDEED)
+          if (dat->byte >= dat->size)
+            item_error |= DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS;
+          else if (dat->byte == sav_byte)
+            item_error |= DWG_ERR_INVALIDEED;
+          error |= item_error;
+          if (item_error & DWG_ERR_INVALIDEED)
             {
               free (obj->eed[idx].data);
               LOG_HANDLE ("        invalid eed[%d]: skip", idx);
               LOG_RPOS
               obj->eed[idx].data = NULL;
               // obj->num_eed--; // we still have .raw
-              dat->byte = end; // skip eed
-              continue;        // continue for next size = bit_read_BS(dat)
+              break; // skip the rest of the group
             }
 
           if (_obj->fixedtype == DWG_TYPE_MLEADERSTYLE
@@ -4178,11 +4219,13 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
               LOG_TRACE ("ACAD_MLEADERVER class_version: %d\n",
                          obj->eed[idx].data->u.eed_70.rs);
             }
+          // no item is shorter than 2 bytes
           if (dat->byte < end - 1)
             {
               idx++;
               obj->num_eed = idx + 1;
-              size = (long)(end - dat->byte + 1);
+              // the bytes left in the group, the next item's code included
+              size = (BITCODE_BS)(end - dat->byte);
               // LOG_INSANE ("        size remaining: %ld\n", (long)size);
               // LOG_RPOS
               obj->eed = (Dwg_Eed *)realloc (obj->eed,
@@ -4194,21 +4237,30 @@ dwg_decode_eed (Bit_Chain *restrict dat, Dwg_Object_Object *restrict obj)
             }
           else
             {
+              if (dat->byte < end)
+                LOG_WARN ("EED[%u]: %u byte left at the end of its group", idx,
+                          (unsigned)(end - dat->byte));
               break;
             }
         }
       LOG_RPOS
-      if (obj->eed[idx].raw)
-        {
-          dat->byte = end;
-          LOG_RPOS
-        }
+      // the next group starts at this one's end, also after an item that
+      // failed, a string left unread or a byte left over
+      dat->byte = end;
+      LOG_RPOS
       idx++;
     }
   LOG_HANDLE ("EED[%u] size: " FORMAT_BS " (end)", idx, size);
   LOG_RPOS
   LOG_TRACE ("num_eed: " FORMAT_BL "\n", obj->num_eed);
   return error;
+
+past_object:
+  LOG_ERROR ("Invalid EED[%u] size " FORMAT_BS ": past the end of its object",
+             idx, size);
+  obj->eed[idx].size = 0;
+  obj->num_eed = idx;
+  return error | DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS;
 }
 
 /** OL2FRAME.data potentially contains as 128 byte of custom specific data:
@@ -4504,7 +4556,9 @@ dwg_decode_entity (Bit_Chain *dat, Bit_Chain *hdl_dat, Bit_Chain *str_dat,
     error |= dwg_decode_eed (dat, (Dwg_Object_Object *)ent);
   LOG_INSANE (" @%" PRIuSIZE ".%u\n", dat->byte, dat->bit);
   // LOG_TRACE ("\n");
-  if (error & (DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS))
+  // An EED item that failed leaves its group to the raw bytes, and the
+  // common data after the EED is still read.
+  if (error & DWG_ERR_VALUEOUTOFBOUNDS)
     return error;
 
     // clang-format off
@@ -4609,7 +4663,8 @@ dwg_decode_object (Bit_Chain *dat, Bit_Chain *hdl_dat, Bit_Chain *str_dat,
       LOG_WARN ("Skip eed");
     else
       error |= dwg_decode_eed (dat, _obj);
-    if (error & (DWG_ERR_INVALIDEED | DWG_ERR_VALUEOUTOFBOUNDS))
+    // as in dwg_decode_entity
+    if (error & DWG_ERR_VALUEOUTOFBOUNDS)
       return error;
   }
 
