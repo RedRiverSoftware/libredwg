@@ -2593,10 +2593,11 @@ test_attribute_text (void)
   static const char dflt_1252[] = "30\xB0 caf\xE9";
   static const char state[] = "Open 30\xC2\xBA";
   static const char state_1252[] = "Open 30\xBA";
+  // the add API gives neither definition an AcDbAttr group
   const Expected_Attrib utf8[]
-      = { { "SIZE", dflt }, { "STATE", state } };
+      = { { "SIZE", dflt, 0, 0 }, { "STATE", state, 0, 0 } };
   const Expected_Attrib cp1252[]
-      = { { "SIZE", dflt_1252 }, { "STATE", state_1252 } };
+      = { { "SIZE", dflt_1252, 0, 0 }, { "STATE", state_1252, 0, 0 } };
   const dwg_point_3d p1 = { 1.0, 2.0, 0.0 }, p2 = { -3.0, 4.0, 0.0 };
   const BITCODE_3BD at = { 0.0, 0.0, 0.0 };
   Dwg_Data src, readback;
