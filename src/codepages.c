@@ -300,6 +300,7 @@ dwg_codepage_int (const char *s)
    and convert it to/from unicode.
    dir = 1: from unicode wc to charset
    asian = 1: 2-byte CJK charset, else 1-byte (0-255)
+   fntbl[0] is the highest code in the table, its last index.
 */
 static wchar_t
 codepage_helper (const Dwg_Codepage codepage, const wchar_t wc, const int dir,
@@ -316,7 +317,7 @@ codepage_helper (const Dwg_Codepage codepage, const wchar_t wc, const int dir,
   assert (maxc);
   if (dir) // from unicode to charset.
     {      // reverse lookup. unsorted rhs values so we cannot bsearch.
-      for (uint16_t i = 0x80; i < maxc; i++)
+      for (unsigned i = 0x80; i <= maxc; i++)
         {
           if (wc == fntbl[i])
             return i;
@@ -325,7 +326,7 @@ codepage_helper (const Dwg_Codepage codepage, const wchar_t wc, const int dir,
     }
   else
     {
-      if (wc < maxc)
+      if (wc <= maxc)
         return fntbl[wc];
       else
         return 0;
@@ -359,6 +360,10 @@ dwg_codepage_uwc (Dwg_Codepage cp, uint16_t c)
     return 0x20A9;
   else if (c < 128 || cp == CP_UTF8 || cp == CP_UTF16)
     return (wchar_t)c;
+  else if (cp == CP_US_ASCII)
+    return 0;
+  else if (cp == CP_ISO_8859_1)
+    return c < 256 ? (wchar_t)c : 0;
   return codepage_helper (cp, (wchar_t)c, 0, 1);
 }
 // returns the matching codepoint,
@@ -383,6 +388,10 @@ dwg_codepage_wc (Dwg_Codepage cp, wchar_t wc)
 {
   if (wc < 128 || cp == CP_UTF8 || cp == CP_UTF16)
     return wc & 0xffff;
+  else if (cp == CP_US_ASCII)
+    return 0;
+  else if (cp == CP_ISO_8859_1)
+    return wc < 256 ? wc : 0;
   return (uint16_t)codepage_helper (cp, wc, 1, 1);
 }
 

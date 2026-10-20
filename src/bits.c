@@ -3404,7 +3404,7 @@ bit_utf8_to_TV (char *restrict dest, const unsigned char *restrict src,
                   *dest++ = wc1 & 0xff;
                 }
               else if (!is_asian_cp
-                       && (c1 = dwg_codepage_wc ((Dwg_Codepage)codepage, wc)))
+                       && (c1 = dwg_codepage_c ((Dwg_Codepage)codepage, wc)))
                 *dest++ = c1;
               else
                 {

@@ -17,6 +17,11 @@
      at the top level and in a block;
    - one write longer than dwg_svg_printf's 8 KB stack buffer (a long TEXT
      value) reaches the SVG whole;
+   - TEXT held in the codepage (read from a pre-r2007 DWG) gets a character
+     reference for each byte above 0x7F, and U+FFFD for one the codepage
+     doesn't define or a control character XML forbids; TEXT held in UTF-16
+     (read from an r2007+ DWG) gets one for a surrogate pair, and U+FFFD for
+     a lone surrogate or a control character;
    - MTEXT comes out as UTF-8 whichever way the document holds its text: in
      the codepage (read from a pre-r2007 DWG) or in UTF-16 (read from an
      r2007+ DWG), at the top level and in a block, or in UTF-8 (built with
@@ -774,6 +779,207 @@ done:
   free_test_dwg (&dwg);
 }
 
+/* The first character in the SVG that XML 1.0 forbids, as itself or as a
+   hex character reference: a C0 control but tab, LF and CR (U+0000
+   included), a surrogate, U+FFFE or U+FFFF. NULL when there is none. */
+static const char *
+xml_forbidden (const char *svg)
+{
+  for (const char *p = svg; *p; p++)
+    {
+      unsigned long c;
+      char *end;
+      if ((unsigned char)*p < 0x20 && *p != '\t' && *p != '\n' && *p != '\r')
+        return p;
+      if (strncmp (p, "&#x", 3))
+        continue;
+      c = strtoul (p + 3, &end, 16);
+      if (*end != ';')
+        continue;
+      if ((c < 0x20 && c != 0x9 && c != 0xA && c != 0xD)
+          || (c >= 0xD800 && c <= 0xDFFF) || c == 0xFFFE || c == 0xFFFF)
+        return p;
+    }
+  return NULL;
+}
+
+/* Renders model space and checks the TEXT's <text> holds expected, and that
+   the SVG holds no character XML forbids. */
+static void
+check_text (Dwg_Data *dwg, const Dwg_Entity_TEXT *text, const char *expected,
+            const char *what)
+{
+  char content[512];
+  int n = 0;
+  size_t len;
+  const char *bad;
+  char *svg = render_mspace (dwg, &len);
+  if (!svg)
+    return;
+  bad = xml_forbidden (svg);
+  if (bad)
+    fail ("%s: the SVG holds \"%.8s\", which XML forbids", what, bad);
+  else if (!text_content (svg, text->parent->objid, content,
+                          sizeof (content), &n))
+    fail ("%s: no <text> for the TEXT", what);
+  else if (strcmp (content, expected))
+    fail ("%s: \"%s\", not \"%s\"", what, content, expected);
+  else
+    ok ("%s: \"%s\"", what, content);
+  dwg_free_svg (svg);
+}
+
+/* TEXT from a pre-r2007 DWG is held in its codepage, and the SVG gets a
+   character reference for each byte above 0x7F. */
+static void
+test_text_codepage (void)
+{
+  static const struct
+  {
+    BITCODE_RS codepage;
+    const char *text;
+    const char *expected;
+    const char *what;
+  } cases[] = {
+    { CP_ANSI_1252, "caf\xE9 \x80", "caf&#xE9; &#x20AC;",
+      "TEXT r2004 ANSI_1252" },
+    { CP_ANSI_1252, "a\x81z", "a&#xFFFD;z",
+      "TEXT r2004 ANSI_1252 byte it doesn't define" },
+    { CP_ANSI_1252, "na\xEFve \xFF", "na&#xEF;ve &#xFF;",
+      "TEXT r2004 ANSI_1252 0xFF" },
+    { CP_ANSI_1252, "a\x01z\tb\x1B", "a&#xFFFD;z&#x9;b&#xFFFD;",
+      "TEXT r2004 ANSI_1252 control characters" },
+    { CP_ANSI_936, "\xB7\xBF A", "&#x623F; A",
+      "TEXT r2004 ANSI_936 two-byte character" },
+    { CP_ISO_8859_1, "caf\xE9 \xFF", "caf&#xE9; &#xFF;",
+      "TEXT r2004 ISO_8859_1" },
+    { CP_US_ASCII, "caf\xE9", "caf&#xFFFD;", "TEXT r2004 US_ASCII" },
+  };
+  // the add API converts UTF-8 to the codepage
+  static const struct
+  {
+    BITCODE_RS codepage;
+    const char *held;
+    const char *what;
+  } added[] = {
+    { CP_ANSI_1252, "caf\xE9 \x80 \xFF", "TEXT r2004 ANSI_1252 added" },
+    { CP_ISO_8859_1, "caf\xE9 \\U+20AC \xFF",
+      "TEXT r2004 ISO_8859_1 added" },
+    { CP_US_ASCII, "caf\\U+00E9 \\U+20AC \\U+00FF",
+      "TEXT r2004 US_ASCII added" },
+  };
+  // e acute, euro sign, y with diaeresis
+  const char *utf8 = "caf\xC3\xA9 \xE2\x82\xAC \xC3\xBF";
+  Dwg_Data dwg;
+  const Dwg_Object *ms;
+  Dwg_Object_BLOCK_HEADER *hdr;
+  Dwg_Entity_TEXT *text;
+  const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
+  BITCODE_RS codepage;
+
+  if (!read_test_dwg ("example_2004.dwg", &dwg))
+    goto done;
+  ms = dwg_model_space_object (&dwg);
+  if (!ms)
+    {
+      fail ("example_2004.dwg: no model space");
+      goto done;
+    }
+  hdr = ms->tio.object->tio.BLOCK_HEADER;
+  text = add_text (hdr, "TEXT", &pt, 0.0, 1.0);
+  if (!text)
+    goto done;
+  codepage = dwg.header.codepage;
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      char *copy = strdup (cases[i].text);
+      if (!copy)
+        {
+          fail ("out of memory");
+          break;
+        }
+      free (text->text_value);
+      text->text_value = copy;
+      dwg.header.codepage = cases[i].codepage;
+      check_text (&dwg, text, cases[i].expected, cases[i].what);
+    }
+  for (size_t i = 0; i < sizeof (added) / sizeof (added[0]); i++)
+    {
+      Dwg_Entity_TEXT *t;
+      dwg.header.codepage = added[i].codepage;
+      t = add_text (hdr, utf8, &pt, 0.0, 1.0);
+      if (!t)
+        continue;
+      if (strcmp (t->text_value, added[i].held))
+        fail ("%s: held as \"%s\", not \"%s\"", added[i].what, t->text_value,
+              added[i].held);
+      else
+        ok ("%s", added[i].what);
+    }
+  dwg.header.codepage = codepage;
+done:
+  free_test_dwg (&dwg);
+}
+
+/* TEXT from an r2007+ DWG is held in UTF-16, and the SVG gets a character
+   reference for each character from U+007F: one for a surrogate pair, and
+   U+FFFD for a character XML forbids. */
+static void
+test_text_utf16 (void)
+{
+  static const uint16_t cafe[] = { 'c', 'a', 'f', 0xE9, ' ', 0x20AC, 0 };
+  static const uint16_t pair[] = { 'a', 0xD83D, 0xDE00, 'b', 0 };
+  static const uint16_t lone[] = { 'a', 0xD83D, 'b', 0xDE00, ' ', 0xD83D, 0 };
+  static const uint16_t controls[] = { 'a', 0x01, 'z', 0x09, 'b', 0x1B, 0 };
+  static const uint16_t nonchar[] = { 'a', 0xFFFF, 0 };
+  static const struct
+  {
+    const uint16_t *text;
+    size_t size;
+    const char *expected;
+    const char *what;
+  } cases[] = {
+    { cafe, sizeof (cafe), "caf&#xE9; &#x20AC;", "TEXT r2010" },
+    { pair, sizeof (pair), "a&#x1F600;b", "TEXT r2010 surrogate pair" },
+    { lone, sizeof (lone), "a&#xFFFD;b&#xFFFD; &#xFFFD;",
+      "TEXT r2010 lone surrogates" },
+    { controls, sizeof (controls), "a&#xFFFD;z&#x9;b&#xFFFD;",
+      "TEXT r2010 control characters" },
+    { nonchar, sizeof (nonchar), "a&#xFFFD;", "TEXT r2010 U+FFFF" },
+  };
+  Dwg_Data dwg;
+  const Dwg_Object *ms;
+  Dwg_Entity_TEXT *text;
+  const dwg_point_3d pt = { 1.0, 1.0, 0.0 };
+
+  if (!read_test_dwg ("example_2010.dwg", &dwg))
+    goto done;
+  ms = dwg_model_space_object (&dwg);
+  if (!ms)
+    {
+      fail ("example_2010.dwg: no model space");
+      goto done;
+    }
+  text = add_text (ms->tio.object->tio.BLOCK_HEADER, "TEXT", &pt, 0.0, 1.0);
+  if (!text)
+    goto done;
+  for (size_t i = 0; i < sizeof (cases) / sizeof (cases[0]); i++)
+    {
+      char *copy = (char *)malloc (cases[i].size);
+      if (!copy)
+        {
+          fail ("out of memory");
+          break;
+        }
+      memcpy (copy, cases[i].text, cases[i].size);
+      free (text->text_value);
+      text->text_value = copy;
+      check_text (&dwg, text, cases[i].expected, cases[i].what);
+    }
+done:
+  free_test_dwg (&dwg);
+}
+
 /* example_2010.dwg holds text in UTF-16, as every r2007+ DWG does. The same
    drawing as r2007, example_2007.dwg, can't be read on big-endian hosts. */
 static void
@@ -954,6 +1160,8 @@ main (void)
   test_long_write ();
   test_utf8_valid ();
   test_mtext_codepage ();
+  test_text_codepage ();
+  test_text_utf16 ();
   test_mtext_utf16 ();
   test_mtext_utf16_cjk ();
   test_mtext_utf8 ();

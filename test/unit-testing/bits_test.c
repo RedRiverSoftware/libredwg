@@ -2084,6 +2084,131 @@ codepage_bounds_tests (void)
     fail ("out-of-range codepage rejected");
 }
 
+/* US-ASCII (1) and ISO 8859-1 (2) have no table: ISO 8859-1 bytes are
+   U+0000-U+00FF, and US-ASCII defines nothing above 0x7F. Text with other
+   characters is converted, not aborted on, in both directions. */
+static void
+codepage_no_table_tests (void)
+{
+  static const struct
+  {
+    Dwg_Codepage cp;
+    const char *name;
+    wchar_t e_acute; // byte 0xE9 as Unicode, and U+00E9 as a byte; 0: none
+    const char *tv;  // src below in the codepage
+  } cps[] = {
+    { CP_ISO_8859_1, "ISO_8859_1", 0xE9, "caf\xE9 5 \\U+20AC \\U+2013 A" },
+    { CP_US_ASCII, "US_ASCII", 0, "caf\\U+00E9 5 \\U+20AC \\U+2013 A" },
+  };
+  // e acute, euro sign, en dash: 2 and 3 bytes of UTF-8
+  const char *src = "caf\xC3\xA9 5 \xE2\x82\xAC \xE2\x80\x93 A";
+  // euro sign, en dash
+  const char *src3 = "5 \xE2\x82\xAC \xE2\x80\x93 A";
+  const char *src3_tv = "5 \\U+20AC \\U+2013 A";
+  char dest[64];
+  char *p;
+
+  for (int i = 0; i < ARRAY_SIZE (cps); i++)
+    {
+      const Dwg_Codepage cp = cps[i].cp;
+      const wchar_t e = cps[i].e_acute;
+      const wchar_t uc = dwg_codepage_uc (cp, 0xE9);
+      const wchar_t uwc = dwg_codepage_uwc (cp, 0xE9);
+      const unsigned c = dwg_codepage_c (cp, 0xE9);
+      const unsigned wc = dwg_codepage_wc (cp, 0xE9);
+      const unsigned euro_c = dwg_codepage_c (cp, 0x20AC);
+      const unsigned euro_wc = dwg_codepage_wc (cp, 0x20AC);
+
+      if (uc == e && uwc == e && dwg_codepage_uwc (cp, 'A') == 'A')
+        ok ("%s: byte 0xE9 is U+%04X", cps[i].name, (unsigned)e);
+      else
+        fail ("%s: byte 0xE9 is U+%04X (uc), U+%04X (uwc), not U+%04X",
+              cps[i].name, (unsigned)uc, (unsigned)uwc, (unsigned)e);
+      if (c == (unsigned)e && wc == (unsigned)e && !euro_c && !euro_wc)
+        ok ("%s: U+00E9 is 0x%02X, U+20AC none", cps[i].name, (unsigned)e);
+      else
+        fail ("%s: U+00E9 is 0x%02X (c), 0x%02X (wc), U+20AC 0x%02X (c), "
+              "0x%02X (wc)",
+              cps[i].name, c, wc, euro_c, euro_wc);
+      p = bit_utf8_to_TV (dest, (const unsigned char *)src, sizeof (dest),
+                          strlen (src), 0, cp);
+      if (p && strEQ (p, cps[i].tv))
+        ok ("bit_utf8_to_TV as %s", cps[i].name);
+      else
+        fail ("bit_utf8_to_TV as %s: %s, not %s", cps[i].name,
+              p ? p : "NULL", cps[i].tv);
+    }
+  /* With a header codepage of 0 (UTF8), a character of 3 bytes is held as
+     \U+XXXX, never as its low byte. */
+  p = bit_utf8_to_TV (dest, (const unsigned char *)src3, sizeof (dest),
+                      strlen (src3), 0, CP_UTF8);
+  if (p && strEQ (p, src3_tv))
+    ok ("bit_utf8_to_TV as UTF8: %s", p);
+  else
+    fail ("bit_utf8_to_TV as UTF8: %s, not %s", p ? p : "NULL", src3_tv);
+}
+
+/* The tables end at the codepage's last character, 0xFF in most single-byte
+   codepages, which converts both ways like the others. */
+static void
+codepage_last_entry_tests (void)
+{
+  static const struct
+  {
+    Dwg_Codepage cp;
+    const char *name;
+    unsigned code;
+    unsigned uc;
+  } last[] = {
+    { CP_ANSI_1252, "ANSI_1252", 0xFF, 0x00FF }, // y with diaeresis
+    { CP_ANSI_1251, "ANSI_1251", 0xFF, 0x044F }, // Cyrillic ya
+    { CP_CP437, "CP437", 0xFF, 0x00A0 },         // no-break space
+    // 0xFF is undefined: 0xFE ends the table
+    { CP_ISO_8859_7, "ISO_8859_7", 0xFE, 0x03CE },
+    // two-byte codepages
+    { CP_BIG5, "BIG5", 0xF9D5, 0x9F98 },
+    { CP_ANSI_936, "ANSI_936", 0xFE4F, 0xFA29 },
+  };
+  char dest[16];
+  const char *ff = "\xFF";
+  char *p;
+
+  for (int i = 0; i < ARRAY_SIZE (last); i++)
+    {
+      const Dwg_Codepage cp = last[i].cp;
+      const unsigned uc
+          = last[i].code > 0xFF
+                ? (unsigned)dwg_codepage_uwc (cp, (uint16_t)last[i].code)
+                : (unsigned)dwg_codepage_uc (cp, (unsigned char)last[i].code);
+      const unsigned code
+          = last[i].code > 0xFF
+                ? (unsigned)dwg_codepage_wc (cp, (wchar_t)last[i].uc)
+                : (unsigned)dwg_codepage_c (cp, (wchar_t)last[i].uc);
+      if (uc == last[i].uc && code == last[i].code)
+        ok ("%s: 0x%02X is U+%04X, and back", last[i].name, last[i].code,
+            last[i].uc);
+      else
+        fail ("%s: 0x%02X is U+%04X and U+%04X is 0x%02X, not U+%04X and "
+              "0x%02X",
+              last[i].name, last[i].code, uc, last[i].uc, code, last[i].uc,
+              last[i].code);
+    }
+  p = bit_utf8_to_TV (dest, (const unsigned char *)"\xC3\xBF", sizeof (dest),
+                      2, 0, CP_ANSI_1252);
+  if (p && strEQc (p, "\xFF"))
+    ok ("bit_utf8_to_TV U+00FF as ANSI_1252");
+  else
+    fail ("bit_utf8_to_TV U+00FF as ANSI_1252: %s", p ? p : "NULL");
+  // through iconv where it works, through the tables otherwise (macOS)
+  p = bit_TV_to_utf8 (ff, CP_ANSI_1252);
+  if (p && strEQc (p, "\xC3\xBF"))
+    ok ("bit_TV_to_utf8 0xFF as ANSI_1252");
+  else
+    fail ("bit_TV_to_utf8 0xFF as ANSI_1252: %s", p ? p : "NULL");
+  if (p && p != ff)
+    free (p);
+}
+
 static void
 in_hexbin_tests (void)
 {
@@ -2199,6 +2324,8 @@ main (int argc, char const *argv[])
   bit_utf8_to_TU_tests ();
   bit_TV_to_utf8_tests ();
   codepage_bounds_tests ();
+  codepage_no_table_tests ();
+  codepage_last_entry_tests ();
   bit_read_H_tests ();
   bit_write_H_tests ();
   bit_UMC_bug_tests ();

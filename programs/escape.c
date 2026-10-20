@@ -102,6 +102,11 @@ htmlescape (const char *restrict src, const Dwg_Codepage cp)
             if (dwg_codepage_is_twobyte (cp, *s))
               cc = cc << 8 | *++s;
             wc = dwg_codepage_uwc (cp, cc);
+            // XML forbids references to U+0000 and to the other C0
+            // controls but tab, LF and CR: a character the codepage
+            // doesn't define, and such a control, are written as U+FFFD
+            if (wc < 0x20 && wc != 0x9 && wc != 0xA && wc != 0xD)
+              wc = 0xFFFD;
             if (wc > 127 || wc < 0x20)
               {
                 if (!d)
@@ -181,11 +186,24 @@ htmlwescape (BITCODE_TU wstr)
               d = dest + _off;
               end = dest + len;
             }
-          if (*wstr >= 127 || *wstr < 20) // utf8 encodings
+          if (*wstr >= 127 || *wstr < 0x20) // utf8 encodings
             {
+              unsigned uc = *wstr;
               if (!d)
                 return NULL;
-              snprintf (d, (size_t)(end - d), "&#x%X;", *wstr);
+              // a surrogate pair is one character
+              if (uc >= 0xD800 && uc <= 0xDBFF && wstr[1] >= 0xDC00
+                  && wstr[1] <= 0xDFFF)
+                {
+                  wstr++;
+                  uc = 0x10000 + ((uc - 0xD800) << 10) + (*wstr - 0xDC00);
+                }
+              // XML forbids the C0 controls but tab, LF and CR, a lone
+              // surrogate, U+FFFE and U+FFFF: written as U+FFFD
+              else if ((uc < 0x20 && uc != 0x9 && uc != 0xA && uc != 0xD)
+                       || (uc >= 0xD800 && uc <= 0xDFFF) || uc >= 0xFFFE)
+                uc = 0xFFFD;
+              snprintf (d, (size_t)(end - d), "&#x%X;", uc);
               d += strlen (d);
               *d = 0;
             }

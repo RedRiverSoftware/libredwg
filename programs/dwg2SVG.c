@@ -1240,13 +1240,7 @@ mtext_codepage_to_utf8 (const char *src, Dwg_Codepage cp)
               continue;
             }
         }
-      /* dwg_codepage_uwc () asserts for these two, which have no table. */
-      if (cp == CP_ISO_8859_1)
-        wc = (wchar_t)c;
-      else if (cp == CP_US_ASCII)
-        wc = 0;
-      else
-        wc = dwg_codepage_uwc (cp, c);
+      wc = dwg_codepage_uwc (cp, c);
       mtext_buf_append_codepoint (&b, wc ? (unsigned int)wc : 0xFFFD);
     }
   return mtext_buf_steal (&b);
