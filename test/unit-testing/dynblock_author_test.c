@@ -1656,6 +1656,9 @@ test_written (void)
   dwg_dynblock_free_check_report (report);
   free_dwg (&back);
   free_document (dwg);
+  // kept to look at when a check failed
+  if (!failures)
+    unlink (WRITTEN);
   return failures;
 }
 
@@ -1829,6 +1832,8 @@ test_copy_entities (void)
   }
   free_document (src);
   free_document (dst);
+  if (!failures)
+    unlink (WRITTEN_COPY);
   return failures;
 }
 
@@ -2073,6 +2078,8 @@ test_graph_read_from_dwg (Dwg_Data *src)
     dwg_dynblock_free_params (params, count);
   }
   free_dwg (&back);
+  if (!failures)
+    unlink (WRITTEN);
   return failures;
 }
 
