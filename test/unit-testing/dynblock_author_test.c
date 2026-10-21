@@ -75,6 +75,7 @@ static int test_loglevel;
 #define WRITTEN "dynblock_author_test.dwg"
 #define WRITTEN_COPY "dynblock_author_test_copy.dwg"
 #define WRITTEN_LWPOLYLINE "dynblock_author_test_lwpolyline.dwg"
+#define WRITTEN_LOCKED "dynblock_author_test_locked.dwg"
 
 /* The fixture's definitions */
 #define TREES 0xB45B
@@ -1952,6 +1953,474 @@ test_written (void)
 }
 
 /*--------------------------------------------------------------------------------
+ * Attribute definitions an action selects
+ */
+
+/* The handle of the APPID named name, added to dwg when it has none, or 0
+   when memory runs out. */
+static BITCODE_RLL
+appid_of (Dwg_Data *dwg, const char *name)
+{
+  BITCODE_H found = dwg_find_tablehandle (dwg, name, "APPID");
+  Dwg_Object_APPID *appid;
+  loglevel = test_loglevel;
+  if (found && found->absolute_ref)
+    return found->absolute_ref;
+  appid = dwg_add_APPID (dwg, name);
+  loglevel = test_loglevel;
+  return appid ? handle_of (dwg, appid) : 0;
+}
+
+/* Gives entity ent an EED group of the APPID named name, of n 1070 items
+   of the given values. Returns 1 when memory runs out. */
+static int
+add_1070_group (Dwg_Data *dwg, Dwg_Object_Entity *ent, const char *name,
+                const BITCODE_RS *values, const BITCODE_BL n)
+{
+  const BITCODE_RLL appid = appid_of (dwg, name);
+  // a 1070 takes 3 bytes in a file
+  Dwg_Eed *eed
+      = appid ? append_eed (ent, appid, (BITCODE_BS)(3 * n), n) : NULL;
+  if (!eed)
+    return 1;
+  for (BITCODE_BL i = 0; i < n; i++)
+    {
+      eed[i].data->code = 70;
+      // Dwg_Eed_Data is packed
+      memcpy (&eed[i].data->u.eed_70.rs, &values[i], sizeof (values[i]));
+    }
+  return 0;
+}
+
+/* The values of entity obj's EED group of the APPID named name, of 1070
+   items, into values, up to max of them; *lastp is set when the group is
+   the last of obj's EED. Returns how many items the group has, -1 when
+   obj has no such group, or -2 when it has two, or an item that isn't a
+   1070. */
+static int
+group_1070s (const Dwg_Data *dwg, const Dwg_Object *obj, const char *name,
+             BITCODE_RS *values, const int max, int *lastp)
+{
+  const Dwg_Eed *eed = obj->tio.entity->eed;
+  int n = -1, in_group = 0;
+  *lastp = 0;
+  for (BITCODE_BL i = 0; eed && i < obj->tio.entity->num_eed; i++)
+    {
+      if (eed[i].size)
+        {
+          const Dwg_Object *appid = object (dwg, eed[i].handle.value);
+          in_group = appid && appid->fixedtype == DWG_TYPE_APPID
+                     && !strcmp (appid->tio.object->tio.APPID->name, name);
+          if (in_group && n >= 0)
+            return -2;
+          if (in_group)
+            n = 0;
+          *lastp = in_group;
+        }
+      if (!in_group)
+        continue;
+      if (!eed[i].data || eed[i].data->code != 70)
+        return -2;
+      if (n < max)
+        // Dwg_Eed_Data is packed
+        memcpy (&values[n], &eed[i].data->u.eed_70.rs, sizeof (values[n]));
+      n++;
+    }
+  return n;
+}
+
+/* Whether entity obj has its position locked as AutoCAD locks it in r2004
+   files: one AcDbAttr EED group, 1070 0, 1070 1; and with last, as the
+   last group of its EED. */
+static int
+is_locked (const Dwg_Data *dwg, const Dwg_Object *obj, const int last)
+{
+  BITCODE_RS v[2] = { 9, 9 };
+  int is_last;
+  return group_1070s (dwg, obj, "AcDbAttr", v, 2, &is_last) == 2 && v[0] == 0
+         && v[1] == 1 && (!last || is_last);
+}
+
+/* The number of APPIDs named name in dwg. */
+static int
+count_appids (const Dwg_Data *dwg, const char *name)
+{
+  int n = 0;
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    if (dwg->object[i].fixedtype == DWG_TYPE_APPID
+        && dwg->object[i].tio.object->tio.APPID->name
+        && !strcmp (dwg->object[i].tio.object->tio.APPID->name, name))
+      n++;
+  return n;
+}
+
+/* The single 1070 of entity obj's TESTAPP EED group, or -1. */
+static int
+test_group (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  BITCODE_RS v = 0;
+  int last;
+  return group_1070s (dwg, obj, "TESTAPP", &v, 1, &last) == 1 ? v : -1;
+}
+
+/* The box's attribute definitions for test_locked_attdefs: NAME centred,
+   the others left on their baseline. */
+enum
+{
+  A_NAME,   // centred on (10, -2): in the move
+  A_LEFT,   // at (3, -8), AcDbAttr 1070 0, 1070 0, then TESTAPP 7: in it
+  A_LOCKED, // at (3, -6), AcDbAttr 1070 0, 1070 1, then TESTAPP 8: in it
+  A_SIDE,   // at (21, -3), in the stretch's frame: in the stretch
+  A_FREE,   // at (1, -4): in neither
+  NUM_ATTDEFS
+};
+
+/* The box drawn in a new block BOX of a new document, with its attribute
+   definitions, written and read back into *dwg, so that their EED groups
+   are kept as the bytes read, as for a block read from any file. */
+static int
+locked_box (Dwg_Data *dwg, BITCODE_RLL *blkp, BITCODE_RLL *h,
+            BITCODE_RLL *a)
+{
+  static const char *tags[NUM_ATTDEFS]
+      = { "NAME", "LEFT", "LOCKED", "SIDE", "FREE" };
+  static const dwg_point_3d at[NUM_ATTDEFS] = {
+    { 8, -2, 0 }, { 3, -8, 0 }, { 3, -6, 0 }, { 21, -3, 0 }, { 1, -4, 0 }
+  };
+  const BITCODE_RS unlocked[2] = { 0, 0 }, locked[2] = { 0, 1 }, seven = 7,
+                   eight = 8;
+  Dwg_Data *src = new_document ();
+  Dwg_Object_BLOCK_HEADER *blk;
+  Dwg_Entity_ATTDEF *att[NUM_ATTDEFS];
+  int error;
+  *blkp = src ? add_box_block (src, "BOX", h) : 0;
+  blk = *blkp ? block_header (src, *blkp) : NULL;
+  for (int i = 0; blk && i < NUM_ATTDEFS; i++)
+    {
+      att[i] = dwg_add_ATTDEF (blk, 1.0, 0, "Prompt", &at[i], tags[i], "X");
+      loglevel = test_loglevel;
+      if (!att[i])
+        blk = NULL;
+      else
+        {
+          att[i]->width_factor = 1.0;
+          a[i] = handle_of (src, att[i]);
+        }
+    }
+  if (!blk)
+    {
+      if (src)
+        free_document (src);
+      return 1;
+    }
+  att[A_NAME]->horiz_alignment = 1;
+  att[A_NAME]->alignment_pt.x = 10.0;
+  att[A_NAME]->alignment_pt.y = -2.0;
+  if (add_1070_group (src, att[A_LEFT]->parent, "AcDbAttr", unlocked, 2)
+      || add_1070_group (src, att[A_LEFT]->parent, "TESTAPP", &seven, 1)
+      || add_1070_group (src, att[A_LOCKED]->parent, "AcDbAttr", locked, 2)
+      || add_1070_group (src, att[A_LOCKED]->parent, "TESTAPP", &eight, 1))
+    {
+      free_document (src);
+      return 1;
+    }
+  error = write_dwg (WRITTEN_LOCKED, src);
+  free_document (src);
+  if (error >= DWG_ERR_CRITICAL)
+    return 1;
+  if (read_dwg (WRITTEN_LOCKED, dwg) >= DWG_ERR_CRITICAL)
+    {
+      free_dwg (dwg);
+      return 1;
+    }
+  return 0;
+}
+
+/* Checks the attribute definitions of test_locked_attdefs in dwg, after
+   the actions were added: those the actions select locked, A_LEFT's group
+   given way to a new one at the end, A_LOCKED's left as it was, the other
+   groups kept, and A_FREE and the TEXT caption not locked. */
+static int
+locks_are (const Dwg_Data *dwg, const BITCODE_RLL *h, const BITCODE_RLL *a,
+           const char *what)
+{
+  const Dwg_Object *o[NUM_ATTDEFS];
+  BITCODE_RS v[2];
+  int last, failures = 0;
+  for (int i = 0; i < NUM_ATTDEFS; i++)
+    {
+      o[i] = object (dwg, a[i]);
+      if (!o[i] || o[i]->fixedtype != DWG_TYPE_ATTDEF)
+        {
+          FAIL ("%s: attribute definition %d not found", what, i);
+          return 1;
+        }
+    }
+  CHECK (is_locked (dwg, o[A_NAME], 1) && is_locked (dwg, o[A_SIDE], 1),
+         "%s: the move's and the stretch's new ATTDEFs are locked, by a "
+         "group at the end",
+         what);
+  CHECK (is_locked (dwg, o[A_LEFT], 1) && test_group (dwg, o[A_LEFT]) == 7,
+         "%s: an unlocked AcDbAttr group gives way to a locked one at the "
+         "end; the group after it is kept",
+         what);
+  CHECK (is_locked (dwg, o[A_LOCKED], 0) && !is_locked (dwg, o[A_LOCKED], 1)
+             && test_group (dwg, o[A_LOCKED]) == 8,
+         "%s: a locked ATTDEF keeps its group where it was", what);
+  CHECK (group_1070s (dwg, o[A_FREE], "AcDbAttr", v, 2, &last) == -1
+             && group_1070s (dwg, object (dwg, h[CAPTION]), "AcDbAttr", v, 2,
+                             &last)
+                    == -1,
+         "%s: an ATTDEF no action selects, and a TEXT, get no AcDbAttr "
+         "group",
+         what);
+  return failures;
+}
+
+/* Whether ATTDEF obj of block rep is at (x, y), with its alignment point
+   at (ax, ay) when it has one. */
+static int
+attdef_at (const Dwg_Object *obj, const double x, const double y,
+           const double ax, const double ay)
+{
+  const Dwg_Entity_ATTDEF *_obj;
+  if (!obj || obj->fixedtype != DWG_TYPE_ATTDEF)
+    return 0;
+  _obj = obj->tio.entity->tio.ATTDEF;
+  return near (_obj->ins_pt.x, x) && near (_obj->ins_pt.y, y)
+         && (!_obj->horiz_alignment
+             || (near (_obj->alignment_pt.x, ax)
+                 && near (_obj->alignment_pt.y, ay)));
+}
+
+/* Evaluates block blk at Width 30, 10 more than its own: the locked
+   ATTDEFs the move selects move by 5, the stretch's by 10, A_FREE stays. */
+static int
+evaluates_attdefs (Dwg_Data *dwg, const BITCODE_RLL blk, const char *what)
+{
+  const Dwg_DynValue v = value ("Width", 30.0);
+  int error = 0, failures = 0;
+  Dwg_Object_BLOCK_HEADER *rep
+      = dwg_dynblock_evaluate (block_header (dwg, blk), &v, 1, &error);
+  loglevel = test_loglevel;
+  if (!rep || error)
+    {
+      FAIL ("%s: evaluating at Width 30 failed (0x%x)", what, error);
+      return 1;
+    }
+  // the ATTDEFs follow the box's entities
+  CHECK (attdef_at (nth_entity (dwg, rep, BOX_ENTITIES + A_NAME), 13.0,
+                    -2.0, 15.0, -2.0)
+             && attdef_at (nth_entity (dwg, rep, BOX_ENTITIES + A_LEFT), 8.0,
+                           -8.0, 0.0, 0.0)
+             && attdef_at (nth_entity (dwg, rep, BOX_ENTITIES + A_LOCKED),
+                           8.0, -6.0, 0.0, 0.0),
+         "%s: at Width 30, the ATTDEFs the move selects move by 5", what);
+  CHECK (attdef_at (nth_entity (dwg, rep, BOX_ENTITIES + A_SIDE), 31.0, -3.0,
+                    0.0, 0.0),
+         "%s: the ATTDEF the stretch selects moves by 10", what);
+  CHECK (attdef_at (nth_entity (dwg, rep, BOX_ENTITIES + A_FREE), 1.0, -4.0,
+                    0.0, 0.0),
+         "%s: the ATTDEF neither selects stays", what);
+  return failures;
+}
+
+/* dwg_dynblock_add_move () and dwg_dynblock_add_stretch () lock the
+   position of the attribute definitions they select, which AutoCAD moves
+   with an action only when locked, in a block read from a file: an
+   AcDbAttr group 1070 0, 1070 1 at the end of each one's EED, in place of
+   an unlocked group, which a group kept as the bytes read follows; a
+   locked one is left as it is. A refused move locks nothing. The block
+   evaluates with them moved, placements check, and the written file reads
+   back the same. */
+static int
+test_locked_attdefs (void)
+{
+  Dwg_Data *dwg = (Dwg_Data *)calloc (1, sizeof (Dwg_Data));
+  Dwg_Data back;
+  BITCODE_RLL h[BOX_ENTITIES], a[NUM_ATTDEFS], blk = 0, ins_40 = 0;
+  Dwg_Object_BLOCKLINEARPARAMETER *param;
+  Dwg_Object_BLOCKSTRETCHACTION *s;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  Dwg_DynBlock_Check_Report *report;
+  BITCODE_BL num_eed;
+  BITCODE_RS v[2];
+  int error = 0, failures = 0, last;
+  if (!dwg || locked_box (dwg, &blk, h, a))
+    {
+      FAIL ("locked ATTDEFs: building the block failed");
+      free (dwg);
+      unlink (WRITTEN_LOCKED);
+      return 1;
+    }
+  param = dwg_dynblock_add_linear (block_header (dwg, blk), "Width",
+                                   &box_base, &box_end, &error);
+  loglevel = test_loglevel;
+  if (!param || error)
+    {
+      FAIL ("locked ATTDEFs: adding Width failed (0x%x)", error);
+      free_document (dwg);
+      return 1;
+    }
+  // refused, for the POINT: nothing is locked
+  {
+    const dwg_point_3d pt = { 5, -5, 0 };
+    Dwg_Entity_POINT *point = dwg_add_POINT (block_header (dwg, blk), &pt);
+    BITCODE_RLL refused[2];
+    loglevel = test_loglevel;
+    refused[0] = a[A_NAME];
+    refused[1] = point ? handle_of (dwg, point) : 0;
+    m = point ? dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                       refused, 2, 0.5, &error)
+              : NULL;
+    loglevel = test_loglevel;
+    CHECK (point && !m && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && group_1070s (dwg, object (dwg, a[A_NAME]), "AcDbAttr", v,
+                               2, &last)
+                      == -1,
+           "locked ATTDEFs: a refused move locks nothing (0x%x)", error);
+  }
+  num_eed = object (dwg, a[A_LOCKED])->tio.entity->num_eed;
+  {
+    const BITCODE_RLL stretched[4]
+        = { h[TOP], h[RIGHT], h[BOTTOM], a[A_SIDE] };
+    const BITCODE_RLL moved[5]
+        = { h[CIRCLE], h[CAPTION], a[A_NAME], a[A_LEFT], a[A_LOCKED] };
+    s = dwg_dynblock_add_stretch (block_header (dwg, blk), param, &frame1,
+                                  &frame2, stretched, 4, &error);
+    loglevel = test_loglevel;
+    CHECK (s && !error, "locked ATTDEFs: stretch added (0x%x)", error);
+    m = dwg_dynblock_add_move (block_header (dwg, blk), param, moved, 5, 0.5,
+                               &error);
+    loglevel = test_loglevel;
+    CHECK (m && !error, "locked ATTDEFs: move added (0x%x)", error);
+  }
+  if (!s || !m)
+    {
+      free_document (dwg);
+      unlink (WRITTEN_LOCKED);
+      return failures;
+    }
+  failures += locks_are (dwg, h, a, "locked ATTDEFs");
+  CHECK (object (dwg, a[A_LOCKED])->tio.entity->num_eed == num_eed,
+         "locked ATTDEFs: the locked ATTDEF's EED is unchanged");
+  CHECK (count_appids (dwg, "AcDbAttr") == 1,
+         "locked ATTDEFs: one AcDbAttr APPID, the file's");
+  failures += evaluates_attdefs (dwg, blk, "locked ATTDEFs");
+  {
+    const BITCODE_3BD at = { 100, 50, 0 };
+    const Dwg_DynValue v40 = value ("Width", 40.0);
+    Dwg_Entity_INSERT *ins
+        = dwg_dynblock_insert (model_space (dwg), block_header (dwg, blk),
+                               &at, 1.0, 0.0, &v40, 1, NULL, 0, &error);
+    loglevel = test_loglevel;
+    ins_40 = ins && !error ? handle_of (dwg, ins) : 0;
+    CHECK (ins && !error && ins->num_owned == NUM_ATTDEFS,
+           "locked ATTDEFs: placed at Width 40 (0x%x)", error);
+  }
+
+  error = write_dwg (WRITTEN_LOCKED, dwg);
+  free_document (dwg);
+  error = error < DWG_ERR_CRITICAL ? read_dwg (WRITTEN_LOCKED, &back) : error;
+  CHECK (error < DWG_ERR_CRITICAL, "locked ATTDEFs: written and read back "
+                                   "(0x%x)",
+         error);
+  if (error >= DWG_ERR_CRITICAL)
+    return failures;
+  failures += locks_are (&back, h, a, "locked ATTDEFs read back");
+  failures += evaluates_attdefs (&back, blk, "locked ATTDEFs read back");
+  {
+    // the placement's ATTRIBs, in the block's order: where the evaluation
+    // moved their ATTDEFs, each with its definition's lock
+    const Dwg_Object *insobj = object (&back, ins_40);
+    const Dwg_Entity_INSERT *ins
+        = insobj && insobj->fixedtype == DWG_TYPE_INSERT
+              ? insobj->tio.entity->tio.INSERT
+              : NULL;
+    static const double x[NUM_ATTDEFS] = { 110 + 10, 103 + 10, 103 + 10,
+                                           121 + 20, 101 };
+    int at = ins && ins->num_owned == NUM_ATTDEFS;
+    for (int i = 0; at && i < NUM_ATTDEFS; i++)
+      {
+        const Dwg_Object *attrib = object (&back, ref (ins->attribs[i]));
+        const Dwg_Entity_ATTRIB *_attrib
+            = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+                  ? attrib->tio.entity->tio.ATTRIB
+                  : NULL;
+        at = _attrib
+             && near (i == A_NAME ? _attrib->alignment_pt.x
+                                  : _attrib->ins_pt.x,
+                      x[i])
+             && (i == A_FREE ? !is_locked (&back, attrib, 0)
+                             : is_locked (&back, attrib, 0));
+      }
+    CHECK (at, "locked ATTDEFs read back: the placement's ATTRIBs are where "
+               "the evaluation moved their ATTDEFs, with their locks");
+  }
+  report = dwg_dynblock_check (&back, 1e-9);
+  loglevel = test_loglevel;
+  CHECK (report && report->num_checks == 1 && report->num_match == 1
+             && report->checks[0].insert == ins_40,
+         "locked ATTDEFs read back: the placement at Width 40 checks against "
+         "its representation block");
+  dwg_dynblock_free_check_report (report);
+  free_dwg (&back);
+  // kept to look at when a check failed
+  if (!failures)
+    unlink (WRITTEN_LOCKED);
+  return failures;
+}
+
+/* The first lock in a document without an AcDbAttr APPID adds one, which
+   can move the document's object list: the ATTDEF is found again after
+   it. Here the list is full but for the move's action, so that adding the
+   APPID reallocates it, which an ASan build catches when the ATTDEF's old
+   object is used. */
+static int
+test_lock_adds_appid (void)
+{
+  Dwg_Data *dwg = new_document ();
+  BITCODE_RLL h[BOX_ENTITIES], blk, att_h = 0;
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  BITCODE_BL before;
+  int error = 0, failures = 0;
+  blk = dwg ? add_box_block (dwg, "BOX", h) : 0;
+  if (blk)
+    {
+      const dwg_point_3d at = { 3, -8, 0 };
+      Dwg_Entity_ATTDEF *att = dwg_add_ATTDEF (block_header (dwg, blk), 1.0,
+                                               0, "Prompt", &at, "TAG", "X");
+      att_h = att ? handle_of (dwg, att) : 0;
+      if (att)
+        param = dwg_dynblock_add_linear (block_header (dwg, blk), "Width",
+                                         &box_base, &box_end, &error);
+    }
+  loglevel = test_loglevel;
+  if (!param || count_appids (dwg, "AcDbAttr"))
+    {
+      FAIL ("lock adds the APPID: building the block failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  before = dwg->num_objects;
+  dwg->num_alloced_objects = before + 1;
+  m = dwg_dynblock_add_move (block_header (dwg, blk), param, &att_h, 1, 0.5,
+                             &error);
+  loglevel = test_loglevel;
+  CHECK (m && !error && dwg->num_objects == before + 2
+             && dwg->num_alloced_objects > before + 1
+             && count_appids (dwg, "AcDbAttr") == 1
+             && is_locked (dwg, object (dwg, att_h), 1),
+         "lock adds the APPID: the move's action, then the APPID, which "
+         "reallocates the object list; the ATTDEF is locked (0x%x)",
+         error);
+  free_document (dwg);
+  return failures;
+}
+
+/*--------------------------------------------------------------------------------
  * Copying entities
  */
 
@@ -3051,6 +3520,8 @@ main (int argc, char *argv[])
   failures += test_autocad_graph (&src);
   failures += test_lwpolyline_from_dwg (&src);
   failures += test_written ();
+  failures += test_locked_attdefs ();
+  failures += test_lock_adds_appid ();
   failures += test_copy_entities ();
   failures += test_copy_numbering (&src);
   failures += test_copy_refusals ();

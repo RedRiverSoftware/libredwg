@@ -1032,7 +1032,8 @@ attdef_place (const Dynblock_Placement *p, const BITCODE_RLL handle,
    thickness that a double holds, and start, at the width given, where a
    double holds (start_at_width ()), so that a refusal comes before
    anything is added. The representation block's attribute definitions are
-   def's, moved as the evaluation moves them. */
+   def's, moved as the evaluation moves them; the ATTRIBs of those whose
+   position is locked start there, and the others where def's do. */
 static int
 check_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                   const BITCODE_BL num_atts)
@@ -1827,10 +1828,13 @@ copy_entity_properties (Dwg_Data *dwg, const Dwg_Object_Entity *from,
    that isn't constant, in the block's order, as AutoCAD's INSERT does: the
    definition's text properties, with the placement's transform applied,
    and the value from atts, or the definition's default, starting where the
-   value's width in atts moves it (start_at_width ()). With etags, each
-   ATTRIB gets its definition's AcDbBlockRepETag index, as AutoCAD's do on
-   a placement at the definition's values; then each gets a copy of its
-   definition's AcDbAttr EED (copy_attr_eed ()). */
+   value's width in atts moves it (start_at_width ()). An ATTRIB starts
+   where the evaluation moved its definition only when the definition's
+   position is locked, as AutoCAD's ATTRIBs follow their definitions only
+   then; one that isn't locked starts where def's own definition does. With
+   etags, each ATTRIB gets its definition's AcDbBlockRepETag index, as
+   AutoCAD's do on a placement at the definition's values; then each gets a
+   copy of its definition's AcDbAttr EED (copy_attr_eed ()). */
 static int
 add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
                 const BITCODE_BL num_atts, const int etags)
@@ -1841,8 +1845,9 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
   const BITCODE_RLL etag_appid
       = etags ? appid_handle (dwg, "AcDbBlockRepETag") : 0;
   const Dwg_Object_BLOCK_HEADER *blk = block_of (dwg, p->block);
+  const Dwg_Object_BLOCK_HEADER *def = block_of (dwg, p->def);
   const BITCODE_BL num_owned = blk->num_owned;
-  BITCODE_RLL *attdefs;
+  BITCODE_RLL *attdefs, *sources;
   BITCODE_3BD base = blk->base_pt;
   BITCODE_BL n = 0;
   int error = 0;
@@ -1851,11 +1856,24 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
     return DWG_ERR_OUTOFMEM;
   // the block's entity list doesn't move, but the objects may
   attdefs = (BITCODE_RLL *)calloc (num_owned + 1, sizeof (BITCODE_RLL));
-  if (!attdefs)
-    return DWG_ERR_OUTOFMEM;
+  sources = (BITCODE_RLL *)calloc (num_owned + 1, sizeof (BITCODE_RLL));
+  if (!attdefs || !sources)
+    {
+      free (attdefs);
+      free (sources);
+      return DWG_ERR_OUTOFMEM;
+    }
   for (BITCODE_BL i = 0; blk->entities && i < num_owned; i++)
     if (is_placed_attdef (ref_object (dwg, blk->entities[i])))
-      attdefs[n++] = ref_handle (blk->entities[i]);
+      {
+        attdefs[n] = ref_handle (blk->entities[i]);
+        // a representation block holds a copy of each of def's entities,
+        // in def's order
+        sources[n] = def->entities && i < def->num_owned
+                         ? ref_handle (def->entities[i])
+                         : attdefs[n];
+        n++;
+      }
 
   // an AcDbAttr group left out (DWG_ERR_INVALIDEED) doesn't stop the rest
   for (BITCODE_BL i = 0; error < DWG_ERR_CRITICAL && i < n; i++)
@@ -1883,9 +1901,17 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
       for (BITCODE_BL k = 0; k < num_atts && !value; k++)
         if (strEQ (atts[k].tag, tag))
           value = atts[k].value;
-      // the block's ATTDEFs are already where the evaluation put them
-      place_attdef (p, &base, attdef, &attdef->ins_pt, &attdef->alignment_pt,
-                    &pt, &align);
+      // the block's ATTDEFs are already where the evaluation put them; the
+      // ATTRIB of one that isn't locked starts where def's own is
+      {
+        const Dwg_Object *srcobj = handle_object (dwg, sources[i]);
+        const Dwg_Entity_ATTDEF *at = attdef;
+        if (srcobj && srcobj->fixedtype == DWG_TYPE_ATTDEF
+            && !dynblock_is_locked_attdef (dwg, srcobj))
+          at = srcobj->tio.entity->tio.ATTDEF;
+        place_attdef (p, &base, attdef, &at->ins_pt, &at->alignment_pt, &pt,
+                      &align);
+      }
       if (etags)
         has_etag = etag_index (dwg, defobj, &etag_value, &etag);
       start_at_width (p, attdef, att_width (atts, num_atts, tag), &pt, &align);
@@ -1938,6 +1964,7 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
         error |= copy_attr_eed (dwg, defobj, attobj->tio.entity);
     }
   free (attdefs);
+  free (sources);
   return error;
 }
 

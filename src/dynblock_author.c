@@ -240,10 +240,11 @@ etag_index (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RL *indexp)
   return 1;
 }
 
-/* Drops the AcDbBlockRepETag EED groups of the EED *eedp, of *num_eedp
+/* Drops the EED groups named appname of the EED *eedp, of *num_eedp
    items. */
 static void
-drop_etag (const Dwg_Data *dwg, Dwg_Eed **eedp, BITCODE_BL *num_eedp)
+drop_group (const Dwg_Data *dwg, Dwg_Eed **eedp, BITCODE_BL *num_eedp,
+            const char *appname)
 {
   Dwg_Eed *eed = *eedp;
   BITCODE_BL kept = 0;
@@ -255,7 +256,7 @@ drop_etag (const Dwg_Data *dwg, Dwg_Eed **eedp, BITCODE_BL *num_eedp)
       if (eed[i].size)
         {
           const char *name = group_appname (dwg, &eed[i]);
-          drop = name && strEQc (name, "AcDbBlockRepETag");
+          drop = name && strEQ (name, appname);
         }
       if (drop)
         {
@@ -276,7 +277,8 @@ drop_etag (const Dwg_Data *dwg, Dwg_Eed **eedp, BITCODE_BL *num_eedp)
 void
 dynblock_drop_etag (const Dwg_Data *dwg, Dwg_Object *obj)
 {
-  drop_etag (dwg, &obj->tio.entity->eed, &obj->tio.entity->num_eed);
+  drop_group (dwg, &obj->tio.entity->eed, &obj->tio.entity->num_eed,
+              "AcDbBlockRepETag");
 }
 
 static Dwg_Eed_Data *
@@ -419,9 +421,77 @@ number_entities (Dwg_Data *dwg, const BITCODE_RLL blk_handle)
   // A new group at the end, rather than the old one changed: the encoder
   // writes a group with its bytes as read when it has them, and loses the
   // header of a changed group that one such follows.
-  drop_etag (dwg, &o->eed, &o->num_eed);
+  drop_group (dwg, &o->eed, &o->num_eed, "AcDbBlockRepETag");
   return append_etag (&o->eed, &o->num_eed, appid, (BITCODE_RL)next, 0);
 }
+
+#ifdef USE_WRITE
+/* Appends to the EED *eedp, of *num_eedp items, the AcDbAttr group of
+   APPID appid that locks an attribute's position in r2004 files: 1070 0,
+   1070 1. */
+static int
+append_lock (Dwg_Eed **eedp, BITCODE_BL *num_eedp, const BITCODE_RLL appid)
+{
+  const BITCODE_RS values[2] = { 0, 1 };
+  Dwg_Eed *eed
+      = (Dwg_Eed *)realloc (*eedp, (*num_eedp + 2) * sizeof (Dwg_Eed));
+  Dwg_Eed *group;
+  if (!eed)
+    return DWG_ERR_OUTOFMEM;
+  *eedp = eed;
+  group = &eed[*num_eedp];
+  memset (group, 0, 2 * sizeof (Dwg_Eed));
+  // each item's size: its code byte and its value
+  group[0].size = 3 + 3;
+  group[0].handle.code = 5;
+  group[0].handle.value = appid;
+  dwg_set_handle_size (&group[0].handle);
+  for (int i = 0; i < 2; i++)
+    {
+      group[i].data = eed_item (70);
+      if (!group[i].data)
+        {
+          free (group[0].data);
+          group[0].data = NULL;
+          return DWG_ERR_OUTOFMEM;
+        }
+      // Dwg_Eed_Data is packed
+      memcpy (&group[i].data->u.eed_70.rs, &values[i], sizeof (values[i]));
+    }
+  *num_eedp += 2;
+  return 0;
+}
+
+/* Locks the position of entity handle when it is an ATTDEF, as AutoCAD's
+   Block Editor expects of an attribute definition that an action moves:
+   AutoCAD's move actions leave one that isn't locked where it is, and a
+   placement's ATTRIBs follow their definitions only when locked
+   (dynblock_is_locked_attdef ()). An AcDbAttr group it has gives way to a
+   new group at the end of its EED, rather than being changed, as
+   number_entities () replaces a counter; one already locked is left as it
+   is. *appidp is the handle of the AcDbAttr APPID, found or added when
+   first needed. */
+static int
+lock_attdef (Dwg_Data *dwg, const BITCODE_RLL handle, BITCODE_RLL *appidp)
+{
+  Dwg_Object *obj = handle_object (dwg, handle);
+  Dwg_Object_Entity *ent;
+  if (!obj || obj->fixedtype != DWG_TYPE_ATTDEF
+      || dynblock_is_locked_attdef (dwg, obj))
+    return 0;
+  if (!*appidp)
+    {
+      *appidp = appid_handle (dwg, "AcDbAttr");
+      if (!*appidp)
+        return DWG_ERR_OUTOFMEM;
+      // adding the APPID may have moved dwg->object
+      obj = handle_object (dwg, handle);
+    }
+  ent = obj->tio.entity;
+  drop_group (dwg, &ent->eed, &ent->num_eed, "AcDbAttr");
+  return append_lock (&ent->eed, &ent->num_eed, *appidp);
+}
+#endif
 
 /*--------------------------------------------------------------------------------
  * New objects of the dynamic-block classes, which the add API has no
@@ -1830,13 +1900,17 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
       }
     if (!error)
       {
+        BITCODE_RLL attr_appid = 0;
         _a->num_pts = 2;
         _a->pts[0] = hi;
         _a->pts[1] = lo;
         _a->action_offset_x = 1.0;
         _a->action_offset_y = 0.0;
         _a->xy_type = 0;
-        error = number_entities (dwg, ab.blk);
+        for (BITCODE_BL i = 0; !error && i < num_entities; i++)
+          error = lock_attdef (dwg, stretched[i].handle, &attr_appid);
+        if (!error)
+          error = number_entities (dwg, ab.blk);
       }
     free_stretched (stretched, num_entities);
     free_block (&ab);
@@ -2147,10 +2221,14 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
       }
     if (!error)
       {
+        BITCODE_RLL attr_appid = 0;
         _a->action_offset_x = multiplier;
         _a->action_offset_y = 0.0;
         _a->xy_type = 0;
-        error = number_entities (dwg, ab.blk);
+        for (BITCODE_BL i = 0; !error && i < num_objects; i++)
+          error = lock_attdef (dwg, moved[i].handle, &attr_appid);
+        if (!error)
+          error = number_entities (dwg, ab.blk);
       }
     free (moved);
     free_block (&ab);

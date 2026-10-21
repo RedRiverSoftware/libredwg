@@ -329,9 +329,15 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    TEXT, ATTDEF, MTEXT, INSERT (with its ATTRIBs) or HATCH moves whole,
    when its stretch points are all in the frame; a HATCH must then lie
    wholly inside the frame, which must be a rectangle, and have its
-   extrusion along +Z. The actions also move the points of the parameters
-   they select, so a LINEAR value is the distance after other properties'
-   actions moved its parameter, as AutoCAD's Properties palette shows it.
+   extrusion along +Z. As AutoCAD does, a move action moves an ATTDEF only
+   when its position is locked: in r2004 files, when its AcDbAttr EED
+   group is 1070 0, 1070 1 (see dwg_dynblock_insert ()). It leaves one that
+   isn't locked where it is, as does a stretch action that selects one
+   wholly outside its frame, while a stretch action whose frame holds its
+   insertion point moves it either way. The actions also move the points of
+   the parameters they select, so a LINEAR value is the distance after
+   other properties' actions moved its parameter, as AutoCAD's Properties
+   palette shows it.
    Only the actions of the properties that run run: those given a value
    that changes their parameter, and the linear ones given a value whose
    parameters the stretch or move actions of such a property move. A
@@ -343,15 +349,15 @@ EXPORT void dwg_dynblock_free_values (Dwg_DynValue *values,
    AutoCAD evaluates them in is not known; an action moving a parameter,
    of any kind, that chains its actions, which AutoCAD would then run too;
    an entity a stretch action selects with none of its stretch points in
-   the frame, which AutoCAD moves whole, and a parameter it lists with
-   none of its points in the frame; a parameter an action selects but
-   doesn't list among those it moves, other than its own, that chains its
-   actions or is a rotation parameter given a value; a stretch of a TEXT
-   or ATTDEF aligned or fitted between two points, or of part of an entity
-   of another type; a HATCH that crosses the frame; an action moving an
-   entity of another type, taking another point's change than the end or
-   base point's, or with an XY type; a move that would take 2D points out
-   of their plane.
+   the frame, which AutoCAD moves whole, other than an ATTDEF that isn't
+   locked, and a parameter it lists with none of its points in the frame;
+   a parameter an action selects but doesn't list among those it moves,
+   other than its own, that chains its actions or is a rotation parameter
+   given a value; a stretch of a TEXT or ATTDEF aligned or fitted between
+   two points, or of part of an entity of another type; a HATCH that
+   crosses the frame; an action moving an entity of another type, taking
+   another point's change than the end or base point's, or with an XY
+   type; a move that would take 2D points out of their plane.
 
    A ROTATION value turns its parameter's end point about its base point,
    and the rotate actions connected to the parameter then turn the
@@ -478,10 +484,10 @@ typedef struct _dwg_attvalue
    entities has an index gets no group.
 
    Attributes: the INSERT gets an ATTRIB for each attribute definition of
-   the block it draws that isn't constant, where the evaluation moved it,
-   in the block's order, with the definition's tag, flags, text style,
-   height, width factor, oblique angle, alignment, layer, colour,
-   linetype, lineweight and plot style;
+   the block it draws that isn't constant, where the evaluation moved it
+   when its position is locked (see below), in the block's order, with the
+   definition's tag, flags, text style, height, width factor, oblique
+   angle, alignment, layer, colour, linetype, lineweight and plot style;
    its position, alignment point, height, thickness and rotation placed by
    the INSERT (text left-aligned on the baseline has no alignment point,
    and the ATTRIB stores none, as AutoCAD's don't); and its value from
@@ -492,9 +498,12 @@ typedef struct _dwg_attvalue
    AutoCAD's do. Each ATTRIB gets a copy of its definition's AcDbAttr EED,
    as AutoCAD's do: AutoCAD 2007 and later keep an attribute's lock
    position there in r2004 files (1070 0, 1070 1 when locked, and no group
-   otherwise), and may leave an ATTRIB without it, not locked, behind when
-   an edit of the placement moves its definition. They are added with
-   dwg_add_ATTRIB (), which links them to the INSERT as AutoCAD does.
+   otherwise), and leave an ATTRIB that isn't locked where it is when an
+   edit of the placement moves its definition. So the ATTRIB of an
+   attribute definition that isn't locked starts where def's own starts,
+   wherever the evaluation moved the representation block's copy. They
+   are added with dwg_add_ATTRIB (), which links them to the INSERT as
+   AutoCAD does.
 
    Where text justified centre, right or middle starts, its insertion
    point, AutoCAD derives from its alignment point and the width it
@@ -795,7 +804,15 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    least one stretch point in the frame: AutoCAD moves whole an entity of
    the selection that lies wholly outside the frame, which
    dwg_dynblock_evaluate () doesn't evaluate. The entities are numbered as
-   dwg_dynblock_add_linear () numbers them.
+   dwg_dynblock_add_linear () numbers them. Each ATTDEF among them gets its
+   position locked, as AutoCAD's Block Editor expects of an attribute
+   definition an action moves: AutoCAD's move actions leave one that isn't
+   locked where it is, and the ATTRIBs of its placements stay behind when
+   their definition moves. Its AcDbAttr EED group becomes 1070 0, 1070 1, a
+   new group at the end of its EED in place of any it had, and the
+   document gets the AcDbAttr APPID when it has none; an ATTDEF already
+   locked is left as it is. The ATTRIBs of placements made before keep
+   their own AcDbAttr EED.
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
    not a BLOCK_HEADER of its document, param not a linear parameter of blk's
@@ -840,7 +857,9 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
    entities they act on. A parameter is stored in the action's selection
    with its grips, and listed by node id among the parameters it moves, as
    AutoCAD's Block Editor stores a move whose selection holds a parameter.
-   The entities are numbered as dwg_dynblock_add_linear () numbers them.
+   The entities are numbered as dwg_dynblock_add_linear () numbers them,
+   and the ATTDEFs among them locked as dwg_dynblock_add_stretch () locks
+   them.
 
    Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for blk,
    param and the entities, with a handle that is neither one of blk's entities

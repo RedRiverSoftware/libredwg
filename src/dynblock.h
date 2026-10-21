@@ -36,10 +36,10 @@ typedef struct _dynblock_node_state
   BITCODE_3BD points[2];
 } Dynblock_Node_State;
 
-/* One of the definition's ATTDEFs that the evaluation moves whole: its
-   insertion and alignment points after the moves, added to them one after
-   another as the evaluation adds them, so that they are the copy's to the
-   last bit. */
+/* One of the definition's ATTDEFs that the evaluation moves whole, its
+   position locked, where its ATTRIBs go: its insertion and alignment
+   points after the moves, added to them one after another as the
+   evaluation adds them, so that they are the copy's to the last bit. */
 typedef struct _dynblock_attdef_place
 {
   BITCODE_RLL entity;
@@ -51,7 +51,7 @@ typedef struct _dynblock_state
 {
   Dynblock_Node_State *nodes; /* each parameter with points, in graph order */
   BITCODE_BL num_nodes;
-  Dynblock_Attdef_Place *attdefs; /* the ATTDEFs that move */
+  Dynblock_Attdef_Place *attdefs; /* the locked ATTDEFs that move */
   BITCODE_BL num_attdefs;
 } Dynblock_State;
 
@@ -80,6 +80,12 @@ void dynblock_free_state (Dynblock_State *state);
 
 /* Whether the evaluator moves an entity of obj's type whole. */
 int dynblock_is_movable (const Dwg_Object *obj);
+
+/* Whether ATTDEF obj has its position locked, as its AcDbAttr EED group
+   holds it in r2004 files: the evaluator's move actions leave one that
+   isn't locked where it is, and a placement's ATTRIB of one stays where
+   the definition's own is, as AutoCAD's do. */
+int dynblock_is_locked_attdef (const Dwg_Data *dwg, const Dwg_Object *obj);
 
 /* Whether a move of entity obj, or of an ATTRIB it owns, by wcs_delta
    would take its 2D points out of their plane. */

@@ -4709,12 +4709,12 @@ test_round_trip (Dwg_Data *src)
   return failures;
 }
 
-/* An ATTDEF at x -2^90 that two of the Window's stretch actions move, by
-   2^90 and then by 2^32 ('Stretch Divider' made to take 2^-58 of the
-   change), at Window Width 2^90 + 36: it ends at 2^32, while the sum of
-   the moves rounds to 2^90 and would put it at 0. Placed at a scale of
-   1e300 it is beyond what a double holds, which is refused before
-   anything is added. */
+/* An ATTDEF at x -2^90, its position locked, that two of the Window's
+   stretch actions move, by 2^90 and then by 2^32 ('Stretch Divider' made
+   to take 2^-58 of the change), at Window Width 2^90 + 36: it ends at
+   2^32, while the sum of the moves rounds to 2^90 and would put it at 0.
+   Placed at a scale of 1e300 it is beyond what a double holds, which is
+   refused before anything is added. */
 static int
 test_attdef_moved_twice (Dwg_Data *src)
 {
@@ -4745,6 +4745,12 @@ test_attdef_moved_twice (Dwg_Data *src)
     }
   attdef_h = handle_of (dst, attdef);
   width->tio.object->tio.BLOCKLINEARPARAMETER->value_set.flags = 0;
+  if (add_attr_eed (dst, attdef->parent, 70, 1))
+    {
+      FAIL ("ATTDEF moved twice: locking the ATTDEF failed");
+      free_document (dst);
+      return 1;
+    }
   obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION, "Stretch Width");
   stretch = obj ? obj->tio.object->tio.BLOCKSTRETCHACTION : NULL;
   obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
@@ -4772,15 +4778,18 @@ test_attdef_moved_twice (Dwg_Data *src)
 }
 
 /* Parameters the fixture's actions don't move, made to: the Door's
-   'Stretch' moving its visibility parameter's point (index 0), and an
-   ATTDEF added to the Window in 'Stretch Width''s frame and selection.
-   At Wall Thickness 6 the visibility parameter's record holds its point
-   moved 1 down, as Wall Thickness's end point moves; at Window Width 24
-   the ATTRIB is where the evaluation moved its ATTDEF, 12 to the left,
-   and, centred with a width given, starts back by half the width from
-   where the evaluation moved its alignment point; and at a huge scale one
-   placed beyond a double is refused before anything is added, while the
-   definition's own place is not. */
+   'Stretch' moving its visibility parameter's point (index 0), and two
+   ATTDEFs added to the Window in 'Stretch Width''s frame and selection,
+   one with its position locked. At Wall Thickness 6 the visibility
+   parameter's record holds its point moved 1 down, as Wall Thickness's
+   end point moves; at Window Width 24 the locked ATTDEF's ATTRIB is where
+   the evaluation moved its ATTDEF, 12 to the left, and, centred with a
+   width given, starts back by half the width from where the evaluation
+   moved its alignment point, while the other's stays where the
+   definition's ATTDEF is, though the stretch moves the representation
+   block's copy, as AutoCAD leaves an ATTRIB that isn't locked; and at a
+   huge scale one placed beyond a double is refused before anything is
+   added, while the definition's own place is not. */
 static int
 test_moved_parameters (Dwg_Data *src)
 {
@@ -4875,20 +4884,33 @@ test_moved_parameters (Dwg_Data *src)
             : NULL;
   if (obj)
     {
+      const dwg_point_3d note_pt = { 35.0, 12.0, 0.0 };
       Dwg_Entity_ATTDEF *attdef
           = dwg_add_ATTDEF (block_header (dst, def_h), 2.5, 0, "Mark",
                             &attdef_pt, "MARK", "M");
+      Dwg_Entity_ATTDEF *note
+          = attdef ? dwg_add_ATTDEF (block_header (dst, def_h), 2.5, 0,
+                                     "Note", &note_pt, "NOTE", "N")
+                   : NULL;
       const BITCODE_RLL attdef_h = attdef ? handle_of (dst, attdef) : 0;
+      const BITCODE_RLL note_h = note ? handle_of (dst, note) : 0;
       const BITCODE_BL point = 0;
       const BITCODE_3BD origin = { 0.0, 0.0, 0.0 };
       loglevel = test_loglevel;
-      // found again, as adding the ATTDEF may have moved the objects
+      if (!note || add_attr_eed (dst, attdef->parent, 70, 1))
+        {
+          FAIL ("moved parameters: adding the ATTDEFs to the Window failed");
+          free_document (dst);
+          return failures + 1;
+        }
+      // found again, as adding the ATTDEFs may have moved the objects
       obj = named_node (dst, def_h, DWG_TYPE_BLOCKSTRETCHACTION,
                         "Stretch Width");
       stretch = obj->tio.object->tio.BLOCKSTRETCHACTION;
-      if (!attdef
-          || !add_dep (dst, &stretch->deps, &stretch->num_deps, attdef_h)
-          || !add_stretch_entity (dst, stretch, attdef_h, &point, 1))
+      if (!add_dep (dst, &stretch->deps, &stretch->num_deps, attdef_h)
+          || !add_stretch_entity (dst, stretch, attdef_h, &point, 1)
+          || !add_dep (dst, &stretch->deps, &stretch->num_deps, note_h)
+          || !add_stretch_entity (dst, stretch, note_h, &point, 1))
         {
           FAIL ("moved parameters: adding an ATTDEF to the Window failed");
           free_document (dst);
@@ -4917,6 +4939,17 @@ test_moved_parameters (Dwg_Data *src)
             = attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
                   ? attrib->tio.entity->tio.ATTRIB
                   : NULL;
+        const Dwg_Object *note_attrib
+            = insert && insert->num_owned == 2
+                  ? object (dst, ref (insert->attribs[1]))
+                  : NULL;
+        const Dwg_Entity_ATTRIB *_note
+            = note_attrib && note_attrib->fixedtype == DWG_TYPE_ATTRIB
+                  ? note_attrib->tio.entity->tio.ATTRIB
+                  : NULL;
+        const Dwg_Object_BLOCK_HEADER *rep
+            = insert ? block_header (dst, ref (insert->block_header)) : NULL;
+        const Dwg_Entity_ATTDEF *rep_note = NULL;
         if (_attrib && !error
             && fabs (_attrib->ins_pt.x
                      - (at.x + attdef_pt.x - 12.0 - base.x))
@@ -4924,12 +4957,40 @@ test_moved_parameters (Dwg_Data *src)
             && fabs (_attrib->ins_pt.y - (at.y + attdef_pt.y - base.y))
                    <= RECORD_TOLERANCE)
           OK ("moved parameters: the ATTRIB is where the evaluation moved "
-              "its ATTDEF");
+              "its locked ATTDEF");
         else
           {
             FAIL ("moved parameters: the ATTRIB at (%g, %g): 0x%x",
                   _attrib ? _attrib->ins_pt.x : 0.0,
                   _attrib ? _attrib->ins_pt.y : 0.0, error);
+            failures++;
+          }
+        for (BITCODE_BL i = 0; rep && rep->entities && i < rep->num_owned;
+             i++)
+          {
+            const Dwg_Object *e = object (dst, ref (rep->entities[i]));
+            if (e && e->fixedtype == DWG_TYPE_ATTDEF
+                && !strcmp (e->tio.entity->tio.ATTDEF->tag, "NOTE"))
+              rep_note = e->tio.entity->tio.ATTDEF;
+          }
+        if (_note && rep_note && !error
+            && fabs (rep_note->ins_pt.x - (note_pt.x - 12.0))
+                   <= RECORD_TOLERANCE
+            && fabs (_note->ins_pt.x - (at.x + note_pt.x - base.x))
+                   <= RECORD_TOLERANCE
+            && fabs (_note->ins_pt.y - (at.y + note_pt.y - base.y))
+                   <= RECORD_TOLERANCE)
+          OK ("moved parameters: the stretch moves the ATTDEF that isn't "
+              "locked, and its ATTRIB stays where the definition's is");
+        else
+          {
+            FAIL ("moved parameters: the unlocked ATTDEF at x %g in the "
+                  "representation block, expected %g; its ATTRIB at (%g, "
+                  "%g), expected (%g, %g): 0x%x",
+                  rep_note ? rep_note->ins_pt.x : 0.0, note_pt.x - 12.0,
+                  _note ? _note->ins_pt.x : 0.0,
+                  _note ? _note->ins_pt.y : 0.0, at.x + note_pt.x - base.x,
+                  at.y + note_pt.y - base.y, error);
             failures++;
           }
       }
@@ -5007,6 +5068,30 @@ test_moved_parameters (Dwg_Data *src)
                                 0.0, &v, 1, NULL, 0,
                                 REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
                                 "an ATTDEF moved and placed beyond a double");
+      // with Mark's lock taken off too, neither ATTRIB starts where the
+      // stretch moved its ATTDEF, but where the definition's does, which a
+      // double holds at that scale
+      {
+        const Dwg_Object *mark = object (dst, attdef_h);
+        const BITCODE_RS zero = 0;
+        BITCODE_RS lock[2] = { 9, 9 };
+        if (mark && mark->tio.entity->num_eed == 2
+            && attr_eed (dst, mark, lock) == 2 && lock[1] == 1)
+          {
+            // Dwg_Eed_Data is packed
+            memcpy (&mark->tio.entity->eed[1].data->u.eed_70.rs, &zero,
+                    sizeof (zero));
+            failures += test_accepted (dst, def_h, 1e300, &v, 1,
+                                       "ATTDEFs that aren't locked, moved to "
+                                       "where a locked one's ATTRIB is "
+                                       "beyond a double");
+          }
+        else
+          {
+            FAIL ("moved parameters: Mark's AcDbAttr group not found");
+            failures++;
+          }
+      }
     }
   else
     {
