@@ -1428,15 +1428,15 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
                 = new_string (dwg, connections[1]);
             _param->prop_states[1] = ids[1];
           }
+        // value_set.desc, which only DXF and JSON have, stays NULL: the
+        // DWG free doesn't free it
         _param->distance_name = new_string (dwg, name);
         _param->distance_desc = new_string (dwg, "");
         _param->distance = 0.0;
-        _param->value_set.desc = new_string (dwg, "");
         if (!error
             && (!_param->prop3.connections[0].name
                 || !_param->prop4.connections[0].name
-                || !_param->distance_name || !_param->distance_desc
-                || !_param->value_set.desc))
+                || !_param->distance_name || !_param->distance_desc))
           error = DWG_ERR_OUTOFMEM;
       }
     if (!error)
