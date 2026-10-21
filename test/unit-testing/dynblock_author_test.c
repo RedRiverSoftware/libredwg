@@ -74,6 +74,7 @@ static int test_loglevel;
 #define FIXTURE "test/test-data/2004/Dynblocks.dwg"
 #define WRITTEN "dynblock_author_test.dwg"
 #define WRITTEN_COPY "dynblock_author_test_copy.dwg"
+#define WRITTEN_LWPOLYLINE "dynblock_author_test_lwpolyline.dwg"
 
 /* The fixture's definitions */
 #define TREES 0xB45B
@@ -81,6 +82,8 @@ static int test_loglevel;
 #define DOOR 0xBAC4
 #define DOOR_ELEVATION 0xBB0C /* constraint-based */
 #define WINDOW 0xBBC1
+/* *U31: constraint-based, with an ACAD_ASSOCNETWORK and no graph */
+#define U31 0xBB72
 
 /* The fixture reads with the errors of its constraint-based block only. */
 #define KNOWN_ERRORS (DWG_ERR_UNHANDLEDCLASS | DWG_ERR_VALUEOUTOFBOUNDS)
@@ -1004,6 +1007,139 @@ test_linear_refusals (Dwg_Data *src)
   return failures;
 }
 
+/* Constraint-based (parametric) blocks, which dwg_dynblock_evaluate ()
+   refuses, are refused with nothing added: the fixture's *U31, whose
+   constraints are in its ACAD_ASSOCNETWORK and which has no graph; and a
+   block whose graph has a constraint or a user parameter node, but no
+   proxy node, by all three functions. */
+static int
+test_constraint_based (Dwg_Data *src)
+{
+  Dwg_Data *dwg;
+  BITCODE_RLL h[BOX_ENTITIES], blk = 0, spare_h;
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL, *spare = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  const BITCODE_3BD sb = { 0, -20, 0 }, se = { 5, -20, 0 };
+  const struct
+  {
+    Dwg_Object_Type type;
+    const char *name;
+    int (*setup) (Dwg_Object *);
+  } kinds[2] = {
+    { DWG_TYPE_BLOCKLINEARCONSTRAINTPARAMETER,
+      "BLOCKLINEARCONSTRAINTPARAMETER",
+      dwg_setup_BLOCKLINEARCONSTRAINTPARAMETER },
+    { DWG_TYPE_BLOCKUSERPARAMETER, "BLOCKUSERPARAMETER",
+      dwg_setup_BLOCKUSERPARAMETER },
+  };
+  int error = 0, failures = 0;
+
+  {
+    const Dwg_Object *u31 = object (src, U31);
+    const BITCODE_BL nsrc = src->num_objects;
+    CHECK (u31 && u31->fixedtype == DWG_TYPE_BLOCK_HEADER
+               && dict_item (src, xdic (src, u31), "ACAD_ASSOCNETWORK")
+               && !graph_of (src, U31),
+           "constraint-based: *U31 has an ACAD_ASSOCNETWORK and no graph");
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_linear (block_header (src, U31), "Other",
+                                     &box_base, &box_end, &error)
+               && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && src->num_objects == nsrc && !graph_of (src, U31),
+           "constraint-based: *U31 refused, with no graph added (0x%x)",
+           error);
+    loglevel = test_loglevel;
+  }
+
+  dwg = new_document ();
+  blk = dwg ? add_box_block (dwg, "BOX", h) : 0;
+  param = blk ? add_width (dwg, blk, h, NULL, 0, &s, &m, &error) : NULL;
+  if (param)
+    spare = dwg_dynblock_add_linear (block_header (dwg, blk), "Spare", &sb,
+                                     &se, &error);
+  loglevel = test_loglevel;
+  if (!spare)
+    {
+      FAIL ("constraint-based: building the block failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return failures + 1;
+    }
+  spare_h = handle_of (dwg, spare);
+  for (int k = 0; k < 2; k++)
+    {
+      Dwg_Object *obj = object (dwg, spare_h);
+      Dwg_Object_Object *saved = obj->tio.object;
+      const Dwg_Object_Type saved_type = obj->fixedtype;
+      char *saved_name = obj->name, *saved_dxfname = obj->dxfname;
+      const BITCODE_BL num_objects = dwg->num_objects;
+      // Spare's node, as the reader leaves a node of that type: its type,
+      // with a struct of it
+      obj->fixedtype = kinds[k].type;
+      obj->name = obj->dxfname = (char *)kinds[k].name;
+      if (kinds[k].setup (obj))
+        {
+          obj->tio.object = saved;
+          obj->fixedtype = saved_type;
+          obj->name = saved_name;
+          obj->dxfname = saved_dxfname;
+          FAIL ("constraint-based: setting up a %s failed", kinds[k].name);
+          failures++;
+          continue;
+        }
+      error = 0;
+      loglevel = 0;
+      CHECK (!dwg_dynblock_add_linear (block_header (dwg, blk), "Other",
+                                       &box_base, &box_end, &error)
+                 && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                 && dwg->num_objects == num_objects,
+             "constraint-based: a %s node, the linear refused (0x%x)",
+             kinds[k].name, error);
+      error = 0;
+      loglevel = 0;
+      CHECK (!dwg_dynblock_add_stretch (block_header (dwg, blk), param,
+                                        &frame1, &frame2, h, 3, &error)
+                 && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                 && dwg->num_objects == num_objects,
+             "constraint-based: a %s node, the stretch refused (0x%x)",
+             kinds[k].name, error);
+      error = 0;
+      loglevel = 0;
+      CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                     &h[CIRCLE], 1, 0.5, &error)
+                 && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                 && dwg->num_objects == num_objects,
+             "constraint-based: a %s node, the move refused (0x%x)",
+             kinds[k].name, error);
+      loglevel = test_loglevel;
+      // what the calls added, had they not refused, may have moved it
+      obj = object (dwg, spare_h);
+      free (obj->tio.object->tio.BLOCKUSERPARAMETER);
+      free (obj->tio.object);
+      // the setup copies the names in a document of the add API
+      if ((const char *)obj->name != kinds[k].name)
+        free (obj->name);
+      if ((const char *)obj->dxfname != kinds[k].name)
+        free (obj->dxfname);
+      obj->tio.object = saved;
+      obj->fixedtype = saved_type;
+      obj->name = saved_name;
+      obj->dxfname = saved_dxfname;
+    }
+  // Spare a linear parameter again: the block takes another
+  error = 0;
+  CHECK (dwg_dynblock_add_linear (block_header (dwg, blk), "Other", &box_base,
+                                  &box_end, &error)
+             && !error,
+         "constraint-based: with Spare linear again, another added (0x%x)",
+         error);
+  loglevel = test_loglevel;
+  free_document (dwg);
+  return failures;
+}
+
 /*--------------------------------------------------------------------------------
  * The stretch and the move
  */
@@ -1266,6 +1402,20 @@ test_action_refusals (Dwg_Data *src)
     MOVE_REFUSES (oparam, &h[CIRCLE], 1, 0.5, REFUSED (DWG_ERR_INVALIDHANDLE),
                   "a parameter of another document");
   }
+  {
+    // the struct of a grip location component, shorter than a linear
+    // parameter's, as param: refused before its points are read (ASan
+    // checks the reads)
+    const Dwg_Object_BLOCKLINEARPARAMETER *loc
+        = (const Dwg_Object_BLOCKLINEARPARAMETER *)node_object (
+              dwg, graph_of (dwg, blk), 2)
+              ->tio.object->tio.BLOCKGRIPLOCATIONCOMPONENT;
+    STRETCH_REFUSES (loc, &frame1, &frame2, h, 1,
+                     REFUSED (DWG_ERR_INVALIDHANDLE),
+                     "a grip location component as the parameter");
+    MOVE_REFUSES (loc, &h[CIRCLE], 1, 0.5, REFUSED (DWG_ERR_INVALIDHANDLE),
+                  "a grip location component as the parameter");
+  }
   // a parameter with its base point in its middle, or driving a scale
   // action: the evaluator refuses both
   param->parameter_base_location = 1;
@@ -1345,8 +1495,9 @@ test_action_refusals (Dwg_Data *src)
  * A block that is dynamic already
  */
 
-/* A caption whose Shift moves a marker by its full length, as a caption's
-   zone marker: the Width's move carries the marker and Shift. */
+/* The box with a vertical LINE at x 4, which a linear parameter Shift
+   moves by its full change: the Width's move carries the LINE and
+   Shift. */
 static int
 test_carried_parameter (void)
 {
@@ -1545,6 +1696,144 @@ test_autocad_graph (Dwg_Data *src)
       }
     }
   free_document (dwg);
+  return failures;
+}
+
+/* Evaluates block blk at Length w, and checks its frame, its entity at:
+   the vertices 2 and 3 at x w, 0 and 1 unmoved. */
+static int
+evaluates_frame (Dwg_Data *dwg, const BITCODE_RLL blk, const BITCODE_BL at,
+                 const double w, const char *what)
+{
+  const Dwg_DynValue v = value ("Length", w);
+  int error = 0, failures = 0;
+  Dwg_Object_BLOCK_HEADER *rep
+      = dwg_dynblock_evaluate (block_header (dwg, blk), &v, 1, &error);
+  const Dwg_Object *o = rep ? nth_entity (dwg, rep, at) : NULL;
+  const Dwg_Entity_LWPOLYLINE *l = o && o->fixedtype == DWG_TYPE_LWPOLYLINE
+                                       ? o->tio.entity->tio.LWPOLYLINE
+                                       : NULL;
+  loglevel = test_loglevel;
+  CHECK (rep && !error && l && l->num_points == 4 && near (l->points[0].x, 0)
+             && near (l->points[0].y, 0) && near (l->points[1].x, 0)
+             && near (l->points[1].y, 36) && near (l->points[2].x, w)
+             && near (l->points[2].y, 36) && near (l->points[3].x, w)
+             && near (l->points[3].y, 0),
+         "%s: evaluated at Length %g, the frame's vertices 2 and 3 at x %g, "
+         "0 and 1 unmoved (0x%x)",
+         what, w, w, error);
+  return failures;
+}
+
+/* An LWPOLYLINE as AutoCAD usually writes one: its flags store no
+   extrusion, which the decoder leaves 0. The fixture's Window, copied into
+   a new document, gets a Length along X, whose stretch selects the right
+   side of the Window's frame, a closed LWPOLYLINE 36 by 36: at another
+   length its two vertices in the stretch's frame move and the others stay,
+   before and after the drawing is written and read back. */
+static int
+test_lwpolyline_from_dwg (Dwg_Data *src)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Object_BLOCK_HEADER *window = NULL;
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s = NULL;
+  const BITCODE_3BD b = { 0, 0, 0 }, e = { 36, 0, 0 };
+  const BITCODE_2RD c1 = { 30, -5 }, c2 = { 40, 41 };
+  BITCODE_RLL blk = 0, frame = 0;
+  BITCODE_BL at = 0;
+  Dwg_Data back;
+  int error = 0, failures = 0;
+  if (dwg)
+    window = dwg_dynblock_copy_block (dwg, src, block_header (src, WINDOW),
+                                      &error);
+  loglevel = test_loglevel;
+  // the Window's frame: its closed LWPOLYLINE of four points
+  for (BITCODE_BL i = 0; window && i < window->num_owned && !frame; i++)
+    {
+      const Dwg_Object *o = nth_entity (dwg, window, i);
+      if (o && o->fixedtype == DWG_TYPE_LWPOLYLINE
+          && o->tio.entity->tio.LWPOLYLINE->num_points == 4
+          && (o->tio.entity->tio.LWPOLYLINE->flag & 512))
+        {
+          frame = o->handle.value;
+          at = i;
+        }
+    }
+  if (!frame)
+    {
+      FAIL ("LWPOLYLINE read: the Window or its frame not found (0x%x)",
+            error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  blk = handle_of (dwg, window);
+  {
+    const Dwg_Entity_LWPOLYLINE *l
+        = object (dwg, frame)->tio.entity->tio.LWPOLYLINE;
+    CHECK (!(l->flag & 1) && l->extrusion.x == 0.0 && l->extrusion.y == 0.0
+               && l->extrusion.z == 0.0,
+           "LWPOLYLINE read: the Window's frame stores no extrusion, which "
+           "reads as 0");
+  }
+  param = dwg_dynblock_add_linear (window, "Length", &b, &e, &error);
+  if (param)
+    s = dwg_dynblock_add_stretch (block_header (dwg, blk), param, &c1, &c2,
+                                  &frame, 1, &error);
+  loglevel = test_loglevel;
+  CHECK (s && !error && s->num_hdls == 1 && ref (s->hdls[0].hdl) == frame
+             && s->hdls[0].num_indexes == 2 && s->hdls[0].indexes[0] == 2
+             && s->hdls[0].indexes[1] == 3,
+         "LWPOLYLINE read: stretched, its vertices 2 and 3 in the frame "
+         "(0x%x)",
+         error);
+  if (!s)
+    {
+      free_document (dwg);
+      return failures;
+    }
+  failures += evaluates_frame (dwg, blk, at, 50.0, "LWPOLYLINE read");
+
+  error = write_dwg (WRITTEN_LWPOLYLINE, dwg);
+  CHECK (error < DWG_ERR_CRITICAL, "LWPOLYLINE read: written (0x%x)", error);
+  error = error < DWG_ERR_CRITICAL ? read_dwg (WRITTEN_LWPOLYLINE, &back)
+                                   : error;
+  CHECK (error < DWG_ERR_CRITICAL, "LWPOLYLINE read: read back (0x%x)",
+         error);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      free_document (dwg);
+      return failures;
+    }
+  {
+    const Dwg_Object *o = object (&back, frame);
+    const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (&back, blk);
+    const Dwg_Object *a
+        = graph && graph->num_nodes
+              ? node_object (&back, graph, graph->num_nodes - 1)
+              : NULL;
+    const Dwg_Object_BLOCKSTRETCHACTION *bs
+        = a && a->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION
+              ? a->tio.object->tio.BLOCKSTRETCHACTION
+              : NULL;
+    CHECK (o && o->fixedtype == DWG_TYPE_LWPOLYLINE
+               && !(o->tio.entity->tio.LWPOLYLINE->flag & 1)
+               && o->tio.entity->tio.LWPOLYLINE->extrusion.z == 0.0
+               && bs && bs->num_hdls == 1 && ref (bs->hdls[0].hdl) == frame
+               && bs->hdls[0].num_indexes == 2
+               && bs->hdls[0].indexes[0] == 2
+               && bs->hdls[0].indexes[1] == 3,
+           "LWPOLYLINE read: the frame, still with no extrusion, and the "
+           "stretch read back");
+  }
+  failures += evaluates_frame (&back, blk, at, 20.0,
+                               "LWPOLYLINE read, read back");
+  free_dwg (&back);
+  free_document (dwg);
+  // kept to look at when a check failed
+  if (!failures)
+    unlink (WRITTEN_LWPOLYLINE);
   return failures;
 }
 
@@ -2754,11 +3043,13 @@ main (int argc, char *argv[])
   failures += test_linear_model_space ();
   failures += test_numbering ();
   failures += test_linear_refusals (&src);
+  failures += test_constraint_based (&src);
   failures += test_actions ();
   failures += test_action_refusals (&src);
   failures += test_preflight ();
   failures += test_carried_parameter ();
   failures += test_autocad_graph (&src);
+  failures += test_lwpolyline_from_dwg (&src);
   failures += test_written ();
   failures += test_copy_entities ();
   failures += test_copy_numbering (&src);

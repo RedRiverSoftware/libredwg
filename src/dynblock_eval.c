@@ -492,6 +492,58 @@ class_name (const Dwg_Data *dwg, const Dwg_Object *obj)
   return obj->dxfname ? obj->dxfname : dwg_type_name (obj->fixedtype);
 }
 
+static int
+is_proxy_node (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
+         || strEQc (class_name (dwg, obj), "ACDB_DYNAMICBLOCKPROXYNODE");
+}
+
+int
+dynblock_is_parametric_node (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKALIGNEDCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKUSERPARAMETER:
+      return 1;
+    default:
+      return is_proxy_node (dwg, obj);
+    }
+}
+
+/* Whether block def keeps its constraints in an ACAD_ASSOCNETWORK. */
+static int
+has_assoc_network (const Dwg_Data *dwg, const Dwg_Object *def)
+{
+  return xdic_item (dwg, def, "ACAD_ASSOCNETWORK") != NULL;
+}
+
+int
+dynblock_is_parametric (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  const Dwg_Object *graph = definition_graph (dwg, obj);
+  const Dwg_Object_EVALUATION_GRAPH *_graph;
+  if (has_assoc_network (dwg, obj))
+    return 1;
+  if (!graph)
+    return 0;
+  _graph = graph->tio.object->tio.EVALUATION_GRAPH;
+  for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
+    {
+      const Dwg_Object *node = ref_object (dwg, _graph->nodes[i].evalexpr);
+      if (node && dynblock_is_parametric_node (dwg, node))
+        return 1;
+    }
+  return 0;
+}
+
 /* The properties of the parameters in graph, in node order, into list.
    *parametricp is set when the graph is constraint-based, and
    list->unknown_class names a node of a class LibreDWG can't decode. A
@@ -515,12 +567,10 @@ collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
         }
       if (!obj)
         continue;
-      if (obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
-          || strEQc (class_name (dwg, obj), "ACDB_DYNAMICBLOCKPROXYNODE"))
-        {
-          *parametricp = 1;
-          continue;
-        }
+      if (dynblock_is_parametric_node (dwg, obj))
+        *parametricp = 1;
+      if (is_proxy_node (dwg, obj))
+        continue;
       if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ && !list->unknown_class)
         list->unknown_class = class_name (dwg, obj);
       switch (obj->fixedtype)
@@ -625,31 +675,26 @@ collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
         case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
         case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
           // these four share BLOCKLINEARCONSTRAINTPARAMETER_fields
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKLINEARCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKANGULARCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKDIAMETRICCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKRADIALCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKUSERPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_USER,
                      obj->tio.object->tio.BLOCKUSERPARAMETER->name);
           break;
@@ -683,7 +728,7 @@ definition_params (const Dwg_Data *dwg, const BITCODE_RLL def_handle,
     }
   collect_params (dwg, graph, list, parametricp);
   // a parametric block's constraints are in its ACAD_ASSOCNETWORK
-  if (xdic_item (dwg, def, "ACAD_ASSOCNETWORK"))
+  if (has_assoc_network (dwg, def))
     *parametricp = 1;
   if (list->error)
     {
@@ -1950,10 +1995,12 @@ dynblock_stretch_points (const Dwg_Object *obj)
   return stretch_points (obj);
 }
 
+/* Whether extrusion ext is along +Z. An extrusion of 0, as the decoder
+   leaves an LWPOLYLINE that stores none, is +Z, as for entity_delta (). */
 static int
 is_along_z (const BITCODE_BE *ext)
 {
-  return ext->x == 0.0 && ext->y == 0.0 && ext->z > 0.0;
+  return ext->x == 0.0 && ext->y == 0.0 && ext->z >= 0.0;
 }
 
 /* Keep in step with stretch_points (): the points it counts, in its

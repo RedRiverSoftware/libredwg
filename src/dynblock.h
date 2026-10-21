@@ -118,6 +118,17 @@ Dwg_Object *dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj);
    node, whose struct starts with the evaluation expression. */
 int dynblock_is_graph_element (const Dwg_Object *obj);
 
+/* Whether evaluation graph node obj makes its block constraint-based
+   (parametric), which the evaluator refuses: a proxy node, of a class
+   LibreDWG can't decode, a constraint parameter or a user parameter. */
+int dynblock_is_parametric_node (const Dwg_Data *dwg, const Dwg_Object *obj);
+
+/* Whether block obj is constraint-based (parametric), as the evaluator
+   takes it: its extension dictionary holds an ACAD_ASSOCNETWORK, the
+   network of its constraints, whether or not it has an evaluation graph;
+   or a node of its graph is one dynblock_is_parametric_node () takes. */
+int dynblock_is_parametric (const Dwg_Data *dwg, const Dwg_Object *obj);
+
 /* In dynblock_copy.c, for dwg_dynblock_copy_entities () */
 
 int dynblock_is_model_space (const Dwg_Data *dwg, const Dwg_Object *obj);

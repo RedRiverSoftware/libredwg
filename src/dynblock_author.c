@@ -670,11 +670,11 @@ is_index (const BITCODE_BLd index, const BITCODE_BL n)
   return index == -1 || (index >= 0 && (BITCODE_BL)index < n);
 }
 
-/* Refuses, as the evaluator does, a constraint-based (parametric)
-   definition, whose proxy nodes LibreDWG can't decode, a node of another
-   class it can't decode, and a node that doesn't resolve or isn't a graph
-   element; and, before the graph's lists of nodes and edges grow, nodes
-   and edges that index anything but each other. */
+/* Refuses, as the evaluator does, a node of a class LibreDWG can't
+   decode, and a node that doesn't resolve or isn't a graph element; and,
+   before the graph's lists of nodes and edges grow, nodes and edges that
+   index anything but each other. author_block () has refused a
+   constraint-based definition, whose proxy nodes LibreDWG can't decode. */
 static int
 check_graph (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
              const char *func)
@@ -721,14 +721,6 @@ check_graph (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
           LOG_ERROR ("%s: node %u of the evaluation graph doesn't resolve",
                      func, (unsigned)i);
           return AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
-        }
-      if (obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
-          || strEQc (class_name (dwg, obj), "ACDB_DYNAMICBLOCKPROXYNODE"))
-        {
-          LOG_ERROR ("%s: the block is a constraint-based (parametric) "
-                     "definition, which is not supported",
-                     func);
-          return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
       if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ)
         {
@@ -905,7 +897,8 @@ free_block (Author_Block *ab)
 
 /* Checks block blk for function func, into *ab: a block of its document,
    in an r2004 drawing, that is model space or a block other than a layout
-   or an xref, whose graph, if it has one, is one LibreDWG reads. */
+   or an xref, not constraint-based, whose graph, if it has one, is one
+   LibreDWG reads. */
 static int
 author_block (Dwg_Object_BLOCK_HEADER *blk, const char *func,
               Author_Block *ab)
@@ -941,6 +934,14 @@ author_block (Dwg_Object_BLOCK_HEADER *blk, const char *func,
                  "than model space, or an xref",
                  func, ab->blk);
       return AUTHOR_REFUSED | DWG_ERR_INVALIDTYPE;
+    }
+  // as the evaluator refuses it, whether or not it has a graph yet
+  if (dynblock_is_parametric (ab->dwg, blkobj))
+    {
+      LOG_ERROR ("%s: the block is a constraint-based (parametric) "
+                 "definition, which is not supported",
+                 func);
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   graph = dynblock_graph (ab->dwg, blkobj);
   if (graph)
@@ -1255,6 +1256,8 @@ dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
   dstobj = block_object (dst_block);
   if (!dstobj)
     {
+      if (dst_block->parent && dst_block->parent->dwg)
+        loglevel = dst_block->parent->dwg->opts & DWG_OPTS_LOGLEVEL;
       LOG_ERROR ("dwg_dynblock_copy_entities: dst_block is not a block of "
                  "its document");
       return refused_copy (errorp, DWG_ERR_INVALIDHANDLE);
@@ -1347,7 +1350,9 @@ dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
   dwg_copy_map_free (map);
   if (errorp)
     *errorp = error;
-  return error >= DWG_ERR_CRITICAL ? 0 : count;
+  // the copies placed are in dst_block's list, though numbering them may
+  // have run out of memory
+  return count;
 }
 
 EXPORT Dwg_Object_BLOCKLINEARPARAMETER *
@@ -1715,7 +1720,7 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   Author_Stretched *stretched = NULL;
   const Dwg_Object *paramobj;
   BITCODE_2RD lo, hi;
-  BITCODE_3BD dir;
+  BITCODE_3BD dir = { 0.0, 0.0, 0.0 };
   int index = -1, error;
   if (errorp)
     *errorp = 0;
@@ -1748,7 +1753,9 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   lo.y = fmin (corner1->y, corner2->y);
   hi.x = fmax (corner1->x, corner2->x);
   hi.y = fmax (corner1->y, corner2->y);
-  param_direction (param, &dir);
+  // param is the graph's linear parameter once check_param () has passed
+  if (!error)
+    param_direction (param, &dir);
   for (BITCODE_BL i = 0; !error && i < num_entities; i++)
     {
       const Dwg_Object *obj = block_entity (&ab, entities[i], func, &error);
@@ -2025,7 +2032,7 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
   Author_Moved *moved = NULL;
   int index = -1, error;
   BITCODE_BL num_deps = 0, num_carried = 0;
-  BITCODE_3BD dir;
+  BITCODE_3BD dir = { 0.0, 0.0, 0.0 };
   if (errorp)
     *errorp = 0;
   if (!blk || !param || !objects)
@@ -2048,7 +2055,8 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
       if (!moved)
         error = DWG_ERR_OUTOFMEM;
     }
-  param_direction (param, &dir);
+  if (!error)
+    param_direction (param, &dir);
   for (BITCODE_BL i = 0; !error && i < num_objects; i++)
     {
       moved[i].handle = objects[i];

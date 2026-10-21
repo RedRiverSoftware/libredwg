@@ -136,36 +136,38 @@ dwg_dynblock_copy_block (Dwg_Data *dst, const Dwg_Data *src,
  * () does for a definition: a block an INSERT draws is copied with it
  * unless dst has a block of its name.
  *
- * A copy keeps its source's EED, but for AcDbBlockRepETag, which numbers
- * the entities of a dynamic block definition: when dst_block is one, the
- * copies are numbered after its own entities, as the
- * dwg_dynblock_add_linear () family numbers them. Copied attribute
+ * A copy keeps its source's EED, but the copies listed in dst_block lose
+ * their AcDbBlockRepETag group, which numbers the entities of a dynamic
+ * block definition: when dst_block is one, they are numbered after its own
+ * entities, as the dwg_dynblock_add_linear () family numbers them. The
+ * ATTRIBs a copied INSERT owns keep theirs, which pair them with the
+ * attribute definitions of the block the INSERT draws. Copied attribute
  * definitions set dst_block's flag for them. The copies are drawn after
  * dst_block's own entities, unless an ACAD_SORTENTS table of dst_block
  * orders them otherwise; that table and src_block's are not changed or
  * copied. src_block's dynamic-block data, if any, is not copied: an entity
  * copies with its invisible flag as it is.
  *
- * Refused, with nothing changed in dst: a NULL argument, or src the
- * document of dst_block (DWG_ERR_INTERNALERROR); dst_block not a
- * BLOCK_HEADER of its document, src_block not one of src, or copies that
- * would draw dst_block, as an INSERT of a block of src that is matched
- * with dst_block, or with a block of dst that draws it at any depth
- * (DWG_ERR_INVALIDHANDLE); documents that aren't both r2004 (AC1018), or
- * have different codepages (DWG_ERR_NOTYETSUPPORTED); paper space or
- * another layout block, an xref or a block that depends on one, as
- * src_block or dst_block (DWG_ERR_INVALIDTYPE); an offset or base point
- * that isn't finite, or a move that would take a coordinate beyond what a
- * double holds (DWG_ERR_VALUEOUTOFBOUNDS); with a move, an entity of a
- * type the move doesn't handle, which are those dwg_dynblock_evaluate ()
- * moves whole (LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, TEXT,
- * ATTDEF, MTEXT, INSERT with its ATTRIBs, and HATCH), or one whose 2D
- * points the move would take out of their plane, as it would those of an
- * entity whose extrusion isn't along Z (DWG_ERR_NOTYETSUPPORTED); and
- * what dwg_dynblock_copy_block () refuses of what a definition owns, among
- * what the entities own, such as the objects of a constraint-based
- * block's network. Each refusal is DWG_ERR_INVALIDDWG with the bit given,
- * logged at LOG_ERROR.
+ * Refused, with nothing changed in dst: a NULL argument, or src the document
+ * of dst_block (DWG_ERR_INTERNALERROR); dst_block not a BLOCK_HEADER of its
+ * document, src_block not one of src, an entry of src_block's entity list that
+ * doesn't resolve to an entity, or copies that would draw dst_block, as an
+ * INSERT of a block of src that is matched with dst_block, or with a block of
+ * dst that draws it at any depth (DWG_ERR_INVALIDHANDLE); documents that
+ * aren't both r2004 (AC1018), or have different codepages
+ * (DWG_ERR_NOTYETSUPPORTED); paper space or another layout block, an xref or a
+ * block that depends on one, as src_block or dst_block (DWG_ERR_INVALIDTYPE);
+ * an offset or base point that isn't finite, or a move that would take a
+ * coordinate beyond what a double holds (DWG_ERR_VALUEOUTOFBOUNDS); with a
+ * move, an entity of a type the move doesn't handle, which are those
+ * dwg_dynblock_evaluate () moves whole (LINE, LWPOLYLINE, ARC, CIRCLE,
+ * ELLIPSE, SPLINE, TEXT, ATTDEF, MTEXT, INSERT with its ATTRIBs, and HATCH),
+ * or one whose 2D points the move would take out of their plane, as it would
+ * those of an entity whose extrusion isn't along Z (DWG_ERR_NOTYETSUPPORTED);
+ * and what dwg_dynblock_copy_block () refuses of what a definition owns, among
+ * what the entities own, such as the objects of a constraint-based block's
+ * network. Each refusal is DWG_ERR_INVALIDDWG with the bit given, logged at
+ * LOG_ERROR but for a NULL argument.
  *
  * @param dst_block The block, or model space, to copy into.
  * @param src       The document src_block is in.
@@ -173,13 +175,18 @@ dwg_dynblock_copy_block (Dwg_Data *dst, const Dwg_Data *src,
  * @param offset    Where src_block's base point goes, from dst_block's.
  * @param errorp    If not NULL, receives 0 or DWG_ERR_* bits: from
  *                  DWG_ERR_CRITICAL up, a refusal as above, or
- *                  DWG_ERR_OUTOFMEM, after which dst may hold copies that no
- *                  block lists; below it, the bits of dwg_dynblock_copy_block
- *                  () for references and data the copy left out, and
+ *                  DWG_ERR_OUTOFMEM: while copying, after which dst may hold
+ *                  copies that no block lists, and none is in dst_block's
+ *                  list; or while numbering the copies, after which they are
+ *                  in dst_block's list, and some may be left unnumbered.
+ *                  Below it, the bits of dwg_dynblock_copy_block () for
+ *                  references and data the copy left out, and
  *                  DWG_ERR_INVALIDEED when dst_block's counter of entity
  *                  numbers leaves no room for the copies, which are then
  *                  left unnumbered.
- * @return the number of entities added to dst_block's list, 0 when refused.
+ * @return the number of entities added to dst_block's list, also when
+ *         memory ran out while numbering them; 0 when refused, or when
+ *         memory ran out while copying.
  */
 EXPORT BITCODE_BL
 dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
@@ -735,22 +742,25 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
    dwg_dynblock_add_stretch () and dwg_dynblock_add_move () number them
    too, for entities added since.
 
-   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
-   blk not a BLOCK_HEADER of its document, or a node of its evaluation
-   graph that doesn't resolve or isn't a parameter, action, grip or grip
-   location component (DWG_ERR_INVALIDHANDLE); a drawing other than
-   r2004, or a constraint-based (parametric) definition
-   (DWG_ERR_NOTYETSUPPORTED); a node of another class LibreDWG can't
-   decode (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block,
-   an xref or a block that depends on one (DWG_ERR_INVALIDTYPE); an empty
-   name, or one that a property of blk has already, as
-   dwg_dynblock_get_params () names them, ASCII letters compared without
-   case; points that aren't finite, no more than 1e-9 apart, which the
-   evaluator takes as no length, or at different heights, or a graph with
-   no node ids left for four nodes, its ids being signed 32-bit integers
-   (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes
-   or edges it doesn't have (no further bit). Each refusal is
-   DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR. In a
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
+   not a BLOCK_HEADER of its document, or a node of its evaluation graph that
+   doesn't resolve or isn't a parameter, action, grip or grip location
+   component (DWG_ERR_INVALIDHANDLE); a drawing other than r2004, or a
+   constraint-based (parametric) block, which dwg_dynblock_evaluate () refuses:
+   one whose extension dictionary holds an ACAD_ASSOCNETWORK, the network of
+   its constraints, whether or not it has an evaluation graph, or whose graph
+   has a proxy node, a constraint parameter or a user parameter
+   (DWG_ERR_NOTYETSUPPORTED); a node of another class LibreDWG can't decode
+   (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block, an xref or a
+   block that depends on one (DWG_ERR_INVALIDTYPE); an empty name, or one that
+   a property of blk has already, as dwg_dynblock_get_params () names them,
+   ASCII letters compared without case; points that aren't finite, so far apart
+   that their distance overflows a double, no more than 1e-9 apart, which the
+   evaluator takes as no length, or at different heights, or a graph with no
+   node ids left for four nodes, its ids being signed 32-bit integers
+   (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes or
+   edges it doesn't have (no further bit). Each refusal is DWG_ERR_INVALIDDWG
+   with the bit given, logged at LOG_ERROR but for a NULL argument. In a
    LibreDWG built without write support, all are refused
    (DWG_ERR_NOTYETSUPPORTED).
 
@@ -787,13 +797,14 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    dwg_dynblock_evaluate () doesn't evaluate. The entities are numbered as
    dwg_dynblock_add_linear () numbers them.
 
-   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
-   blk not a BLOCK_HEADER of its document, param not a linear parameter of
-   blk's evaluation graph (nor a copy of its struct), or a handle that isn't
-   one of blk's entities (DWG_ERR_INVALIDHANDLE); a drawing other than r2004,
-   a constraint-based definition, an entity of another type, an LWPOLYLINE
-   whose extrusion isn't along Z, an entity with no stretch point in the
-   frame, one whose 2D points a change along param would take out of their
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
+   not a BLOCK_HEADER of its document, param not a linear parameter of blk's
+   evaluation graph (nor a copy of its struct), or a handle that isn't one of
+   blk's entities (DWG_ERR_INVALIDHANDLE); a drawing other than r2004, a
+   constraint-based block, an entity of another type, an LWPOLYLINE, CIRCLE,
+   INSERT, TEXT or ATTDEF whose extrusion isn't along +Z (an LWPOLYLINE that
+   stores none, as read from a file, is), an entity with no stretch point in
+   the frame, one whose 2D points a change along param would take out of their
    plane by more than 1e-12 of the change, as it would those of an ATTRIB an
    INSERT owns whose plane param's direction leaves, whatever param's length,
    or a param with its base point in its middle, or driving an action other
@@ -802,8 +813,8 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    order with the stretch (DWG_ERR_NOTYETSUPPORTED); no entities, an entity
    given twice, corners that aren't finite or don't span a rectangle, sharing
    an x or a y, or a graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS).
-   Each refusal is DWG_ERR_INVALIDDWG with the bit given, logged at
-   LOG_ERROR; errorp and the return value are as for
+   Each refusal is DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR
+   but for a NULL argument; errorp and the return value are as for
    dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKSTRETCHACTION *
 dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
@@ -831,18 +842,19 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
    AutoCAD's Block Editor stores a move whose selection holds a parameter.
    The entities are numbered as dwg_dynblock_add_linear () numbers them.
 
-   Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for
-   blk, param and the entities, with a handle that is neither one of blk's
-   entities nor a parameter of its graph; an entity of another type, or one
-   whose 2D points the move would take out of their plane, by the same
-   measure as for dwg_dynblock_add_stretch (), a parameter of another kind,
-   one that chains actions, or a linear parameter whose own actions move
-   param, directly or through other parameters' actions, or an entity or
-   parameter that a rotate action of the graph turns, selecting it or listing
-   it, which the evaluator can't order (DWG_ERR_NOTYETSUPPORTED); a
-   multiplier that isn't finite, no objects, an object given twice, or a
-   graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
-   return value are as for dwg_dynblock_add_linear (). */
+   Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for blk,
+   param and the entities, with a handle that is neither one of blk's entities
+   nor a node of its graph; an entity of another type, or one whose 2D points
+   the move would take out of their plane, by the same measure as for
+   dwg_dynblock_add_stretch (), a node of the graph other than a linear,
+   visibility or flip parameter (a parameter of another kind, a grip or an
+   action), a parameter that chains actions, or a linear parameter whose own
+   actions move param, directly or through other parameters' actions, or an
+   entity or parameter that a rotate action of the graph turns, selecting it or
+   listing it, which the evaluator can't order (DWG_ERR_NOTYETSUPPORTED); a
+   multiplier that isn't finite, no objects, an object given twice, or a graph
+   with no node id left (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the return value
+   are as for dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKMOVEACTION *
 dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
                        const Dwg_Object_BLOCKLINEARPARAMETER *param,
