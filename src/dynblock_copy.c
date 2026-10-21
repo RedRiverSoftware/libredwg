@@ -1181,6 +1181,93 @@ dynblock_is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj)
   return is_copyable_block (dwg, obj, 1);
 }
 
+/* Whether block from of dwg draws block target, through the INSERTs and
+   MINSERTs of its entities, at any depth. */
+static int
+draws_block (const Dwg_Data *dwg, const BITCODE_RLL from,
+             const BITCODE_RLL target, int *restrict errorp)
+{
+  dwg_inthash *seen = hash_new (64);
+  Handle_List todo;
+  int found = 0;
+  memset (&todo, 0, sizeof (todo));
+  if (!seen || list_add (&todo, from))
+    {
+      *errorp = DWG_ERR_OUTOFMEM;
+      if (seen)
+        hash_free (seen);
+      free (todo.handles);
+      return 0;
+    }
+  hash_set (seen, from, 1);
+  while (todo.num && !found && !*errorp)
+    {
+      const Dwg_Object *blkobj
+          = dwg_resolve_handle (dwg, todo.handles[--todo.num]);
+      const Dwg_Object_BLOCK_HEADER *blk
+          = blkobj && blkobj->fixedtype == DWG_TYPE_BLOCK_HEADER
+                ? blkobj->tio.object->tio.BLOCK_HEADER
+                : NULL;
+      BITCODE_BL i;
+      for (i = 0; blk && blk->entities && i < blk->num_owned && !found; i++)
+        {
+          const Dwg_Object *ent
+              = dwg_resolve_handle (dwg, ref_target (blk->entities[i]));
+          BITCODE_RLL drawn;
+          if (!ent || !ent->tio.entity)
+            continue;
+          if (ent->fixedtype == DWG_TYPE_INSERT)
+            drawn = ref_target (ent->tio.entity->tio.INSERT->block_header);
+          else if (ent->fixedtype == DWG_TYPE_MINSERT)
+            drawn = ref_target (ent->tio.entity->tio.MINSERT->block_header);
+          else
+            continue;
+          if (drawn == target)
+            found = 1;
+          else if (drawn && hash_get (seen, drawn) == HASH_NOT_FOUND)
+            {
+              hash_set (seen, drawn, 1);
+              *errorp |= list_add (&todo, drawn);
+            }
+        }
+    }
+  hash_free (seen);
+  free (todo.handles);
+  return found;
+}
+
+/* Refuses a copy into dst_block that would draw dst_block: one whose
+   reference to a block of src is matched with dst_block itself, or with a
+   block of dst that draws it. The blocks the copy copies draw only blocks
+   that are copied too or matched. */
+static int
+check_draws_itself (const Block_Copy *restrict bc, const BITCODE_RLL dst_block)
+{
+  BITCODE_BL i;
+  int error = 0;
+  // the first match is src_block's, the entities' owner
+  for (i = 1; i < bc->matched_src.num; i++)
+    {
+      const Dwg_Object *obj
+          = dwg_resolve_handle (bc->src, bc->matched_src.handles[i]);
+      const BITCODE_RLL dst_handle = bc->matched_dst.handles[i];
+      if (!obj || obj->fixedtype != DWG_TYPE_BLOCK_HEADER)
+        continue;
+      if (dst_handle == dst_block
+          || draws_block (bc->dst, dst_handle, dst_block, &error))
+        {
+          LOG_ERROR ("dwg_dynblock_copy_entities: the copies would draw "
+                     "BLOCK_HEADER " FORMAT_HV ", which they are copied "
+                     "into, as its block " FORMAT_HV " does",
+                     dst_block, dst_handle);
+          return BLOCK_COPY_REFUSED | DWG_ERR_INVALIDHANDLE;
+        }
+      if (error)
+        return error;
+    }
+  return 0;
+}
+
 int
 dynblock_copy_entities (Dwg_Data *dst, const Dwg_Data *src,
                         const BITCODE_RLL src_block,
@@ -1203,8 +1290,11 @@ dynblock_copy_entities (Dwg_Data *dst, const Dwg_Data *src,
       bc.error |= list_add (&bc.matched_src, src_block);
       bc.error |= list_add (&bc.matched_dst, dst_block);
       decide (&bc, src_block, DECIDED_MATCHED);
-      error = find_copy (&bc, tops, num_tops);
+      // find_copy () takes the two lists to be of one length
+      error = bc.error ? bc.error : find_copy (&bc, tops, num_tops);
     }
+  if (error < DWG_ERR_CRITICAL)
+    error |= check_draws_itself (&bc, dst_block);
   if (error < DWG_ERR_CRITICAL)
     error |= copy_into_dst (&bc, map);
   free (bc.copy.handles);

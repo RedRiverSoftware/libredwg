@@ -2076,6 +2076,255 @@ test_graph_read_from_dwg (Dwg_Data *src)
   return failures;
 }
 
+/* What the functions refuse before anything is added, beyond their
+   arguments: a graph that indexes nodes or edges it doesn't have, or with
+   a node that isn't a graph element; a length the evaluator takes as
+   none; an ATTRIB a stretch would take out of its plane; and moves that
+   carry parameters in a cycle, which the evaluator can't order. */
+static int
+test_preflight (void)
+{
+  Dwg_Data *dwg = new_document ();
+  BITCODE_RLL h[BOX_ENTITIES], blk, pin_ins = 0;
+  Dwg_Object_BLOCKLINEARPARAMETER *param;
+  Dwg_Object_BLOCKSTRETCHACTION *s;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  Dwg_Object_EVALUATION_GRAPH *graph;
+  BITCODE_BL num_objects;
+  int error = 0, failures = 0;
+  blk = dwg ? add_box_block (dwg, "BOX", h) : 0;
+  param = blk ? add_width (dwg, blk, h, NULL, 0, &s, &m, &error) : NULL;
+  if (!param)
+    {
+      FAIL ("preflight: building the block failed");
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  graph = graph_of (dwg, blk);
+  num_objects = dwg->num_objects;
+
+  // a node index beyond the edges, then an edge to a node beyond the nodes
+  {
+    const BITCODE_BLd last_out = graph->nodes[0].node[3];
+    const BITCODE_BLd to = graph->edges[0].e3;
+    graph->nodes[0].node[3] = 100;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                   &h[CIRCLE], 1, 0.5, &error)
+               && error == DWG_ERR_INVALIDDWG
+               && dwg->num_objects == num_objects,
+           "preflight: a node naming an edge the graph doesn't have (0x%x)",
+           error);
+    graph->nodes[0].node[3] = last_out;
+    graph->edges[0].e3 = 100;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                   &h[CIRCLE], 1, 0.5, &error)
+               && error == DWG_ERR_INVALIDDWG
+               && dwg->num_objects == num_objects,
+           "preflight: an edge to a node the graph doesn't have (0x%x)",
+           error);
+    graph->edges[0].e3 = to;
+  }
+  // a node that is an entity
+  {
+    BITCODE_H grip = graph->nodes[1].evalexpr;
+    graph->nodes[1].evalexpr = dwg_add_handleref (dwg, 3, h[TOP], NULL);
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                   &h[CIRCLE], 1, 0.5, &error)
+               && error == REFUSED (DWG_ERR_INVALIDHANDLE)
+               && dwg->num_objects == num_objects,
+           "preflight: a node that is a LINE (0x%x)", error);
+    graph->nodes[1].evalexpr = grip;
+  }
+  // a length of 5e-10, which the evaluator takes as none
+  {
+    const BITCODE_3BD b = { 0, 0, 0 }, e = { 5e-10, 0, 0 };
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_linear (block_header (dwg, blk), "Tiny", &b, &e,
+                                     &error)
+               && error == REFUSED (DWG_ERR_VALUEOUTOFBOUNDS)
+               && dwg->num_objects == num_objects,
+           "preflight: a length of 5e-10 (0x%x)", error);
+  }
+  // an INSERT in the frame whose ATTRIB is turned out of the XY plane
+  {
+    Dwg_Object_BLOCK_HEADER *pin = dwg_add_BLOCK_HEADER (dwg, "PIN");
+    const dwg_point_3d o = { 0, 0, 0 }, o2 = { 1, 0, 0 }, at = { 20, -5, 0 };
+    Dwg_Entity_INSERT *ins = NULL;
+    Dwg_Entity_ATTRIB *attrib = NULL;
+    if (pin && dwg_add_BLOCK (pin, "PIN") && dwg_add_LINE (pin, &o, &o2)
+        && dwg_add_ENDBLK (pin))
+      ins = dwg_add_INSERT_block (block_header (dwg, blk), &at,
+                                  block_header (dwg, handle_of (dwg, pin)),
+                                  1, 1, 1, 0);
+    if (ins)
+      attrib = dwg_add_ATTRIB (ins, 1.0, 0, &at, "TAG", "V");
+    loglevel = test_loglevel;
+    if (!attrib)
+      {
+        FAIL ("preflight: adding the INSERT and ATTRIB failed");
+        failures++;
+      }
+    else
+      {
+        pin_ins = handle_of (dwg, ins);
+        attrib->extrusion.x = 1.0;
+        attrib->extrusion.z = 0.0;
+        num_objects = dwg->num_objects;
+        error = 0;
+        loglevel = 0;
+        CHECK (!dwg_dynblock_add_stretch (block_header (dwg, blk), param,
+                                          &frame1, &frame2, &pin_ins, 1,
+                                          &error)
+                   && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                   && dwg->num_objects == num_objects,
+               "preflight: a stretch of an INSERT whose ATTRIB it would take "
+               "out of its plane (0x%x)",
+               error);
+        attrib->extrusion.x = 0.0;
+        attrib->extrusion.z = 1.0;
+        error = 0;
+        loglevel = 0;
+        CHECK (dwg_dynblock_add_stretch (block_header (dwg, blk), param,
+                                         &frame1, &frame2, &pin_ins, 1,
+                                         &error)
+                   && !error,
+               "preflight: the INSERT with its ATTRIB in the plane (0x%x)",
+               error);
+      }
+  }
+  // carries in a cycle: A carries B, B carries C; C carrying A, or B A,
+  // closes one
+  {
+    const BITCODE_3BD a0 = { 0, -20, 0 }, a1 = { 5, -20, 0 },
+                      b0 = { 0, -30, 0 }, b1 = { 5, -30, 0 },
+                      c0 = { 0, -40, 0 }, c1 = { 5, -40, 0 };
+    Dwg_Object_BLOCKLINEARPARAMETER *pa, *pb, *pc;
+    BITCODE_RLL ha, hb, hc;
+    loglevel = 0;
+    pa = dwg_dynblock_add_linear (block_header (dwg, blk), "A", &a0, &a1,
+                                  &error);
+    pb = dwg_dynblock_add_linear (block_header (dwg, blk), "B", &b0, &b1,
+                                  &error);
+    pc = dwg_dynblock_add_linear (block_header (dwg, blk), "C", &c0, &c1,
+                                  &error);
+    loglevel = test_loglevel;
+    ha = pa ? handle_of (dwg, pa) : 0;
+    hb = pb ? handle_of (dwg, pb) : 0;
+    hc = pc ? handle_of (dwg, pc) : 0;
+    CHECK (pa && pb && pc
+               && dwg_dynblock_add_move (block_header (dwg, blk), pa, &hb, 1,
+                                         1.0, &error)
+               && dwg_dynblock_add_move (block_header (dwg, blk), pb, &hc, 1,
+                                         1.0, &error),
+           "preflight: A's move carries B, B's carries C (0x%x)", error);
+    num_objects = dwg->num_objects;
+    error = 0;
+    loglevel = 0;
+    CHECK (pb && pc
+               && !dwg_dynblock_add_move (block_header (dwg, blk), pb, &ha, 1,
+                                          1.0, &error)
+               && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && dwg->num_objects == num_objects,
+           "preflight: B's move carrying A, which carries B (0x%x)", error);
+    error = 0;
+    loglevel = 0;
+    CHECK (pc
+               && !dwg_dynblock_add_move (block_header (dwg, blk), pc, &ha, 1,
+                                          1.0, &error)
+               && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && dwg->num_objects == num_objects,
+           "preflight: C's move carrying A, which reaches C through B "
+           "(0x%x)",
+           error);
+    error = 0;
+    loglevel = 0;
+    CHECK (pa
+           && dwg_dynblock_add_move (block_header (dwg, blk), pa, &hc, 1, 1.0,
+                                     &error)
+           && !error,
+           "preflight: A's move carrying C too, no cycle (0x%x)", error);
+  }
+  loglevel = test_loglevel;
+  free_document (dwg);
+  return failures;
+}
+
+/* Copies that would draw the block they are copied into: an INSERT of a
+   block matched with it, or with a block that draws it. */
+static int
+test_copy_draws_itself (void)
+{
+  BITCODE_RLL sh[4], h[BOX_ENTITIES];
+  Dwg_Data *src = box_drawing (sh);
+  Dwg_Data *dst = new_document ();
+  const BITCODE_3BD zero = { 0, 0, 0 };
+  BITCODE_RLL mark = 0, target = 0;
+  BITCODE_BL num_objects;
+  int error = 0, failures = 0;
+  // dst's own MARK, and TARGET, which MARK draws
+  if (dst)
+    {
+      mark = add_box_block (dst, "MARK", h);
+      target = add_box_block (dst, "TARGET", h);
+    }
+  if (!src || !mark || !target)
+    {
+      FAIL ("copy draws itself: building the drawings failed");
+      if (src)
+        free_document (src);
+      if (dst)
+        free_document (dst);
+      return 1;
+    }
+  num_objects = dst->num_objects;
+  error = 0;
+  loglevel = 0;
+  CHECK (!dwg_dynblock_copy_entities (block_header (dst, mark), src,
+                                      model_space (src), &zero, &error)
+             && error == REFUSED (DWG_ERR_INVALIDHANDLE)
+             && dst->num_objects == num_objects,
+         "copy draws itself: an INSERT of MARK into MARK (0x%x)", error);
+  {
+    const dwg_point_3d at = { 0, 0, 0 };
+    loglevel = 0;
+    if (!dwg_add_INSERT_block (block_header (dst, mark), &at,
+                               block_header (dst, target), 1, 1, 1, 0))
+      {
+        FAIL ("copy draws itself: MARK's INSERT of TARGET not added");
+        failures++;
+      }
+  }
+  num_objects = dst->num_objects;
+  error = 0;
+  loglevel = 0;
+  CHECK (!dwg_dynblock_copy_entities (block_header (dst, target), src,
+                                      model_space (src), &zero, &error)
+             && error == REFUSED (DWG_ERR_INVALIDHANDLE)
+             && dst->num_objects == num_objects,
+         "copy draws itself: an INSERT of MARK, which draws TARGET, into "
+         "TARGET (0x%x)",
+         error);
+  error = 0;
+  loglevel = 0;
+  CHECK (dwg_dynblock_copy_entities (model_space (dst), src, model_space (src),
+                                     &zero, &error)
+             == 4
+             && !error,
+         "copy draws itself: into model space, MARK matched (0x%x)", error);
+  loglevel = test_loglevel;
+  free_document (src);
+  free_document (dst);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2105,12 +2354,14 @@ main (int argc, char *argv[])
   failures += test_linear_refusals (&src);
   failures += test_actions ();
   failures += test_action_refusals (&src);
+  failures += test_preflight ();
   failures += test_carried_parameter ();
   failures += test_autocad_graph (&src);
   failures += test_written ();
   failures += test_copy_entities ();
   failures += test_copy_numbering (&src);
   failures += test_copy_refusals ();
+  failures += test_copy_draws_itself ();
   failures += test_graph_read_from_dwg (&src);
   free_dwg (&src);
   return failures ? 1 : 0;

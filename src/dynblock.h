@@ -113,6 +113,11 @@ int dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
    block definition. */
 Dwg_Object *dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj);
 
+/* Whether obj is of a type of evaluation graph node the evaluator takes: a
+   parameter, an action, a grip, a grip location component or a proxy
+   node, whose struct starts with the evaluation expression. */
+int dynblock_is_graph_element (const Dwg_Object *obj);
+
 /* In dynblock_copy.c, for dwg_dynblock_copy_entities () */
 
 int dynblock_is_model_space (const Dwg_Data *dwg, const Dwg_Object *obj);

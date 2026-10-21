@@ -1497,6 +1497,12 @@ is_graph_element (const Dwg_Object *obj)
     }
 }
 
+int
+dynblock_is_graph_element (const Dwg_Object *obj)
+{
+  return is_graph_element (obj);
+}
+
 /* The starts of a two-point parameter's struct (linear, alignment, flip,
    rotation, XY, polar) and of a one-point one's (visibility, base point,
    point). */

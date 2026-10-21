@@ -68,6 +68,10 @@ BITCODE_H dwg_find_tablehandle_silent (Dwg_Data *restrict dwg,
    evaluator's. */
 #define AUTHOR_REFUSED DWG_ERR_INVALIDDWG
 
+/* The length at or below which the evaluator takes a linear parameter to
+   have none, as DYNBLOCK_VALUE_EPSILON in dynblock_eval.c. */
+#define AUTHOR_MIN_LENGTH 1e-9
+
 /* The element versions AutoCAD 2027 writes in r2004 files, as in
    test/test-data/2004/Dynblocks.dwg: of the evaluation expression every
    node starts with, and of the block element. */
@@ -657,16 +661,59 @@ class_name (const Dwg_Data *dwg, const Dwg_Object *obj)
   return obj->dxfname ? obj->dxfname : dwg_type_name (obj->fixedtype);
 }
 
+/* Whether index is -1 or an index below n. */
+static int
+is_index (const BITCODE_BLd index, const BITCODE_BL n)
+{
+  return index == -1 || (index >= 0 && (BITCODE_BL)index < n);
+}
+
 /* Refuses, as the evaluator does, a constraint-based (parametric)
    definition, whose proxy nodes LibreDWG can't decode, a node of another
-   class it can't decode, and a node that doesn't resolve. */
+   class it can't decode, and a node that doesn't resolve or isn't a graph
+   element; and, before the graph's lists of nodes and edges grow, nodes
+   and edges that index anything but each other. */
 static int
 check_graph (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
              const char *func)
 {
-  for (BITCODE_BL i = 0; graph->nodes && i < graph->num_nodes; i++)
+  if ((graph->num_nodes && !graph->nodes)
+      || (graph->num_edges && !graph->edges))
+    {
+      LOG_ERROR ("%s: the evaluation graph lacks its nodes or edges", func);
+      return AUTHOR_REFUSED;
+    }
+  for (BITCODE_BL i = 0; i < graph->num_edges; i++)
+    {
+      const Dwg_EVAL_Edge *e = &graph->edges[i];
+      if (e->e2 < 0 || (BITCODE_BL)e->e2 >= graph->num_nodes || e->e3 < 0
+          || (BITCODE_BL)e->e3 >= graph->num_nodes)
+        {
+          LOG_ERROR ("%s: edge %u of the evaluation graph joins nodes it "
+                     "doesn't have",
+                     func, (unsigned)i);
+          return AUTHOR_REFUSED;
+        }
+      for (int k = 0; k < 4; k++)
+        if (!is_index (e->out_edge[k], graph->num_edges))
+          {
+            LOG_ERROR ("%s: edge %u of the evaluation graph links an edge it "
+                       "doesn't have",
+                       func, (unsigned)i);
+            return AUTHOR_REFUSED;
+          }
+    }
+  for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
     {
       const Dwg_Object *obj = node_object (dwg, graph, i);
+      for (int k = 0; k < 4; k++)
+        if (!is_index (graph->nodes[i].node[k], graph->num_edges))
+          {
+            LOG_ERROR ("%s: node %u of the evaluation graph names an edge it "
+                       "doesn't have",
+                       func, (unsigned)i);
+            return AUTHOR_REFUSED;
+          }
       if (!obj)
         {
           LOG_ERROR ("%s: node %u of the evaluation graph doesn't resolve",
@@ -687,6 +734,15 @@ check_graph (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
                      "LibreDWG can't decode",
                      func, (unsigned)i, class_name (dwg, obj));
           return AUTHOR_REFUSED | DWG_ERR_UNHANDLEDCLASS;
+        }
+      if (obj->supertype != DWG_SUPERTYPE_OBJECT || !obj->tio.object
+          || !obj->tio.object->tio.BLOCKMOVEACTION
+          || !dynblock_is_graph_element (obj))
+        {
+          LOG_ERROR ("%s: node %u of the evaluation graph is a %s, which is "
+                     "no parameter, action, grip or grip location",
+                     func, (unsigned)i, class_name (dwg, obj));
+          return AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
         }
     }
   return 0;
@@ -790,8 +846,10 @@ has_element_name (const Dwg_Data *dwg,
     {
       const Dwg_Object *obj = node_object (dwg, graph, i);
       const Author_Block_Element *e;
+      // every node is a graph element (check_graph ()); grip location
+      // components and proxy nodes have no name
       if (!obj || obj->fixedtype == DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT
-          || obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ)
+          || obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE)
         continue;
       e = (const Author_Block_Element *)obj->tio.object->tio.BLOCKMOVEACTION;
       if (e->name && strEQ (e->name, name))
@@ -1245,14 +1303,15 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
     }
   if (!error
       && (!is_finite_3d (base_pt) || !is_finite_3d (end_pt)
-          || (base_pt->x == end_pt->x && base_pt->y == end_pt->y)
           || base_pt->z != end_pt->z
+          || !(hypot (end_pt->x - base_pt->x, end_pt->y - base_pt->y)
+               > AUTHOR_MIN_LENGTH)
           || !isfinite (hypot (end_pt->x - base_pt->x,
                                end_pt->y - base_pt->y))))
     {
-      LOG_ERROR ("%s: the points aren't finite, are one point, or aren't in "
-                 "one XY plane",
-                 func);
+      LOG_ERROR ("%s: the points aren't finite, are no more than %g apart, "
+                 "or aren't in one XY plane",
+                 func, AUTHOR_MIN_LENGTH);
       error = AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
     }
   if (!error && ab.graph)
@@ -1497,14 +1556,23 @@ free_stretched (Author_Stretched *s, const BITCODE_BL n)
   free (s);
 }
 
-/* The stretch points of entity obj in the frame lo, hi, into *s. */
+/* The stretch points of entity obj in the frame lo, hi, into *s. dir is
+   a change of the stretch's parameter's end point. */
 static int
-stretched_points (const Dwg_Object *obj, const BITCODE_2RD *lo,
-                  const BITCODE_2RD *hi, Author_Stretched *s)
+stretched_points (const Dwg_Data *dwg, const Dwg_Object *obj,
+                  const BITCODE_2RD *lo, const BITCODE_2RD *hi,
+                  const BITCODE_3BD *dir, Author_Stretched *s)
 {
   static const char func[] = "dwg_dynblock_add_stretch";
   const BITCODE_BL count = dynblock_stretch_points (obj);
   s->handle = obj->handle.value;
+  if (dynblock_leaves_plane (dwg, obj, dir))
+    {
+      LOG_ERROR ("%s: stretching %s " FORMAT_HV " would take it, or an "
+                 "ATTRIB it owns, out of its plane, which is not supported",
+                 func, dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
   if (!count)
     {
       LOG_ERROR ("%s: stretching %s " FORMAT_HV " is not supported", func,
@@ -1557,6 +1625,7 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   Author_Stretched *stretched = NULL;
   const Dwg_Object *paramobj;
   BITCODE_2RD lo, hi;
+  BITCODE_3BD dir;
   int index = -1, error;
   if (errorp)
     *errorp = 0;
@@ -1587,11 +1656,14 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   lo.y = fmin (corner1->y, corner2->y);
   hi.x = fmax (corner1->x, corner2->x);
   hi.y = fmax (corner1->y, corner2->y);
+  dir.x = param->def_endpt.x - param->def_basept.x;
+  dir.y = param->def_endpt.y - param->def_basept.y;
+  dir.z = param->def_endpt.z - param->def_basept.z;
   for (BITCODE_BL i = 0; !error && i < num_entities; i++)
     {
       const Dwg_Object *obj = block_entity (&ab, entities[i], func, &error);
       if (obj)
-        error = stretched_points (obj, &lo, &hi, &stretched[i]);
+        error = stretched_points (ab.dwg, obj, &lo, &hi, &dir, &stretched[i]);
     }
   if (error)
     {
@@ -1684,6 +1756,85 @@ refused_move (int *errorp, const int error)
   return NULL;
 }
 
+/* Whether an action of the linear parameter with node id from moves the
+   points of the linear parameter with node id to, directly or through the
+   actions of the parameters it moves: a stretch listing it among its codes,
+   or a move among the parameters it moves. The evaluator can't order
+   linear parameters that move each other in a cycle. */
+static int
+moves_linear (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
+              const BITCODE_BL from, const BITCODE_BL to)
+{
+  BITCODE_BL *queue = (BITCODE_BL *)calloc (graph->num_nodes + 1,
+                                            sizeof (BITCODE_BL));
+  unsigned char *seen = (unsigned char *)calloc (graph->num_nodes + 1, 1);
+  BITCODE_BL head = 0, tail = 0;
+  int found = 0;
+  if (!queue || !seen)
+    {
+      free (queue);
+      free (seen);
+      // as if it did: the move is refused
+      return 1;
+    }
+  queue[tail++] = from;
+  while (head < tail && !found)
+    {
+      const BITCODE_BL id = queue[head++];
+      for (BITCODE_BL i = 0; !found && i < graph->num_nodes; i++)
+        {
+          const Dwg_Object *a = node_object (dwg, graph, i);
+          BITCODE_BL n = 0;
+          const BITCODE_BL *moved = NULL;
+          const Dwg_BLOCKSTRETCHACTION_codes *codes = NULL;
+          if (!a)
+            continue;
+          if (a->fixedtype == DWG_TYPE_BLOCKMOVEACTION)
+            {
+              const Dwg_Object_BLOCKMOVEACTION *_a
+                  = a->tio.object->tio.BLOCKMOVEACTION;
+              if (_a->conn_pts[0].code != id)
+                continue;
+              n = _a->actions ? _a->num_actions : 0;
+              moved = _a->actions;
+            }
+          else if (a->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION)
+            {
+              const Dwg_Object_BLOCKSTRETCHACTION *_a
+                  = a->tio.object->tio.BLOCKSTRETCHACTION;
+              if (_a->conn_pts[0].code != id)
+                continue;
+              n = _a->codes ? _a->num_codes : 0;
+              codes = _a->codes;
+            }
+          else
+            continue;
+          for (BITCODE_BL j = 0; !found && j < n; j++)
+            {
+              const BITCODE_BL next = moved ? moved[j] : codes[j].bl95;
+              BITCODE_BL k;
+              if (next == to)
+                found = 1;
+              // queue each linear parameter once
+              for (k = 0; k < graph->num_nodes; k++)
+                if ((BITCODE_BL)graph->nodes[k].nextid == next)
+                  break;
+              if (!found && k < graph->num_nodes && !seen[k]
+                  && node_object (dwg, graph, k)
+                  && node_object (dwg, graph, k)->fixedtype
+                         == DWG_TYPE_BLOCKLINEARPARAMETER)
+                {
+                  seen[k] = 1;
+                  queue[tail++] = next;
+                }
+            }
+        }
+    }
+  free (queue);
+  free (seen);
+  return found;
+}
+
 /* Whether obj is a parameter that a move may carry. */
 static int
 is_carried_kind (const Dwg_Object *obj)
@@ -1740,6 +1891,15 @@ check_moved (const Author_Block *ab, const BITCODE_RLL handle,
                  node == param_index ? ": it is the move's own parameter"
                  : is_carried_kind (obj) ? ": it chains its actions"
                                          : "");
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (obj->fixedtype == DWG_TYPE_BLOCKLINEARPARAMETER
+      && moves_linear (ab->dwg, graph, (BITCODE_BL)graph->nodes[node].nextid,
+                       (BITCODE_BL)graph->nodes[param_index].nextid))
+    {
+      LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported: its "
+                 "actions move the move's own parameter, a cycle",
+                 func, dwg_type_name (obj->fixedtype), handle);
       return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   *nodep = node;

@@ -148,7 +148,9 @@ dwg_dynblock_copy_block (Dwg_Data *dst, const Dwg_Data *src,
  *
  * Refused, with nothing changed in dst: a NULL argument, or src the
  * document of dst_block (DWG_ERR_INTERNALERROR); dst_block not a
- * BLOCK_HEADER of its document, or src_block not one of src
+ * BLOCK_HEADER of its document, src_block not one of src, or copies that
+ * would draw dst_block, as an INSERT of a block of src that is matched
+ * with dst_block, or with a block of dst that draws it at any depth
  * (DWG_ERR_INVALIDHANDLE); documents that aren't both r2004 (AC1018), or
  * have different codepages (DWG_ERR_NOTYETSUPPORTED); paper space or
  * another layout block, an xref or a block that depends on one, as
@@ -735,17 +737,21 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
    blk not a BLOCK_HEADER of its document, or a node of its evaluation
-   graph that doesn't resolve (DWG_ERR_INVALIDHANDLE); a drawing other
-   than r2004, or a constraint-based (parametric) definition
+   graph that doesn't resolve or isn't a parameter, action, grip or grip
+   location component (DWG_ERR_INVALIDHANDLE); a drawing other than
+   r2004, or a constraint-based (parametric) definition
    (DWG_ERR_NOTYETSUPPORTED); a node of another class LibreDWG can't
    decode (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block,
    an xref or a block that depends on one (DWG_ERR_INVALIDTYPE); an empty
    name, or one that a property of blk has already, as
    dwg_dynblock_get_params () names them, ASCII letters compared without
-   case; points that aren't finite, that are one point, or at different
-   heights (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal is DWG_ERR_INVALIDDWG
-   with the bit given, logged at LOG_ERROR. In a LibreDWG built without
-   write support, all are refused (DWG_ERR_NOTYETSUPPORTED).
+   case; points that aren't finite, no more than 1e-9 apart, which the
+   evaluator takes as no length, or at different heights
+   (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes
+   or edges it doesn't have (no further bit). Each refusal is
+   DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR. In a
+   LibreDWG built without write support, all are refused
+   (DWG_ERR_NOTYETSUPPORTED).
 
    @param errorp If not NULL, receives 0 or DWG_ERR_* bits: from
                  DWG_ERR_CRITICAL up, a refusal as above, or
@@ -785,7 +791,9 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    blk's evaluation graph, or a handle that isn't one of blk's entities
    (DWG_ERR_INVALIDHANDLE); a drawing other than r2004, a constraint-based
    definition, an entity of another type, an LWPOLYLINE whose extrusion
-   isn't along Z, an entity with no stretch point in the frame, or a
+   isn't along Z, an entity with no stretch point in the frame, one whose
+   2D points the stretch would take out of their plane, as it would those
+   of an ATTRIB an INSERT owns whose extrusion isn't along Z, or a
    param with its base point in its middle, or driving an action other
    than a stretch or a move, which dwg_dynblock_evaluate () refuses to
    evaluate (DWG_ERR_NOTYETSUPPORTED); no entities, an entity given twice,
@@ -821,8 +829,11 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
 
    Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for
    blk, param and the entities, with a handle that is neither one of blk's
-   entities nor a parameter of its graph; an entity of another type, a
-   parameter of another kind, or one that chains actions
+   entities nor a parameter of its graph; an entity of another type, or
+   one whose 2D points the move would take out of their plane, a
+   parameter of another kind, one that chains actions, or a linear
+   parameter whose own actions move param, directly or through other
+   parameters' actions, which the evaluator can't order
    (DWG_ERR_NOTYETSUPPORTED); a multiplier that isn't finite, no objects,
    or an object given twice (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
    return value are as for dwg_dynblock_add_linear (). */
