@@ -2253,6 +2253,38 @@ test_preflight (void)
                      && dwg->num_objects == num_objects,
                  "preflight: a move of it, too (0x%x)", error);
         }
+        // turned to face X, under a parameter 1e200 long, whose length's
+        // square overflows
+        {
+          const BITCODE_3BD hb = { 0, -70, 0 }, he = { 1e200, -70, 0 };
+          Dwg_Object_BLOCKLINEARPARAMETER *huge;
+          attrib->extrusion.x = 1.0;
+          attrib->extrusion.z = 0.0;
+          loglevel = 0;
+          huge = dwg_dynblock_add_linear (block_header (dwg, blk), "Huge",
+                                          &hb, &he, &error);
+          num_objects = dwg->num_objects;
+          error = 0;
+          CHECK (huge
+                     && !dwg_dynblock_add_stretch (block_header (dwg, blk),
+                                                   huge, &frame1, &frame2,
+                                                   &pin_ins, 1, &error)
+                     && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                     && dwg->num_objects == num_objects,
+                 "preflight: a stretch along a parameter 1e200 long of an "
+                 "INSERT whose ATTRIB faces X (0x%x)",
+                 error);
+          error = 0;
+          loglevel = 0;
+          CHECK (huge
+                     && !dwg_dynblock_add_move (block_header (dwg, blk), huge,
+                                                &pin_ins, 1, 1.0, &error)
+                     && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                     && dwg->num_objects == num_objects,
+                 "preflight: a move of it along the parameter 1e200 long "
+                 "(0x%x)",
+                 error);
+        }
         attrib->extrusion.x = 0.0;
         attrib->extrusion.z = 1.0;
         error = 0;

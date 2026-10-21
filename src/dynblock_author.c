@@ -1611,7 +1611,9 @@ param_direction (const Dwg_Object_BLOCKLINEARPARAMETER *param,
   const double dx = param->def_endpt.x - param->def_basept.x;
   const double dy = param->def_endpt.y - param->def_basept.y;
   const double dz = param->def_endpt.z - param->def_basept.z;
-  const double length = sqrt (dx * dx + dy * dy + dz * dz);
+  // as distance_3d () in the evaluator: the squares of a finite length
+  // can overflow
+  const double length = hypot (hypot (dx, dy), dz);
   dir->x = length > 0.0 ? dx / length * 1000.0 : 0.0;
   dir->y = length > 0.0 ? dy / length * 1000.0 : 0.0;
   dir->z = length > 0.0 ? dz / length * 1000.0 : 0.0;
