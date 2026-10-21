@@ -67,6 +67,17 @@
 // parameter: an out int in C#.
 %include "typemaps.i"
 %apply int *OUTPUT { int *errorp };
+// SWIG's stdint.i takes uint64_t as unsigned long long, which it isn't on
+// LP64 systems, and casts the const handle arrays these two take to that:
+// pass them as the BITCODE_RLL they are.
+%feature("action") dwg_dynblock_add_stretch {
+  result = dwg_dynblock_add_stretch (arg1, arg2, arg3, arg4,
+                                     (const BITCODE_RLL *)arg5, arg6, arg7);
+}
+%feature("action") dwg_dynblock_add_move {
+  result = dwg_dynblock_add_move (arg1, arg2, (const BITCODE_RLL *)arg3, arg4,
+                                  arg5, arg6);
+}
 %include "dwg_dynblock_api.h"
 %clear int *errorp;
 
