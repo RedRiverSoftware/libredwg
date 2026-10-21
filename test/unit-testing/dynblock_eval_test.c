@@ -2349,10 +2349,10 @@ test_stretch_whole (Dwg_Data *dwg)
    listed; the evaluator refuses one, before adding anything. Here a LINE
    added to the Window outside 'Stretch Width''s frame joins the action's
    selection with no stretch point listed, or listed with none; so does a
-   locked ATTDEF; and the action lists Window Height with none of its
-   points. An ATTDEF that isn't locked stays where it is, as AutoCAD leaves
-   it. The parameter and grip the fixture's selection holds are allowed,
-   as test_linear shows. */
+   locked ATTDEF, both ways; and the action lists Window Height with none
+   of its points. An ATTDEF that isn't locked stays where it is, both
+   ways, as AutoCAD leaves it. The parameter and grip the fixture's
+   selection holds are allowed, as test_linear shows. */
 static int
 test_stretch_selection (Dwg_Data *dwg)
 {
@@ -2449,13 +2449,39 @@ test_stretch_selection (Dwg_Data *dwg)
               "locked, doesn't stay");
         failures++;
       }
-    if (add_attr_eed (dwg, attdef->parent, 1))
-      failures += test_refusal (dwg, WINDOW, &v, 1,
-                                REFUSED (DWG_ERR_NOTYETSUPPORTED),
-                                "a selected locked ATTDEF with no stretch "
-                                "point listed");
+    if (!add_stretch_entity (dwg, stretch, h_attdef, NULL, 0))
+      {
+        fail ("stretch selection: out of memory");
+        return failures + 1;
+      }
+    rep = evaluate (dwg, WINDOW, &v, 1,
+                    "stretch selection, an ATTDEF listed with no point");
+    if (rep
+        && is_moved (dwg, dwg_resolve_handle (dwg, h_attdef),
+                     copy_of (dwg, def, rep, h_attdef), 0.0, 0.0))
+      OK ("stretch selection: a selected ATTDEF listed with no stretch "
+          "point, not locked, stays");
     else
       {
+        fail ("stretch selection: a selected ATTDEF listed with no stretch "
+              "point, not locked, doesn't stay");
+        failures++;
+      }
+    if (add_attr_eed (dwg, attdef->parent, 1))
+      {
+        failures += test_refusal (dwg, WINDOW, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a selected locked ATTDEF listed with no "
+                                  "stretch point");
+        pop_stretch_entity (stretch);
+        failures += test_refusal (dwg, WINDOW, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a selected locked ATTDEF with no stretch "
+                                  "point listed");
+      }
+    else
+      {
+        pop_stretch_entity (stretch);
         fail ("stretch selection: out of memory");
         failures++;
       }

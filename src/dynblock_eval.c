@@ -2482,6 +2482,10 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
       unsigned char *seen;
       if (!obj)
         break;
+      // listed with none of its points, so wholly outside the frame, where
+      // an ATTDEF that isn't locked stays
+      if ((!h->indexes || !h->num_indexes) && is_left_attdef (plan->dwg, obj))
+        continue;
       count = stretch_points (obj);
       if (!count)
         {
