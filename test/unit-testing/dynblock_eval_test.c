@@ -2481,7 +2481,8 @@ test_stretch_selection (Dwg_Data *dwg)
 /* The Door's move action MoveSwing moves its selection by half Wall
    Thickness's change: entities added to it, at Wall Thickness 6, move by
    -0.5 in y, an ATTDEF when its position is locked. ATTDEFs that aren't
-   locked, with no AcDbAttr group or with 1070 0, 1070 0, stay where they
+   locked, with no AcDbAttr group, with 1070 0, 1070 0, or with a group
+   other than AutoCAD's two 1070s (here 1071 0, 1070 1), stay where they
    are, as AutoCAD leaves them. A POINT in it is refused. */
 static int
 test_move (Dwg_Data *dwg)
@@ -2493,13 +2494,13 @@ test_move (Dwg_Data *dwg)
                      ml_pt = { 0.0, -1.25, 0.0 },
                      aligned_pt = { 1.0, 1.0, 0.0 };
   Dwg_Entity_TEXT *text, *centred, *middle_left, *aligned;
-  Dwg_Entity_ATTDEF *locked, *unlocked, *unlocked_00;
+  Dwg_Entity_ATTDEF *locked, *unlocked, *unlocked_00, *odd;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_POINT *point;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
   BITCODE_RLL h_text, h_centred, h_middle_left, h_aligned, h_insert,
-      h_locked, h_unlocked, h_unlocked_00;
+      h_locked, h_unlocked, h_unlocked_00, h_odd;
   int failures = 0;
   memset (&v, 0, sizeof (v));
   if (!def || !move)
@@ -2515,23 +2516,28 @@ test_move (Dwg_Data *dwg)
   unlocked = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE", "default");
   unlocked_00
       = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE00", "default");
+  odd = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "ODD", "default");
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
   if (!text || !centred || !middle_left || !aligned || !locked || !unlocked
-      || !unlocked_00 || !insert || !point)
+      || !unlocked_00 || !odd || !insert || !point)
     {
       fail ("move: could not add the entities");
       return 1;
     }
   if (!add_attr_eed (dwg, locked->parent, 1)
-      || !add_attr_eed (dwg, unlocked_00->parent, 0))
+      || !add_attr_eed (dwg, unlocked_00->parent, 0)
+      || !add_attr_eed (dwg, odd->parent, 1))
     {
       fail ("move: out of memory");
       return 1;
     }
+  // its group's first item a 1071 0 (a 1071 takes 5 bytes in a file)
+  odd->parent->eed[odd->parent->num_eed - 2].data->code = 71;
+  odd->parent->eed[odd->parent->num_eed - 2].size = 8;
   text->dataflags = 0x02;
   // middle-centred on the block's base point, as AutoCAD writes it: the
   // alignment point (0,0) isn't stored
@@ -2554,6 +2560,7 @@ test_move (Dwg_Data *dwg)
   h_locked = entity_handle (dwg, locked->parent);
   h_unlocked = entity_handle (dwg, unlocked->parent);
   h_unlocked_00 = entity_handle (dwg, unlocked_00->parent);
+  h_odd = entity_handle (dwg, odd->parent);
   if (!add_move_entity (dwg, move, h_text)
       || !add_move_entity (dwg, move, h_centred)
       || !add_move_entity (dwg, move, h_middle_left)
@@ -2561,6 +2568,7 @@ test_move (Dwg_Data *dwg)
       || !add_move_entity (dwg, move, h_locked)
       || !add_move_entity (dwg, move, h_unlocked)
       || !add_move_entity (dwg, move, h_unlocked_00)
+      || !add_move_entity (dwg, move, h_odd)
       || !add_move_entity (dwg, move, h_insert))
     {
       fail ("move: out of memory");
@@ -2624,7 +2632,9 @@ test_move (Dwg_Data *dwg)
       && is_moved (dwg, dwg_resolve_handle (dwg, h_unlocked),
                    copy_of (dwg, def, rep, h_unlocked), 0.0, 0.0)
       && is_moved (dwg, dwg_resolve_handle (dwg, h_unlocked_00),
-                   copy_of (dwg, def, rep, h_unlocked_00), 0.0, 0.0))
+                   copy_of (dwg, def, rep, h_unlocked_00), 0.0, 0.0)
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_odd),
+                   copy_of (dwg, def, rep, h_odd), 0.0, 0.0))
     OK ("move: the ATTDEFs that aren't locked stay");
   else
     {

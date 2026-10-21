@@ -810,9 +810,12 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    locked where it is, and the ATTRIBs of its placements stay behind when
    their definition moves. Its AcDbAttr EED group becomes 1070 0, 1070 1, a
    new group at the end of its EED in place of any it had, and the
-   document gets the AcDbAttr APPID when it has none; an ATTDEF already
-   locked is left as it is. The ATTRIBs of placements made before keep
-   their own AcDbAttr EED.
+   document gets the AcDbAttr APPID when it has none; its
+   lock_position_flag, which r2007 and later files store instead, is set
+   too. An ATTDEF already locked is left as it is. The lock is the
+   ATTDEF's own, so the block's other move actions that select it move it
+   too from then on. The ATTRIBs of placements made before keep their own
+   AcDbAttr EED.
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
    not a BLOCK_HEADER of its document, param not a linear parameter of blk's

@@ -2069,34 +2069,28 @@ dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
    actions one wholly outside their frame; a stretch whose frame holds its
    insertion point moves it either way. A placement's ATTRIBs follow their
    definitions only when locked. Files before r2007, which have no field
-   for the lock, keep it in the ATTDEF's AcDbAttr EED group: AutoCAD 2007
-   and later write 1070 0, 1070 1 for a locked attribute definition and no
-   group for another, and read 1070 0, 1070 0 as not locked too. */
+   for the lock, keep it in the ATTDEF's AcDbAttr EED group, two 1070s:
+   AutoCAD 2007 and later write 1070 0, 1070 1 for a locked attribute
+   definition and no group for another, and read 1070 0, 1070 0 as not
+   locked too. lock_position_flag, which r2004 files don't store, isn't
+   read. */
 int
 dynblock_is_locked_attdef (const Dwg_Data *dwg, const Dwg_Object *obj)
 {
   const Dwg_Object_Entity *ent = obj->tio.entity;
-  for (BITCODE_BL i = 0; ent->eed && i < ent->num_eed; i++)
-    {
-      const Dwg_Object *appid;
-      const Dwg_Eed *lock;
-      BITCODE_RS value;
-      if (!ent->eed[i].size)
-        continue;
-      appid = handle_object (dwg, ent->eed[i].handle.value);
-      if (!appid || appid->fixedtype != DWG_TYPE_APPID
-          || !appid->tio.object->tio.APPID->name
-          || !strEQc (appid->tio.object->tio.APPID->name, "AcDbAttr"))
-        continue;
-      // the group's second item; the first is 1070 0
-      lock = i + 1 < ent->num_eed ? &ent->eed[i + 1] : NULL;
-      if (!lock || lock->size || !lock->data || lock->data->code != 70)
-        return 0;
-      // Dwg_Eed_Data is packed
-      memcpy (&value, &lock->data->u.eed_70.rs, sizeof (value));
-      return value != 0;
-    }
-  return 0;
+  const int start = eed_group (dwg, obj, "AcDbAttr");
+  const Dwg_Eed *version, *lock;
+  BITCODE_RS value;
+  if (start < 0 || (BITCODE_BL)start + 1 >= ent->num_eed)
+    return 0;
+  version = &ent->eed[start];
+  lock = &ent->eed[start + 1];
+  if (!version->data || version->data->code != 70 || lock->size
+      || !lock->data || lock->data->code != 70)
+    return 0;
+  // Dwg_Eed_Data is packed
+  memcpy (&value, &lock->data->u.eed_70.rs, sizeof (value));
+  return value != 0;
 }
 
 /* Whether a move action, or a stretch action selecting it wholly outside

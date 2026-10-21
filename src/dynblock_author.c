@@ -469,8 +469,9 @@ append_lock (Dwg_Eed **eedp, BITCODE_BL *num_eedp, const BITCODE_RLL appid)
    (dynblock_is_locked_attdef ()). An AcDbAttr group it has gives way to a
    new group at the end of its EED, rather than being changed, as
    number_entities () replaces a counter; one already locked is left as it
-   is. *appidp is the handle of the AcDbAttr APPID, found or added when
-   first needed. */
+   is. Its lock_position_flag, which r2007 and later files store instead,
+   is set too. *appidp is the handle of the AcDbAttr APPID, found or added
+   when first needed. */
 static int
 lock_attdef (Dwg_Data *dwg, const BITCODE_RLL handle, BITCODE_RLL *appidp)
 {
@@ -488,6 +489,7 @@ lock_attdef (Dwg_Data *dwg, const BITCODE_RLL handle, BITCODE_RLL *appidp)
       obj = handle_object (dwg, handle);
     }
   ent = obj->tio.entity;
+  ent->tio.ATTDEF->lock_position_flag = 1;
   drop_group (dwg, &ent->eed, &ent->num_eed, "AcDbAttr");
   return append_lock (&ent->eed, &ent->num_eed, *appidp);
 }

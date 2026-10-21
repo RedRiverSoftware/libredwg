@@ -2304,6 +2304,16 @@ test_locked_attdefs (void)
   failures += locks_are (dwg, h, a, "locked ATTDEFs");
   CHECK (object (dwg, a[A_LOCKED])->tio.entity->num_eed == num_eed,
          "locked ATTDEFs: the locked ATTDEF's EED is unchanged");
+  // the field r2007 and later files store the lock in, which r2004 files
+  // don't, so it doesn't read back
+  CHECK (object (dwg, a[A_NAME])->tio.entity->tio.ATTDEF->lock_position_flag
+             && object (dwg, a[A_LEFT])
+                    ->tio.entity->tio.ATTDEF->lock_position_flag
+             && object (dwg, a[A_SIDE])
+                    ->tio.entity->tio.ATTDEF->lock_position_flag
+             && !object (dwg, a[A_FREE])
+                     ->tio.entity->tio.ATTDEF->lock_position_flag,
+         "locked ATTDEFs: the ATTDEFs locked get lock_position_flag too");
   CHECK (count_appids (dwg, "AcDbAttr") == 1,
          "locked ATTDEFs: one AcDbAttr APPID, the file's");
   failures += evaluates_attdefs (dwg, blk, "locked ATTDEFs");

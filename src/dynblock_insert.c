@@ -1847,6 +1847,9 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
   const Dwg_Object_BLOCK_HEADER *blk = block_of (dwg, p->block);
   const Dwg_Object_BLOCK_HEADER *def = block_of (dwg, p->def);
   const BITCODE_BL num_owned = blk->num_owned;
+  // a representation block holds a copy of each of def's entities, in
+  // def's order
+  const int paired = def->entities && def->num_owned == num_owned;
   BITCODE_RLL *attdefs, *sources;
   BITCODE_3BD base = blk->base_pt;
   BITCODE_BL n = 0;
@@ -1867,11 +1870,7 @@ add_attributes (Dynblock_Placement *p, const Dwg_AttValue *atts,
     if (is_placed_attdef (ref_object (dwg, blk->entities[i])))
       {
         attdefs[n] = ref_handle (blk->entities[i]);
-        // a representation block holds a copy of each of def's entities,
-        // in def's order
-        sources[n] = def->entities && i < def->num_owned
-                         ? ref_handle (def->entities[i])
-                         : attdefs[n];
+        sources[n] = paired ? ref_handle (def->entities[i]) : attdefs[n];
         n++;
       }
 
