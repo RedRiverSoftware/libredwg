@@ -75,6 +75,8 @@
 %array_functions(Dwg_DynValue, Dwg_DynValue_Array);
 %array_functions(Dwg_AttValue, Dwg_AttValue_Array);
 %array_functions(Dwg_DynBlock_Check, Dwg_DynBlock_Check_Array);
+// the handles dwg_dynblock_add_stretch () and dwg_dynblock_add_move () take
+%array_functions(BITCODE_RLL, BITCODE_RLL_Array);
 %array_functions(double, Double_Array);
 %array_functions(char *, String_Array);
 %pointer_functions(Dwg_DynParam *, Dwg_DynParam_Pointer);

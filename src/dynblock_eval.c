@@ -268,6 +268,12 @@ definition_graph (const Dwg_Data *dwg, const Dwg_Object *def)
                                                                  : NULL;
 }
 
+Dwg_Object *
+dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return definition_graph (dwg, obj);
+}
+
 static int
 check_version (const Dwg_Data *dwg, char *reason, const size_t reason_size)
 {
@@ -1932,6 +1938,79 @@ stretch_points (const Dwg_Object *obj)
     }
 }
 
+BITCODE_BL
+dynblock_stretch_points (const Dwg_Object *obj)
+{
+  return stretch_points (obj);
+}
+
+static int
+is_along_z (const BITCODE_BE *ext)
+{
+  return ext->x == 0.0 && ext->y == 0.0 && ext->z > 0.0;
+}
+
+/* Keep in step with stretch_points (): the points it counts, in its
+   order. */
+int
+dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
+                        BITCODE_3BD *pt)
+{
+  if (i >= stretch_points (obj))
+    return 0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      *pt = i ? obj->tio.entity->tio.LINE->end
+              : obj->tio.entity->tio.LINE->start;
+      return 1;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        if (!is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->points[i].x;
+        pt->y = _obj->points[i].y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    case DWG_TYPE_CIRCLE:
+      if (!is_along_z (&obj->tio.entity->tio.CIRCLE->extrusion))
+        return 0;
+      *pt = obj->tio.entity->tio.CIRCLE->center;
+      return 1;
+    case DWG_TYPE_INSERT:
+      if (!is_along_z (&obj->tio.entity->tio.INSERT->extrusion))
+        return 0;
+      *pt = obj->tio.entity->tio.INSERT->ins_pt;
+      return 1;
+    case DWG_TYPE_TEXT:
+      {
+        const Dwg_Entity_TEXT *_obj = obj->tio.entity->tio.TEXT;
+        if (_obj->horiz_alignment || _obj->vert_alignment
+            || !is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->ins_pt.x;
+        pt->y = _obj->ins_pt.y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    case DWG_TYPE_ATTDEF:
+      {
+        const Dwg_Entity_ATTDEF *_obj = obj->tio.entity->tio.ATTDEF;
+        if (_obj->horiz_alignment || _obj->vert_alignment
+            || !is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->ins_pt.x;
+        pt->y = _obj->ins_pt.y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    default:
+      return 0;
+    }
+}
+
 /* Whether the evaluator moves an entity of obj's type whole. */
 static int
 is_movable (const Dwg_Object *obj)
@@ -2022,6 +2101,34 @@ check_planar (Dynblock_Plan *plan, const Dwg_Object *obj,
               "moving %s " FORMAT_HV " out of its plane is not supported",
               dwg_type_name (obj->fixedtype), obj->handle.value);
   return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+/* As check_planar () refuses, for obj and the ATTRIBs an INSERT owns, as
+   plan_whole () checks them. */
+int
+dynblock_leaves_plane (const Dwg_Data *dwg, const Dwg_Object *obj,
+                       const BITCODE_3BD *wcs_delta)
+{
+  int planar;
+  BITCODE_3BD d;
+  if (entity_ocs (obj, &planar) && planar)
+    {
+      entity_delta (obj, wcs_delta, &d);
+      if (fabs (d.z) > DYNBLOCK_VALUE_EPSILON)
+        return 1;
+    }
+  if (obj->fixedtype == DWG_TYPE_INSERT)
+    {
+      const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+      for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+        {
+          const Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+          if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+              && dynblock_leaves_plane (dwg, attrib, wcs_delta))
+            return 1;
+        }
+    }
+  return 0;
 }
 
 /* Grows the box lo, hi to hold the point x, y. */
@@ -3705,6 +3812,25 @@ move_whole (Dwg_Data *dwg, Dwg_Object *obj, const BITCODE_3BD *wcs_delta)
     default:
       break;
     }
+}
+
+int
+dynblock_is_movable (const Dwg_Object *obj)
+{
+  return is_movable (obj);
+}
+
+double
+dynblock_entity_reach (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return entity_reach (dwg, obj);
+}
+
+void
+dynblock_move_entity (Dwg_Data *dwg, Dwg_Object *obj,
+                      const BITCODE_3BD *wcs_delta)
+{
+  move_whole (dwg, obj, wcs_delta);
 }
 
 /* Moves stretch point point of copy obj, a LINE or LWPOLYLINE, by

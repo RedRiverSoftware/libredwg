@@ -12,12 +12,15 @@
 
 /*
  * dwg_dynblock_api.h: dynamic blocks. Copy a block definition, with its
- * dynamic-block data, from one document into another; describe a
- * definition's properties, read a placement's values, and evaluate a
- * definition at chosen values into the geometry of a representation
- * block, with a check of that evaluation against the representation
- * blocks AutoCAD stored in a drawing; and place a definition at chosen
- * values, as AutoCAD stores a placement.
+ * dynamic-block data, from one document into another, or copy the
+ * entities of one document's block or model space into a block of
+ * another; describe a definition's properties, read a placement's values,
+ * and evaluate a definition at chosen values into the geometry of a
+ * representation block, with a check of that evaluation against the
+ * representation blocks AutoCAD stored in a drawing; place a definition at
+ * chosen values, as AutoCAD stores a placement; and give a block a linear
+ * property with stretch and move actions, as AutoCAD's Block Editor
+ * stores them.
  *
  * A dynamic block definition is a block whose extension dictionary holds
  * an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK. Its parameters are the
@@ -116,6 +119,71 @@ EXPORT Dwg_Object_BLOCK_HEADER *
 dwg_dynblock_copy_block (Dwg_Data *dst, const Dwg_Data *src,
                          const Dwg_Object_BLOCK_HEADER *src_block,
                          int *errorp);
+
+/**
+ * Copy the entities of src_block, a block or the model space of document
+ * src, into dst_block, a block or the model space of another document.
+ *
+ * The copies are added to the end of dst_block's entity list, in
+ * src_block's order, with what they own: attributes, vertices and
+ * extension dictionaries. They are placed as an INSERT of src_block at
+ * dst_block's base point plus offset would draw them, unscaled and
+ * unturned: each moves by that point minus src_block's base point. The
+ * base point of model space is the drawing's INSBASE, where AutoCAD puts
+ * the drawing's base when it inserts the drawing as a block; that of
+ * another block is its own. References out of the entities are matched
+ * by name in dst, and what dst lacks is copied, as dwg_dynblock_copy_block
+ * () does for a definition: a block an INSERT draws is copied with it
+ * unless dst has a block of its name.
+ *
+ * A copy keeps its source's EED, but for AcDbBlockRepETag, which numbers
+ * the entities of a dynamic block definition: when dst_block is one, the
+ * copies are numbered after its own entities, as the
+ * dwg_dynblock_add_linear () family numbers them. Copied attribute
+ * definitions set dst_block's flag for them. The copies are drawn after
+ * dst_block's own entities, unless an ACAD_SORTENTS table of dst_block
+ * orders them otherwise; that table and src_block's are not changed or
+ * copied. src_block's dynamic-block data, if any, is not copied: an entity
+ * copies with its invisible flag as it is.
+ *
+ * Refused, with nothing changed in dst: a NULL argument, or src the
+ * document of dst_block (DWG_ERR_INTERNALERROR); dst_block not a
+ * BLOCK_HEADER of its document, or src_block not one of src
+ * (DWG_ERR_INVALIDHANDLE); documents that aren't both r2004 (AC1018), or
+ * have different codepages (DWG_ERR_NOTYETSUPPORTED); paper space or
+ * another layout block, an xref or a block that depends on one, as
+ * src_block or dst_block (DWG_ERR_INVALIDTYPE); an offset or base point
+ * that isn't finite, or a move that would take a coordinate beyond what a
+ * double holds (DWG_ERR_VALUEOUTOFBOUNDS); with a move, an entity of a
+ * type the move doesn't handle, which are those dwg_dynblock_evaluate ()
+ * moves whole (LINE, LWPOLYLINE, ARC, CIRCLE, ELLIPSE, SPLINE, TEXT,
+ * ATTDEF, MTEXT, INSERT with its ATTRIBs, and HATCH), or one whose 2D
+ * points the move would take out of their plane, as it would those of an
+ * entity whose extrusion isn't along Z (DWG_ERR_NOTYETSUPPORTED); and
+ * what dwg_dynblock_copy_block () refuses of what a definition owns, among
+ * what the entities own, such as the objects of a constraint-based
+ * block's network. Each refusal is DWG_ERR_INVALIDDWG with the bit given,
+ * logged at LOG_ERROR.
+ *
+ * @param dst_block The block, or model space, to copy into.
+ * @param src       The document src_block is in.
+ * @param src_block The block, or model space, whose entities to copy.
+ * @param offset    Where src_block's base point goes, from dst_block's.
+ * @param errorp    If not NULL, receives 0 or DWG_ERR_* bits: from
+ *                  DWG_ERR_CRITICAL up, a refusal as above, or
+ *                  DWG_ERR_OUTOFMEM, after which dst may hold copies that no
+ *                  block lists; below it, the bits of dwg_dynblock_copy_block
+ *                  () for references and data the copy left out, and
+ *                  DWG_ERR_INVALIDEED when dst_block's counter of entity
+ *                  numbers leaves no room for the copies, which are then
+ *                  left unnumbered.
+ * @return the number of entities added to dst_block's list, 0 when refused.
+ */
+EXPORT BITCODE_BL
+dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
+                            const Dwg_Data *src,
+                            const Dwg_Object_BLOCK_HEADER *src_block,
+                            const BITCODE_3BD *offset, int *errorp);
 
 /* The kind of a dynamic block property: the parameter it comes from. */
 typedef enum DWG_DYNPARAM_KIND
@@ -630,6 +698,140 @@ EXPORT Dwg_DynBlock_Check_Report *dwg_dynblock_check (Dwg_Data *dwg,
 
 EXPORT void
 dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
+
+/* Gives block blk a linear property named name: a length, from base_pt to
+   end_pt in blk's coordinates, that AutoCAD's Properties palette shows for
+   each placement of blk, with a grip at end_pt to drag. A new value moves
+   the end point along the line from base_pt, and the stretch and move
+   actions that dwg_dynblock_add_stretch () and dwg_dynblock_add_move ()
+   give the property move entities by that change. The property has no
+   value set, so any length is allowed, and its parameter doesn't chain
+   actions. It is stored as AutoCAD's Block Editor stores a linear
+   parameter with one grip, in r2004 files: the parameter, its grip and
+   the grip's two location components, as nodes of blk's evaluation
+   graph.
+
+   blk may be a block definition, or model space: a drawing whose model
+   space holds a dynamic block's evaluation graph is how AutoCAD writes a
+   dynamic block to a file of its own (WBLOCK), and is a dynamic block
+   definition when AutoCAD inserts the drawing as a block.
+
+   On a block that isn't yet a dynamic block definition, it first makes it
+   one: an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK in blk's extension
+   dictionary, which is added when blk has none, and for a block other
+   than model space the AcDbDynamicBlockRoundTripPurgePreventer that
+   AutoCAD keeps beside the graph. On a dynamic block definition, the
+   parameter joins its graph, with node ids after the highest the graph
+   has given out.
+
+   It also numbers blk's entities as AutoCAD numbers a definition's once
+   it has evaluated it: each entity without an AcDbBlockRepETag index gets
+   the next one, as the EED group 1070 1, 1071 index, 1005 its own handle,
+   and blk keeps the next index to give in its own group, 1070 1, 1071
+   index. AutoCAD pairs the entities of a placement's representation block
+   with the definition's by those indexes (see dwg_dynblock_insert ()).
+   dwg_dynblock_add_stretch () and dwg_dynblock_add_move () number them
+   too, for entities added since.
+
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
+   blk not a BLOCK_HEADER of its document, or a node of its evaluation
+   graph that doesn't resolve (DWG_ERR_INVALIDHANDLE); a drawing other
+   than r2004, or a constraint-based (parametric) definition
+   (DWG_ERR_NOTYETSUPPORTED); a node of another class LibreDWG can't
+   decode (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block,
+   an xref or a block that depends on one (DWG_ERR_INVALIDTYPE); an empty
+   name, or one that a property of blk has already, as
+   dwg_dynblock_get_params () names them, ASCII letters compared without
+   case; points that aren't finite, that are one point, or at different
+   heights (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal is DWG_ERR_INVALIDDWG
+   with the bit given, logged at LOG_ERROR. In a LibreDWG built without
+   write support, all are refused (DWG_ERR_NOTYETSUPPORTED).
+
+   @param errorp If not NULL, receives 0 or DWG_ERR_* bits: from
+                 DWG_ERR_CRITICAL up, a refusal as above, or
+                 DWG_ERR_OUTOFMEM, which may leave some of what was made
+                 in the document; below it, DWG_ERR_INVALIDEED when blk's
+                 counter of entity numbers leaves no room for more, and
+                 its entities are left as they are.
+   @return the new parameter, or NULL. */
+EXPORT Dwg_Object_BLOCKLINEARPARAMETER *
+dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
+                         const BITCODE_3BD *base_pt,
+                         const BITCODE_3BD *end_pt, int *errorp);
+
+/* Gives the linear property of param, a parameter that
+   dwg_dynblock_add_linear () made or AutoCAD made, of block blk, a stretch
+   action: a new value of the property moves the stretch points of the
+   given entities that lie in the rectangle with opposite corners corner1
+   and corner2, in blk's XY plane, by the change of param's end point, as
+   dwg_dynblock_evaluate () evaluates it. Those points are the ends of a
+   LINE and the vertices of an LWPOLYLINE, which then stretch; a CIRCLE's
+   centre, an INSERT's insertion point, and the insertion point of a TEXT
+   or ATTDEF justified left on its baseline, which then move whole, as
+   does a LINE or LWPOLYLINE with all its points in the rectangle. A point
+   on the rectangle's edge is in it. The action is stored as AutoCAD's
+   Block Editor stores a stretch of those entities with that frame: each
+   entity with the indexes of its stretch points in the frame, numbered as
+   dwg_dynblock_evaluate () numbers them. Its distance multiplier is 1.
+
+   entities are the handles of blk's entities to stretch, each with at
+   least one stretch point in the frame: AutoCAD moves whole an entity of
+   the selection that lies wholly outside the frame, which
+   dwg_dynblock_evaluate () doesn't evaluate. The entities are numbered as
+   dwg_dynblock_add_linear () numbers them.
+
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
+   blk not a BLOCK_HEADER of its document, param not a linear parameter of
+   blk's evaluation graph, or a handle that isn't one of blk's entities
+   (DWG_ERR_INVALIDHANDLE); a drawing other than r2004, a constraint-based
+   definition, an entity of another type, an LWPOLYLINE whose extrusion
+   isn't along Z, an entity with no stretch point in the frame, or a
+   param with its base point in its middle, or driving an action other
+   than a stretch or a move, which dwg_dynblock_evaluate () refuses to
+   evaluate (DWG_ERR_NOTYETSUPPORTED); no entities, an entity given twice,
+   or corners that aren't finite or don't span a rectangle, sharing an x
+   or a y (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal is DWG_ERR_INVALIDDWG with
+   the bit given, logged at LOG_ERROR; errorp and the return value are as
+   for dwg_dynblock_add_linear (). */
+EXPORT Dwg_Object_BLOCKSTRETCHACTION *
+dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
+                          const Dwg_Object_BLOCKLINEARPARAMETER *param,
+                          const BITCODE_2RD *corner1,
+                          const BITCODE_2RD *corner2,
+                          const BITCODE_RLL *entities,
+                          const BITCODE_BL num_entities, int *errorp);
+
+/* Gives the linear property of param, a parameter of block blk as for
+   dwg_dynblock_add_stretch (), a move action: a new value of the property
+   moves the given objects by the change of param's end point times
+   multiplier, as dwg_dynblock_evaluate () evaluates it. A multiplier of
+   0.5 keeps the objects centred on a length that grows from its base
+   point.
+
+   objects are handles of blk's entities, which move whole, of the types
+   dwg_dynblock_evaluate () moves whole (LINE, LWPOLYLINE, ARC, CIRCLE,
+   ELLIPSE, SPLINE, TEXT, ATTDEF, MTEXT, INSERT with its ATTRIBs, and
+   HATCH); and of linear, visibility or flip parameters of blk's
+   evaluation graph other than param, which move with them, points and
+   grips, so that the dynamic properties a block already has stay with the
+   entities they act on. A parameter is stored in the action's selection
+   with its grips, and listed by node id among the parameters it moves, as
+   AutoCAD's Block Editor stores a move whose selection holds a parameter.
+   The entities are numbered as dwg_dynblock_add_linear () numbers them.
+
+   Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for
+   blk, param and the entities, with a handle that is neither one of blk's
+   entities nor a parameter of its graph; an entity of another type, a
+   parameter of another kind, or one that chains actions
+   (DWG_ERR_NOTYETSUPPORTED); a multiplier that isn't finite, no objects,
+   or an object given twice (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
+   return value are as for dwg_dynblock_add_linear (). */
+EXPORT Dwg_Object_BLOCKMOVEACTION *
+dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
+                       const Dwg_Object_BLOCKLINEARPARAMETER *param,
+                       const BITCODE_RLL *objects,
+                       const BITCODE_BL num_objects, const double multiplier,
+                       int *errorp);
 
 /* The name of a kind, such as "linear", or "unknown". */
 EXPORT const char *dwg_dynparam_kind_name (const Dwg_DynParam_Kind kind);

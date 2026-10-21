@@ -13,7 +13,8 @@
 /*
  * dynblock.h: what the evaluator in dynblock_eval.c tells
  * dynblock_insert.c about an evaluation, for the values a placement
- * stores. Not exported.
+ * stores; and what the authoring functions of dynblock_author.c take from
+ * the evaluator and from the block copy of dynblock_copy.c. Not exported.
  */
 
 #ifndef DYNBLOCK_H
@@ -21,6 +22,7 @@
 
 #include "dwg.h"
 #include "dwg_dynblock_api.h"
+#include "copy.h"
 
 /* A parameter of the evaluation graph after an evaluation: its points as
    the actions that ran left them, in the order of the record AutoCAD
@@ -72,5 +74,70 @@ int dynblock_evaluated_state (Dwg_Data *dwg, const BITCODE_RLL def_handle,
                               const size_t reason_size);
 
 void dynblock_free_state (Dynblock_State *state);
+
+/* What dynblock_author.c takes from the evaluator, so that the blocks it
+   makes move and stretch as the evaluator evaluates them. */
+
+/* Whether the evaluator moves an entity of obj's type whole. */
+int dynblock_is_movable (const Dwg_Object *obj);
+
+/* Whether a move of entity obj, or of an ATTRIB it owns, by wcs_delta
+   would take its 2D points out of their plane. */
+int dynblock_leaves_plane (const Dwg_Data *dwg, const Dwg_Object *obj,
+                           const BITCODE_3BD *wcs_delta);
+
+/* The largest magnitude of a coordinate dynblock_move_entity () moves of
+   entity obj, with the ATTRIBs an INSERT owns. */
+double dynblock_entity_reach (const Dwg_Data *dwg, const Dwg_Object *obj);
+
+/* Moves entity obj whole by wcs_delta, with the ATTRIBs an INSERT owns, as
+   the evaluator moves a copy. */
+void dynblock_move_entity (Dwg_Data *dwg, Dwg_Object *obj,
+                           const BITCODE_3BD *wcs_delta);
+
+/* The number of stretch points of entity obj that a stretch action's
+   indexes count, as the evaluator counts them; 0 for a type it doesn't
+   stretch. */
+BITCODE_BL dynblock_stretch_points (const Dwg_Object *obj);
+
+/* Where stretch point i of entity obj is, in its block's coordinates, into
+   *pt: a LINE's start and end, an LWPOLYLINE's vertices, a CIRCLE's
+   centre, an INSERT's insertion point, and the insertion point of a TEXT
+   or ATTDEF justified left on its baseline, for an entity whose extrusion
+   is along +Z. Returns 0 for a point of another entity, whose position
+   isn't known here. */
+int dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
+                            BITCODE_3BD *pt);
+
+/* The EVALUATION_GRAPH of block obj, or NULL when obj is not a dynamic
+   block definition. */
+Dwg_Object *dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj);
+
+/* In dynblock_copy.c, for dwg_dynblock_copy_entities () */
+
+int dynblock_is_model_space (const Dwg_Data *dwg, const Dwg_Object *obj);
+
+/* Whether block obj is model space, or a block that isn't a layout, an
+   xref or a block depending on one. */
+int dynblock_is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj);
+
+/* Copies the entities tops of src's block src_block, with what they own,
+   into dst through map, which then has an entry for each copy, as
+   dwg_dynblock_copy_block () copies a definition's: references out of
+   them are matched by name in dst, or copied, and those to src_block are
+   to dst's block dst_block. The copies are in no block's entity list.
+   Returns 0 or DWG_ERR_* bits as dwg_dynblock_copy_block () does; a
+   refusal changes nothing in dst. */
+int dynblock_copy_entities (Dwg_Data *dst, const Dwg_Data *src,
+                            const BITCODE_RLL src_block,
+                            const BITCODE_RLL dst_block,
+                            const BITCODE_RLL *tops,
+                            const BITCODE_BL num_tops, Dwg_Copy_Map *map);
+
+/* In dynblock_author.c */
+
+/* Drops the AcDbBlockRepETag EED groups of entity obj, which number the
+   entities of a dynamic block definition. */
+void dynblock_drop_etag (const Dwg_Data *dwg, Dwg_Object *obj);
 
 #endif /* DYNBLOCK_H */

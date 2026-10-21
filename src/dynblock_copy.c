@@ -12,7 +12,9 @@
 
 /*
  * dynblock_copy.c: copy a block definition, with its dynamic-block data,
- * from one document into another, with the object copy of copy.c.
+ * from one document into another, with the object copy of copy.c; or copy
+ * the entities of a block, or of model space, into a block of another
+ * document.
  *
  * The objects to copy are found by copying into a scratch document first.
  * The copy reports every reference to an object it wasn't given: an object
@@ -41,6 +43,7 @@
 #include "logging.h"
 #include "dwg_api.h"
 #include "dwg_dynblock_api.h"
+#include "dynblock.h"
 
 /* What a refused copy returns, with a bit for the reason, as copy.c does. */
 #define BLOCK_COPY_REFUSED DWG_ERR_INVALIDDWG
@@ -313,21 +316,32 @@ control_of (const Dwg_Object *ctrl)
   return ctrl && ctrl->tio.object ? ctrl->tio.object->tio.APPID_CONTROL : NULL;
 }
 
-/* Model space, paper space and other layout blocks, xrefs and blocks that
-   depend on one aren't block definitions that can be copied. */
 static int
-is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj)
+is_model_space (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  const Dwg_Object_BLOCK_HEADER *blk = obj->tio.object->tio.BLOCK_HEADER;
+  return obj->handle.value == ref_target (dwg->header_vars.BLOCK_RECORD_MSPACE)
+         || (blk && starts_with (blk->name, "*Model_Space"));
+}
+
+/* Model space, paper space and other layout blocks, xrefs and blocks that
+   depend on one aren't block definitions that can be copied. With
+   model_space set, model space is accepted, as a block whose entities
+   dwg_dynblock_copy_entities () copies, or copies into. */
+static int
+is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj,
+                   const int model_space)
 {
   const Dwg_Object_BLOCK_HEADER *blk = obj->tio.object->tio.BLOCK_HEADER;
   const BITCODE_RLL handle = obj->handle.value;
   if (!blk)
     return 0;
-  if (handle == ref_target (dwg->header_vars.BLOCK_RECORD_MSPACE)
-      || handle == ref_target (dwg->header_vars.BLOCK_RECORD_PSPACE)
+  if (is_model_space (dwg, obj))
+    return model_space;
+  if (handle == ref_target (dwg->header_vars.BLOCK_RECORD_PSPACE)
       || ref_target (blk->layout))
     return 0;
-  if (starts_with (blk->name, "*Model_Space")
-      || starts_with (blk->name, "*Paper_Space"))
+  if (starts_with (blk->name, "*Paper_Space"))
     return 0;
   return !blk->blkisxref && !blk->xrefoverlaid && !blk->is_xref_dep;
 }
@@ -664,7 +678,7 @@ classify (Block_Copy *restrict bc, const Dwg_Copy_Unresolved *restrict u)
         bc->error |= error;
       else if (found)
         add_match (bc, target, found);
-      else if (is_copyable_block (bc->src, obj))
+      else if (is_copyable_block (bc->src, obj, 0))
         add_part (bc, obj);
       else
         decide (bc, target, DECIDED_LEFT_OUT);
@@ -712,12 +726,15 @@ scratch_new (const Dwg_Data *src, const Dwg_Data *dst)
   return dwg;
 }
 
-/* Fills bc->copy with the objects to copy, starting from the definition
-   top, and bc->matched_src/dst with the objects matched in dst. */
+/* Fills bc->copy with the objects to copy, starting from the objects tops,
+   and bc->matched_src/dst with the objects matched in dst, after those
+   matched already. */
 static int
-find_copy (Block_Copy *restrict bc, const BITCODE_RLL top)
+find_copy (Block_Copy *restrict bc, const BITCODE_RLL *tops,
+           const BITCODE_BL num_tops)
 {
   Dwg_Data *scratch = scratch_new (bc->src, bc->dst);
+  BITCODE_BL k;
   int error = 0;
 
   bc->scratch_map = dwg_copy_map_new ();
@@ -726,7 +743,11 @@ find_copy (Block_Copy *restrict bc, const BITCODE_RLL top)
       error = DWG_ERR_OUTOFMEM;
       goto done;
     }
-  add_part (bc, dwg_resolve_handle (bc->src, top));
+  for (k = 0; k < bc->matched_src.num; k++)
+    dwg_copy_map_set (bc->scratch_map, bc->matched_src.handles[k],
+                      bc->matched_dst.handles[k]);
+  for (k = 0; k < num_tops; k++)
+    add_part (bc, dwg_resolve_handle (bc->src, tops[k]));
   while (!bc->error && bc->pending.num)
     {
       Handle_List batch = bc->pending;
@@ -1068,7 +1089,7 @@ copy_block (Dwg_Data *dst, const Dwg_Data *src,
       LOG_ERROR ("dwg_dynblock_copy_block: src_block is not a block of src");
       return refused (errorp, DWG_ERR_INVALIDHANDLE);
     }
-  if (!is_copyable_block (src, srcobj))
+  if (!is_copyable_block (src, srcobj, 0))
     {
       LOG_ERROR ("dwg_dynblock_copy_block: BLOCK_HEADER " FORMAT_HV
                  " is a layout block or an xref, not a block definition",
@@ -1101,7 +1122,7 @@ copy_block (Dwg_Data *dst, const Dwg_Data *src,
   if (!bc.role || !bc.decided)
     error = DWG_ERR_OUTOFMEM;
   else
-    error = find_copy (&bc, srcobj->handle.value);
+    error = find_copy (&bc, &srcobj->handle.value, 1);
   if (error < DWG_ERR_CRITICAL)
     error |= copy_into_dst (&bc, map);
 
@@ -1142,4 +1163,58 @@ dwg_dynblock_copy_block (Dwg_Data *dst, const Dwg_Data *src,
   copy = copy_block (dst, src, src_block, map, errorp);
   dwg_copy_map_free (map);
   return copy;
+}
+
+/*--------------------------------------------------------------------------------
+ * For dwg_dynblock_copy_entities ()
+ */
+
+int
+dynblock_is_model_space (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return is_model_space (dwg, obj);
+}
+
+int
+dynblock_is_copyable_block (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return is_copyable_block (dwg, obj, 1);
+}
+
+int
+dynblock_copy_entities (Dwg_Data *dst, const Dwg_Data *src,
+                        const BITCODE_RLL src_block,
+                        const BITCODE_RLL dst_block, const BITCODE_RLL *tops,
+                        const BITCODE_BL num_tops, Dwg_Copy_Map *map)
+{
+  Block_Copy bc;
+  int error;
+
+  memset (&bc, 0, sizeof (bc));
+  bc.src = src;
+  bc.dst = dst;
+  bc.role = hash_new (1024);
+  bc.decided = hash_new (1024);
+  if (!bc.role || !bc.decided)
+    error = DWG_ERR_OUTOFMEM;
+  else
+    {
+      // the entities' owner, src_block, is dst_block in the copy
+      bc.error |= list_add (&bc.matched_src, src_block);
+      bc.error |= list_add (&bc.matched_dst, dst_block);
+      decide (&bc, src_block, DECIDED_MATCHED);
+      error = find_copy (&bc, tops, num_tops);
+    }
+  if (error < DWG_ERR_CRITICAL)
+    error |= copy_into_dst (&bc, map);
+  free (bc.copy.handles);
+  free (bc.pending.handles);
+  free (bc.matched_src.handles);
+  free (bc.matched_dst.handles);
+  free (bc.deferred.handles);
+  if (bc.role)
+    hash_free (bc.role);
+  if (bc.decided)
+    hash_free (bc.decided);
+  return error;
 }

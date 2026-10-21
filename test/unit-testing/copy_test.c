@@ -5770,7 +5770,7 @@ test_copy_all_blocks (void)
       Dwg_Object_BLOCK_HEADER *copy;
       Block_Copies found;
       int error;
-      if (!is_copyable_block (&src, blk))
+      if (!is_copyable_block (&src, blk, 0))
         {
           layouts++;
           continue;
@@ -6308,7 +6308,7 @@ test_copy_block_refused (void)
   ps = dwg_paper_space_object (&src);
   blocks = table_blocks (&src2000, 0, &num_blocks);
   for (BITCODE_BL i = 0; i < num_blocks && !blk2000; i++)
-    if (is_copyable_block (&src2000, blocks[i]))
+    if (is_copyable_block (&src2000, blocks[i], 0))
       blk2000 = blocks[i];
   free (blocks);
   if (!window || !door_elevation || !ms || !ps || !blk2000)
