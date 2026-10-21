@@ -2085,6 +2085,14 @@ entity_delta (const Dwg_Object *obj, const BITCODE_3BD *delta,
   const BITCODE_BE *ext = entity_ocs (obj, &planar);
   if (!ext || (ext->x == 0.0 && ext->y == 0.0 && ext->z >= 0.0))
     *out = *delta;
+  else if (ext->x == 0.0 && ext->y == 0.0)
+    {
+      // along -Z, the OCS turns x and z over; transform_OCS () turns over
+      // only x
+      out->x = -delta->x;
+      out->y = delta->y;
+      out->z = -delta->z;
+    }
   else
     transform_OCS (out, *delta, *ext);
 }

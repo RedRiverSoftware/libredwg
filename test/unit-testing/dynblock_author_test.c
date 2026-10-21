@@ -2390,6 +2390,304 @@ test_copy_draws_itself (void)
   return failures;
 }
 
+/* The public Toilet's rotate action turns its entities. A stretch or move
+   of a LINE it turns, or a move carrying a parameter it lists or selects,
+   is refused, with nothing added, as the evaluator can't order the turn
+   and the move; once it turns none of them, all three are made. */
+static int
+test_turned (Dwg_Data *src)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Object_BLOCK_HEADER *toilet = NULL;
+  Dwg_Object_EVALUATION_GRAPH *graph = NULL;
+  Dwg_Object_BLOCKROTATEACTION *rotate = NULL;
+  Dwg_Object_BLOCKLINEARPARAMETER *width = NULL, *shift = NULL;
+  const BITCODE_3BD b0 = { 0, 0, 0 }, e0 = { 10, 0, 0 };
+  const BITCODE_3BD b1 = { 0, 5, 0 }, e1 = { 10, 5, 0 };
+  const BITCODE_2RD all1 = { -1e6, -1e6 }, all2 = { 1e6, 1e6 };
+  BITCODE_RLL turned = 0, shift_h;
+  BITCODE_BL num_objects;
+  int error = 0, failures = 0;
+  if (dwg)
+    toilet = dwg_dynblock_copy_block (dwg, src, block_header (src, TOILET),
+                                      &error);
+  loglevel = test_loglevel;
+  if (toilet)
+    graph = graph_of (dwg, handle_of (dwg, toilet));
+  for (BITCODE_BL i = 0; graph && i < graph->num_nodes && !rotate; i++)
+    {
+      Dwg_Object *a = node_object (dwg, graph, i);
+      if (a && a->fixedtype == DWG_TYPE_BLOCKROTATEACTION)
+        rotate = a->tio.object->tio.BLOCKROTATEACTION;
+    }
+  for (BITCODE_BL i = 0; rotate && rotate->deps && i < rotate->num_deps;
+       i++)
+    {
+      const Dwg_Object *e = object (dwg, ref (rotate->deps[i]));
+      if (!turned && e && e->fixedtype == DWG_TYPE_LINE)
+        turned = e->handle.value;
+    }
+  if (turned)
+    width = dwg_dynblock_add_linear (toilet, "Toilet Width", &b0, &e0,
+                                     &error);
+  if (width)
+    shift = dwg_dynblock_add_linear (toilet, "Toilet Shift", &b1, &e1,
+                                     &error);
+  loglevel = test_loglevel;
+  if (!shift)
+    {
+      FAIL ("turned: the Toilet, a LINE its rotate action turns, or its new "
+            "parameters not found (0x%x)",
+            error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  shift_h = handle_of (dwg, shift);
+  num_objects = dwg->num_objects;
+  error = 0;
+  loglevel = 0;
+  CHECK (!dwg_dynblock_add_stretch (toilet, width, &all1, &all2, &turned, 1,
+                                    &error)
+             && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+             && dwg->num_objects == num_objects,
+         "turned: a stretch of a LINE the rotate action turns (0x%x)",
+         error);
+  error = 0;
+  loglevel = 0;
+  CHECK (!dwg_dynblock_add_move (toilet, width, &turned, 1, 1.0, &error)
+             && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+             && dwg->num_objects == num_objects,
+         "turned: a move of it (0x%x)", error);
+  {
+    BITCODE_BL *actions = rotate->actions;
+    const BITCODE_BL num_actions = rotate->num_actions;
+    BITCODE_H *deps = rotate->deps;
+    const BITCODE_BL num_deps = rotate->num_deps;
+    BITCODE_BL shift_id = (BITCODE_BL)shift->evalexpr.nodeid;
+    BITCODE_H shift_dep = dwg_add_handleref (dwg, 4, shift_h, NULL);
+    // Shift listed among the parameters it turns, then only selected
+    rotate->actions = &shift_id;
+    rotate->num_actions = 1;
+    rotate->deps = NULL;
+    rotate->num_deps = 0;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (toilet, width, &shift_h, 1, 1.0, &error)
+               && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && dwg->num_objects == num_objects,
+           "turned: a move carrying a parameter the rotate action lists "
+           "(0x%x)",
+           error);
+    rotate->actions = NULL;
+    rotate->num_actions = 0;
+    rotate->deps = &shift_dep;
+    rotate->num_deps = 1;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (toilet, width, &shift_h, 1, 1.0, &error)
+               && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && dwg->num_objects == num_objects,
+           "turned: a move carrying a parameter the rotate action selects "
+           "(0x%x)",
+           error);
+    // turning none of them
+    rotate->deps = NULL;
+    rotate->num_deps = 0;
+    error = 0;
+    loglevel = 0;
+    CHECK (dwg_dynblock_add_stretch (toilet, width, &all1, &all2, &turned, 1,
+                                     &error)
+               && !error,
+           "turned: the stretch, once the rotate action turns nothing "
+           "(0x%x)",
+           error);
+    error = 0;
+    loglevel = 0;
+    CHECK (dwg_dynblock_add_move (toilet, width, &turned, 1, 1.0, &error)
+               && !error,
+           "turned: and the move of the LINE (0x%x)", error);
+    error = 0;
+    loglevel = 0;
+    CHECK (dwg_dynblock_add_move (toilet, width, &shift_h, 1, 1.0, &error)
+               && !error,
+           "turned: and the move carrying Shift (0x%x)", error);
+    rotate->actions = actions;
+    rotate->num_actions = num_actions;
+    rotate->deps = deps;
+    rotate->num_deps = num_deps;
+  }
+  loglevel = test_loglevel;
+  free_document (dwg);
+  return failures;
+}
+
+/* A selection that points into the document's object list, which adding
+   the action's object moves when the list is full: the action lists the
+   entities selected, read before the list moved (ASan checks the reads). */
+static int
+test_selection_in_object_list (void)
+{
+  Dwg_Data *dwg = new_document ();
+  BITCODE_RLL h[BOX_ENTITIES], blk;
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  BITCODE_RLL listed;
+  int error = 0, failures = 0;
+  blk = dwg ? add_box_block (dwg, "BOX", h) : 0;
+  if (blk)
+    param = dwg_dynblock_add_linear (block_header (dwg, blk), "Width",
+                                     &box_base, &box_end, &error);
+  loglevel = test_loglevel;
+  if (!param)
+    {
+      FAIL ("object list: building the block failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  {
+    const BITCODE_BL right = object (dwg, h[RIGHT])->index;
+    // full, so that dwg_add_object () reallocates it
+    dwg->num_alloced_objects = dwg->num_objects;
+    error = 0;
+    s = dwg_dynblock_add_stretch (block_header (dwg, blk), param, &frame1,
+                                  &frame2, &dwg->object[right].handle.value,
+                                  1, &error);
+    loglevel = test_loglevel;
+    listed = s && s->num_deps == 1 && s->num_hdls == 1
+                     && ref (s->hdls[0].hdl) == h[RIGHT]
+                 ? ref (s->deps[0])
+                 : 0;
+    CHECK (s && !error && listed == h[RIGHT],
+           "object list: the stretch lists the LINE selected (0x%x, "
+           FORMAT_HV ")",
+           error, listed);
+  }
+  {
+    const BITCODE_BL circle = object (dwg, h[CIRCLE])->index;
+    dwg->num_alloced_objects = dwg->num_objects;
+    error = 0;
+    m = dwg_dynblock_add_move (block_header (dwg, blk), param,
+                               &dwg->object[circle].handle.value, 1, 0.5,
+                               &error);
+    loglevel = test_loglevel;
+    listed = m && m->num_deps == 1 ? ref (m->deps[0]) : 0;
+    CHECK (m && !error && listed == h[CIRCLE],
+           "object list: the move lists the CIRCLE selected (0x%x, "
+           FORMAT_HV ")",
+           error, listed);
+  }
+  free_document (dwg);
+  return failures;
+}
+
+/* A stretch frame whose corners are finite, but their sum isn't: the
+   action is displayed at its centre all the same. */
+static int
+test_far_frame (void)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Object_BLOCK_HEADER *blk = dwg ? dwg_add_BLOCK_HEADER (dwg, "FAR")
+                                     : NULL;
+  const dwg_point_3d a = { 1.2e308, 0, 0 }, b = { 1.3e308, 0, 0 };
+  const BITCODE_2RD c1 = { 1e308, -1 }, c2 = { 1.5e308, 1 };
+  Dwg_Entity_LINE *line = NULL;
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s = NULL;
+  BITCODE_RLL h = 0;
+  double x = 0.0, y = 0.0;
+  int error = 0, failures = 0;
+  if (blk && dwg_add_BLOCK (blk, "FAR"))
+    line = dwg_add_LINE (blk, &a, &b);
+  if (line && dwg_add_ENDBLK (blk))
+    param = dwg_dynblock_add_linear (blk, "Width", &box_base, &box_end,
+                                     &error);
+  loglevel = test_loglevel;
+  if (!param)
+    {
+      FAIL ("far frame: building the block failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  h = handle_of (dwg, line);
+  error = 0;
+  s = dwg_dynblock_add_stretch (blk, param, &c1, &c2, &h, 1, &error);
+  loglevel = test_loglevel;
+  if (s)
+    {
+      x = s->display_location.x;
+      y = s->display_location.y;
+    }
+  CHECK (s && !error && fabs (x - 1.25e308) <= 1.25e308 * 1e-15 && y == 0.0,
+         "far frame: the stretch displayed at the frame's centre, x %g "
+         "(0x%x)",
+         x, error);
+  free_document (dwg);
+  return failures;
+}
+
+/* CIRCLEs copied with an offset that has a z: one whose extrusion is along
+   -Z, its OCS turned over in x and z, moves by the offset in WCS as the
+   one along +Z does. */
+static int
+test_copy_turned_over (void)
+{
+  Dwg_Data *src = new_document ();
+  Dwg_Data *dst = new_document ();
+  Dwg_Object_BLOCK_HEADER *b = dst ? dwg_add_BLOCK_HEADER (dst, "TURNED")
+                                   : NULL;
+  const dwg_point_3d o = { 0, 0, 0 };
+  const BITCODE_3BD offset = { 2, 3, 5 };
+  Dwg_Entity_CIRCLE *down = NULL, *up = NULL;
+  BITCODE_BL n = 0;
+  BITCODE_3BD dc = { 0, 0, 0 }, uc = { 0, 0, 0 };
+  int error = 0, failures = 0;
+  if (src)
+    {
+      down = dwg_add_CIRCLE (model_space (src), &o, 1.0);
+      up = dwg_add_CIRCLE (model_space (src), &o, 1.0);
+    }
+  if (b && (!dwg_add_BLOCK (b, "TURNED") || !dwg_add_ENDBLK (b)))
+    b = NULL;
+  loglevel = test_loglevel;
+  if (!down || !up || !b)
+    {
+      FAIL ("turned over: building the drawings failed");
+      if (src)
+        free_document (src);
+      if (dst)
+        free_document (dst);
+      return 1;
+    }
+  down->extrusion.z = -1.0;
+  n = dwg_dynblock_copy_entities (b, src, model_space (src), &offset,
+                                  &error);
+  loglevel = test_loglevel;
+  if (n == 2)
+    {
+      const Dwg_Object *d = nth_entity (dst, b, 0);
+      const Dwg_Object *u = nth_entity (dst, b, 1);
+      if (d && d->fixedtype == DWG_TYPE_CIRCLE)
+        dc = d->tio.entity->tio.CIRCLE->center;
+      if (u && u->fixedtype == DWG_TYPE_CIRCLE)
+        uc = u->tio.entity->tio.CIRCLE->center;
+    }
+  CHECK (n == 2 && !error && near (dc.x, -2.0) && near (dc.y, 3.0)
+             && near (dc.z, -5.0),
+         "turned over: the CIRCLE along -Z centred at (%g, %g, %g) in its "
+         "OCS, (2, 3, 5) in WCS (0x%x)",
+         dc.x, dc.y, dc.z, error);
+  CHECK (near (uc.x, 2.0) && near (uc.y, 3.0) && near (uc.z, 5.0),
+         "turned over: the CIRCLE along +Z centred at (%g, %g, %g)", uc.x,
+         uc.y, uc.z);
+  free_document (src);
+  free_document (dst);
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -2427,6 +2725,10 @@ main (int argc, char *argv[])
   failures += test_copy_numbering (&src);
   failures += test_copy_refusals ();
   failures += test_copy_draws_itself ();
+  failures += test_turned (&src);
+  failures += test_selection_in_object_list ();
+  failures += test_far_frame ();
+  failures += test_copy_turned_over ();
   failures += test_graph_read_from_dwg (&src);
   free_dwg (&src);
   return failures ? 1 : 0;

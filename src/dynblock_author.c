@@ -1072,6 +1072,48 @@ block_entity (const Author_Block *ab, const BITCODE_RLL handle,
   return obj;
 }
 
+/* Refuses object obj of a stretch's or move's selection, an entity or a
+   parameter the move carries, that a rotate action of ab's graph turns,
+   selecting it or listing its node id: the evaluator can't order a turn
+   and a move of the same points. */
+static int
+check_turned (const Author_Block *ab, const Dwg_Object *obj,
+              const char *func)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph;
+  int node;
+  if (!ab->graph)
+    return 0;
+  graph = graph_of (ab->dwg, ab->graph);
+  node = node_index (graph, obj->handle.value);
+  for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
+    {
+      const Dwg_Object *a = node_object (ab->dwg, graph, i);
+      const Dwg_Object_BLOCKROTATEACTION *_a;
+      int turns = 0;
+      if (!a || a->fixedtype != DWG_TYPE_BLOCKROTATEACTION)
+        continue;
+      _a = a->tio.object->tio.BLOCKROTATEACTION;
+      for (BITCODE_BL j = 0; _a->deps && j < _a->num_deps; j++)
+        if (ref_handle (_a->deps[j]) == obj->handle.value)
+          turns = 1;
+      for (BITCODE_BL j = 0; node >= 0 && _a->actions && j < _a->num_actions;
+           j++)
+        if (_a->actions[j] == (BITCODE_BL)graph->nodes[node].nextid)
+          turns = 1;
+      if (turns)
+        {
+          LOG_ERROR ("%s: %s " FORMAT_HV " is turned by rotate action "
+                     FORMAT_HV ", which the evaluator can't order with "
+                     "another action moving it: not supported",
+                     func, dwg_type_name (obj->fixedtype), obj->handle.value,
+                     a->handle.value);
+          return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+    }
+  return 0;
+}
+
 static Dwg_Object_BLOCKLINEARPARAMETER *
 refused_linear (int *errorp, const int error)
 {
@@ -1709,6 +1751,8 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
     {
       const Dwg_Object *obj = block_entity (&ab, entities[i], func, &error);
       if (obj)
+        error = check_turned (&ab, obj, func);
+      if (obj && !error)
         error = stretched_points (ab.dwg, obj, &lo, &hi, &dir, &stretched[i]);
     }
   if (error)
@@ -1726,8 +1770,9 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
                                   "BLOCKSTRETCHACTION", "BLOCKSTRETCHACTION",
                                   dwg_setup_BLOCKSTRETCHACTION);
     BITCODE_3BD display;
-    display.x = (lo.x + hi.x) / 2.0;
-    display.y = (lo.y + hi.y) / 2.0;
+    // halves first: the sum of two finite corners can overflow
+    display.x = lo.x / 2.0 + hi.x / 2.0;
+    display.y = lo.y / 2.0 + hi.y / 2.0;
     display.z = 0.0;
     if (!obj)
       error = DWG_ERR_OUTOFMEM;
@@ -1749,9 +1794,12 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
         if (!_a->deps || !_a->hdls || !_a->pts)
           error = DWG_ERR_OUTOFMEM;
       }
+    // the handles saved before new_object (), not entities, which may
+    // point into dwg->object, which adding an object can move; not yet
+    // sorted, they are in the order given
     for (BITCODE_BL i = 0; !error && i < num_entities; i++)
       {
-        _a->deps[i] = dwg_add_handleref (dwg, 4, entities[i], NULL);
+        _a->deps[i] = dwg_add_handleref (dwg, 4, stretched[i].handle, NULL);
         if (!_a->deps[i])
           error = DWG_ERR_OUTOFMEM;
         _a->num_deps = i + 1;
@@ -1919,7 +1967,7 @@ check_moved (const Author_Block *ab, const BITCODE_RLL handle,
                      func, dwg_type_name (obj->fixedtype), handle);
           return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
         }
-      return 0;
+      return check_turned (ab, obj, func);
     }
   if (!obj || node < 0)
     {
@@ -1949,8 +1997,18 @@ check_moved (const Author_Block *ab, const BITCODE_RLL handle,
       return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
     }
   *nodep = node;
-  return 0;
+  return check_turned (ab, obj, func);
 }
+
+/* An object of a move's selection: its handle, saved before the move adds
+   objects, as the selection may point into dwg->object, which adding an
+   object can move; and the node index of a parameter the move carries, -1
+   for an entity. */
+typedef struct _author_moved
+{
+  BITCODE_RLL handle;
+  int node;
+} Author_Moved;
 
 EXPORT Dwg_Object_BLOCKMOVEACTION *
 dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
@@ -1962,7 +2020,7 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
   static const char func[] = "dwg_dynblock_add_move";
   Author_Block ab;
   const Dwg_Object *paramobj;
-  int *nodes = NULL;
+  Author_Moved *moved = NULL;
   int index = -1, error;
   BITCODE_BL num_deps = 0, num_carried = 0;
   BITCODE_3BD dir;
@@ -1984,23 +2042,25 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
     error = check_selection (objects, num_objects, func);
   if (!error)
     {
-      nodes = (int *)calloc (num_objects, sizeof (int));
-      if (!nodes)
+      moved = (Author_Moved *)calloc (num_objects, sizeof (Author_Moved));
+      if (!moved)
         error = DWG_ERR_OUTOFMEM;
     }
   param_direction (param, &dir);
   for (BITCODE_BL i = 0; !error && i < num_objects; i++)
     {
-      error = check_moved (&ab, objects[i], index, &dir, &nodes[i]);
+      moved[i].handle = objects[i];
+      error = check_moved (&ab, objects[i], index, &dir, &moved[i].node);
       num_deps++;
-      if (!error && nodes[i] >= 0)
+      if (!error && moved[i].node >= 0)
         {
           // and the parameter's grips
           const Dwg_Object_EVALUATION_GRAPH *graph
               = graph_of (ab.dwg, ab.graph);
           num_carried++;
           for (BITCODE_BL j = 0; graph->edges && j < graph->num_edges; j++)
-            if (graph->edges[j].e3 == nodes[i] && graph->edges[j].e2 >= 0
+            if (graph->edges[j].e3 == moved[i].node
+                && graph->edges[j].e2 >= 0
                 && (BITCODE_BL)graph->edges[j].e2 < graph->num_nodes)
               {
                 const Dwg_Object *grip = node_object (
@@ -2012,7 +2072,7 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
     }
   if (error)
     {
-      free (nodes);
+      free (moved);
       free_block (&ab);
       return refused_move (errorp, error);
     }
@@ -2047,15 +2107,16 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
     for (BITCODE_BL i = 0; !error && i < num_objects; i++)
       {
         const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, ab.graph);
-        _a->deps[d] = dwg_add_handleref (dwg, 4, objects[i], NULL);
+        _a->deps[d] = dwg_add_handleref (dwg, 4, moved[i].handle, NULL);
         if (!_a->deps[d++])
           error = DWG_ERR_OUTOFMEM;
-        if (nodes[i] < 0)
+        if (moved[i].node < 0)
           continue;
-        _a->actions[c++] = (BITCODE_BL)graph->nodes[nodes[i]].nextid;
+        _a->actions[c++] = (BITCODE_BL)graph->nodes[moved[i].node].nextid;
         for (BITCODE_BL j = 0; !error && graph->edges && j < graph->num_edges;
              j++)
-          if (graph->edges[j].e3 == nodes[i] && graph->edges[j].e2 >= 0
+          if (graph->edges[j].e3 == moved[i].node
+              && graph->edges[j].e2 >= 0
               && (BITCODE_BL)graph->edges[j].e2 < graph->num_nodes)
             {
               const Dwg_Object *grip = node_object (
@@ -2081,14 +2142,14 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
         _a->xy_type = 0;
         error = number_entities (dwg, ab.blk);
       }
-    free (nodes);
+    free (moved);
     free_block (&ab);
     if (errorp)
       *errorp = error;
     return error >= DWG_ERR_CRITICAL ? NULL : _a;
   }
 #else
-  free (nodes);
+  free (moved);
   free_block (&ab);
   return refused_move (errorp, AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED);
 #endif

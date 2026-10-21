@@ -798,11 +798,13 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    INSERT owns whose plane param's direction leaves, whatever param's length,
    or a param with its base point in its middle, or driving an action other
    than a stretch or a move, which dwg_dynblock_evaluate () refuses to
-   evaluate (DWG_ERR_NOTYETSUPPORTED); no entities, an entity given twice,
-   corners that aren't finite or don't span a rectangle, sharing an x or a y,
-   or a graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal
-   is DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR; errorp and
-   the return value are as for dwg_dynblock_add_linear (). */
+   evaluate, or an entity a rotate action of the graph turns, which it can't
+   order with the stretch (DWG_ERR_NOTYETSUPPORTED); no entities, an entity
+   given twice, corners that aren't finite or don't span a rectangle, sharing
+   an x or a y, or a graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS).
+   Each refusal is DWG_ERR_INVALIDDWG with the bit given, logged at
+   LOG_ERROR; errorp and the return value are as for
+   dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKSTRETCHACTION *
 dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
                           const Dwg_Object_BLOCKLINEARPARAMETER *param,
@@ -831,15 +833,15 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
 
    Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for
    blk, param and the entities, with a handle that is neither one of blk's
-   entities nor a parameter of its graph; an entity of another type, or
-   one whose 2D points the move would take out of their plane, by the
-   same measure as for dwg_dynblock_add_stretch (), a
-   parameter of another kind, one that chains actions, or a linear
-   parameter whose own actions move param, directly or through other
-   parameters' actions, which the evaluator can't order
-   (DWG_ERR_NOTYETSUPPORTED); a multiplier that isn't finite, no objects,
-   an object given twice, or a graph with no node id left
-   (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
+   entities nor a parameter of its graph; an entity of another type, or one
+   whose 2D points the move would take out of their plane, by the same
+   measure as for dwg_dynblock_add_stretch (), a parameter of another kind,
+   one that chains actions, or a linear parameter whose own actions move
+   param, directly or through other parameters' actions, or an entity or
+   parameter that a rotate action of the graph turns, selecting it or listing
+   it, which the evaluator can't order (DWG_ERR_NOTYETSUPPORTED); a
+   multiplier that isn't finite, no objects, an object given twice, or a
+   graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
    return value are as for dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKMOVEACTION *
 dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
