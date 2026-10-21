@@ -148,7 +148,9 @@ struct_object (const Dwg_Data *dwg, const void *_obj,
   if (!o || o->dwg != dwg || o->objid >= dwg->num_objects)
     return NULL;
   obj = &dwg->object[o->objid];
-  if (obj->fixedtype != type || obj->tio.object != o)
+  // a copy of the struct links to the object too, but isn't its
+  if (obj->fixedtype != type || obj->tio.object != o
+      || (const void *)o->tio.BLOCKLINEARPARAMETER != _obj)
     return NULL;
   return obj;
 }
@@ -750,7 +752,8 @@ check_graph (const Dwg_Data *dwg, const Dwg_Object_EVALUATION_GRAPH *graph,
 
 #ifdef USE_WRITE
 /* Adds element obj to graph as a new node, with the next node id, which
-   it returns, or 0 when memory runs out. */
+   it returns, or 0 when memory runs out. check_ids () has checked that
+   there is one. */
 static BITCODE_BL
 add_node (Dwg_Data *dwg, Dwg_Object_EVALUATION_GRAPH *graph,
           Dwg_Object *obj)
@@ -1007,6 +1010,28 @@ check_param (const Author_Block *ab,
   *objp = obj;
   *indexp = index;
   return 0;
+}
+
+/* Refuses an addition of n nodes to ab's graph, if it has one, that would
+   take node ids beyond what the graph's signed 32-bit ids hold: they are
+   handed out after the highest so far, which the graph keeps, and which
+   no node has passed. */
+static int
+check_ids (const Author_Block *ab, const BITCODE_BL n, const char *func)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph;
+  int64_t highest;
+  if (!ab->graph)
+    return 0;
+  graph = graph_of (ab->dwg, ab->graph);
+  highest = graph->first_nodeid;
+  for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
+    if (graph->nodes[i].nextid > highest)
+      highest = graph->nodes[i].nextid;
+  if (highest + (int64_t)n <= INT32_MAX)
+    return 0;
+  LOG_ERROR ("%s: the evaluation graph has no node ids left", func);
+  return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
 }
 
 /* Checks the handles of a selection: each given once, and n > 0. */
@@ -1314,6 +1339,9 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
                  func, AUTHOR_MIN_LENGTH);
       error = AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
     }
+  // the parameter, its grip and the grip's two location components
+  if (!error)
+    error = check_ids (&ab, 4, func);
   if (!error && ab.graph)
     {
       // the property's name, as dwg_dynblock_evaluate () looks values up
@@ -1529,6 +1557,24 @@ refused_stretch (int *errorp, const int error)
   return NULL;
 }
 
+/* The direction of the end point of param, the change of the points an
+   action of it moves, at a length of 1000: dynblock_leaves_plane (), which
+   allows a change out of a 2D entity's plane of up to 1e-9, as the
+   evaluator does, then allows one of 1e-12 of the change, so that any
+   value the parameter is likely given keeps within the evaluator's. */
+static void
+param_direction (const Dwg_Object_BLOCKLINEARPARAMETER *param,
+                 BITCODE_3BD *dir)
+{
+  const double dx = param->def_endpt.x - param->def_basept.x;
+  const double dy = param->def_endpt.y - param->def_basept.y;
+  const double dz = param->def_endpt.z - param->def_basept.z;
+  const double length = sqrt (dx * dx + dy * dy + dz * dz);
+  dir->x = length > 0.0 ? dx / length * 1000.0 : 0.0;
+  dir->y = length > 0.0 ? dy / length * 1000.0 : 0.0;
+  dir->z = length > 0.0 ? dz / length * 1000.0 : 0.0;
+}
+
 /* The stretch points of the entities to stretch: the entity, and the
    indexes of its points in the frame. */
 typedef struct _author_stretched
@@ -1634,6 +1680,8 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   error = author_block (blk, func, &ab);
   if (!error)
     error = check_param (&ab, param, func, &paramobj, &index);
+  if (!error)
+    error = check_ids (&ab, 1, func);
   if (!error
       && (!isfinite (corner1->x) || !isfinite (corner1->y)
           || !isfinite (corner2->x) || !isfinite (corner2->y)
@@ -1656,9 +1704,7 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   lo.y = fmin (corner1->y, corner2->y);
   hi.x = fmax (corner1->x, corner2->x);
   hi.y = fmax (corner1->y, corner2->y);
-  dir.x = param->def_endpt.x - param->def_basept.x;
-  dir.y = param->def_endpt.y - param->def_basept.y;
-  dir.z = param->def_endpt.z - param->def_basept.z;
+  param_direction (param, &dir);
   for (BITCODE_BL i = 0; !error && i < num_entities; i++)
     {
       const Dwg_Object *obj = block_entity (&ab, entities[i], func, &error);
@@ -1927,6 +1973,8 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
   error = author_block (blk, func, &ab);
   if (!error)
     error = check_param (&ab, param, func, &paramobj, &index);
+  if (!error)
+    error = check_ids (&ab, 1, func);
   if (!error && !isfinite (multiplier))
     {
       LOG_ERROR ("%s: the multiplier isn't finite", func);
@@ -1940,9 +1988,7 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
       if (!nodes)
         error = DWG_ERR_OUTOFMEM;
     }
-  dir.x = param->def_endpt.x - param->def_basept.x;
-  dir.y = param->def_endpt.y - param->def_basept.y;
-  dir.z = param->def_endpt.z - param->def_basept.z;
+  param_direction (param, &dir);
   for (BITCODE_BL i = 0; !error && i < num_objects; i++)
     {
       error = check_moved (&ab, objects[i], index, &dir, &nodes[i]);

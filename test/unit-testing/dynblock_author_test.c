@@ -2142,6 +2142,41 @@ test_preflight (void)
            "preflight: a node that is a LINE (0x%x)", error);
     graph->nodes[1].evalexpr = grip;
   }
+  // node ids at the end of a signed 32-bit integer: none left for the
+  // four nodes of a parameter, then none for an action
+  {
+    const BITCODE_BLd first = graph->first_nodeid;
+    const BITCODE_3BD b = { 0, -50, 0 }, e = { 5, -50, 0 };
+    graph->first_nodeid = 0x7FFFFFFF - 3;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_linear (block_header (dwg, blk), "Late", &b, &e,
+                                     &error)
+               && error == REFUSED (DWG_ERR_VALUEOUTOFBOUNDS)
+               && dwg->num_objects == num_objects,
+           "preflight: three node ids left for a parameter's four (0x%x)",
+           error);
+    graph->first_nodeid = 0x7FFFFFFF;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), param,
+                                   &h[CIRCLE], 1, 0.5, &error)
+               && error == REFUSED (DWG_ERR_VALUEOUTOFBOUNDS)
+               && dwg->num_objects == num_objects,
+           "preflight: no node id left for an action (0x%x)", error);
+    graph->first_nodeid = first;
+  }
+  // a copy of the parameter's struct, which isn't the graph's
+  {
+    Dwg_Object_BLOCKLINEARPARAMETER copy = *param;
+    error = 0;
+    loglevel = 0;
+    CHECK (!dwg_dynblock_add_move (block_header (dwg, blk), &copy,
+                                   &h[CIRCLE], 1, 0.5, &error)
+               && error == REFUSED (DWG_ERR_INVALIDHANDLE)
+               && dwg->num_objects == num_objects,
+           "preflight: a copy of the parameter's struct (0x%x)", error);
+  }
   // a length of 5e-10, which the evaluator takes as none
   {
     const BITCODE_3BD b = { 0, 0, 0 }, e = { 5e-10, 0, 0 };
@@ -2188,6 +2223,36 @@ test_preflight (void)
                "preflight: a stretch of an INSERT whose ATTRIB it would take "
                "out of its plane (0x%x)",
                error);
+        // turned a little, under a parameter 2e-9 long: the plane check
+        // doesn't depend on its length
+        {
+          const BITCODE_3BD tb = { 0, -60, 0 }, te = { 2e-9, -60, 0 };
+          Dwg_Object_BLOCKLINEARPARAMETER *tiny;
+          attrib->extrusion.x = 0.1;
+          attrib->extrusion.z = sqrt (0.99);
+          loglevel = 0;
+          tiny = dwg_dynblock_add_linear (block_header (dwg, blk), "Tiny2",
+                                          &tb, &te, &error);
+          num_objects = dwg->num_objects;
+          error = 0;
+          CHECK (tiny
+                     && !dwg_dynblock_add_stretch (block_header (dwg, blk),
+                                                   tiny, &frame1, &frame2,
+                                                   &pin_ins, 1, &error)
+                     && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                     && dwg->num_objects == num_objects,
+                 "preflight: a stretch along a parameter 2e-9 long of an "
+                 "INSERT whose ATTRIB leaves its plane (0x%x)",
+                 error);
+          error = 0;
+          loglevel = 0;
+          CHECK (tiny
+                     && !dwg_dynblock_add_move (block_header (dwg, blk), tiny,
+                                                &pin_ins, 1, 1.0, &error)
+                     && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                     && dwg->num_objects == num_objects,
+                 "preflight: a move of it, too (0x%x)", error);
+        }
         attrib->extrusion.x = 0.0;
         attrib->extrusion.z = 1.0;
         error = 0;

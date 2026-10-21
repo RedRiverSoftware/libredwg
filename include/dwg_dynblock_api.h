@@ -746,7 +746,8 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
    name, or one that a property of blk has already, as
    dwg_dynblock_get_params () names them, ASCII letters compared without
    case; points that aren't finite, no more than 1e-9 apart, which the
-   evaluator takes as no length, or at different heights
+   evaluator takes as no length, or at different heights, or a graph with
+   no node ids left for four nodes, its ids being signed 32-bit integers
    (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes
    or edges it doesn't have (no further bit). Each refusal is
    DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR. In a
@@ -788,19 +789,20 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR);
    blk not a BLOCK_HEADER of its document, param not a linear parameter of
-   blk's evaluation graph, or a handle that isn't one of blk's entities
-   (DWG_ERR_INVALIDHANDLE); a drawing other than r2004, a constraint-based
-   definition, an entity of another type, an LWPOLYLINE whose extrusion
-   isn't along Z, an entity with no stretch point in the frame, one whose
-   2D points the stretch would take out of their plane, as it would those
-   of an ATTRIB an INSERT owns whose extrusion isn't along Z, or a
-   param with its base point in its middle, or driving an action other
+   blk's evaluation graph (nor a copy of its struct), or a handle that isn't
+   one of blk's entities (DWG_ERR_INVALIDHANDLE); a drawing other than r2004,
+   a constraint-based definition, an entity of another type, an LWPOLYLINE
+   whose extrusion isn't along Z, an entity with no stretch point in the
+   frame, one whose 2D points a change along param would take out of their
+   plane by more than 1e-12 of the change, as it would those of an ATTRIB an
+   INSERT owns whose plane param's direction leaves, whatever param's length,
+   or a param with its base point in its middle, or driving an action other
    than a stretch or a move, which dwg_dynblock_evaluate () refuses to
    evaluate (DWG_ERR_NOTYETSUPPORTED); no entities, an entity given twice,
-   or corners that aren't finite or don't span a rectangle, sharing an x
-   or a y (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal is DWG_ERR_INVALIDDWG with
-   the bit given, logged at LOG_ERROR; errorp and the return value are as
-   for dwg_dynblock_add_linear (). */
+   corners that aren't finite or don't span a rectangle, sharing an x or a y,
+   or a graph with no node id left (DWG_ERR_VALUEOUTOFBOUNDS). Each refusal
+   is DWG_ERR_INVALIDDWG with the bit given, logged at LOG_ERROR; errorp and
+   the return value are as for dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKSTRETCHACTION *
 dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
                           const Dwg_Object_BLOCKLINEARPARAMETER *param,
@@ -830,12 +832,14 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
    Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for
    blk, param and the entities, with a handle that is neither one of blk's
    entities nor a parameter of its graph; an entity of another type, or
-   one whose 2D points the move would take out of their plane, a
+   one whose 2D points the move would take out of their plane, by the
+   same measure as for dwg_dynblock_add_stretch (), a
    parameter of another kind, one that chains actions, or a linear
    parameter whose own actions move param, directly or through other
    parameters' actions, which the evaluator can't order
    (DWG_ERR_NOTYETSUPPORTED); a multiplier that isn't finite, no objects,
-   or an object given twice (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
+   an object given twice, or a graph with no node id left
+   (DWG_ERR_VALUEOUTOFBOUNDS). errorp and the
    return value are as for dwg_dynblock_add_linear (). */
 EXPORT Dwg_Object_BLOCKMOVEACTION *
 dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
