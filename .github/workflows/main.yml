@@ -22,7 +22,9 @@ concurrency:
 
 jobs:
   linux:
-    runs-on: ubuntu-latest
+    # A fixed image, not ubuntu-latest, which GitHub moves to each new
+    # Ubuntu release over several weeks.
+    runs-on: ubuntu-26.04
     timeout-minutes: 50
     strategy:
       fail-fast: true
@@ -137,8 +139,8 @@ jobs:
           dist.sha256
           libredwg-*.tar.*
   ppc64-big-endian:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
@@ -161,7 +163,8 @@ jobs:
         make -C test/unit-testing check-minimal
         XFAIL_TESTS="bits_test dynapi_test dxf_test add_test dynblocks_test dynblock_eval_test dynblock_insert_test fields_test copy_test color_test indxf_test eed_test"
   mips32-big-endian:
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 has no MIPS cross compilers.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -178,7 +181,7 @@ jobs:
     - run: CC="ccache mips-linux-gnu-gcc" CFLAGS=-Os ./configure --host=mips-linux-gnu --disable-bindings --disable-python
     - run: make -j
   linux-cmake:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     #strategy:
     #  fail-fast: true
