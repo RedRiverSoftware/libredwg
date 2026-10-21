@@ -268,6 +268,12 @@ definition_graph (const Dwg_Data *dwg, const Dwg_Object *def)
                                                                  : NULL;
 }
 
+Dwg_Object *
+dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return definition_graph (dwg, obj);
+}
+
 static int
 check_version (const Dwg_Data *dwg, char *reason, const size_t reason_size)
 {
@@ -486,6 +492,58 @@ class_name (const Dwg_Data *dwg, const Dwg_Object *obj)
   return obj->dxfname ? obj->dxfname : dwg_type_name (obj->fixedtype);
 }
 
+static int
+is_proxy_node (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
+         || strEQc (class_name (dwg, obj), "ACDB_DYNAMICBLOCKPROXYNODE");
+}
+
+int
+dynblock_is_parametric_node (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKALIGNEDCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
+    case DWG_TYPE_BLOCKUSERPARAMETER:
+      return 1;
+    default:
+      return is_proxy_node (dwg, obj);
+    }
+}
+
+/* Whether block def keeps its constraints in an ACAD_ASSOCNETWORK. */
+static int
+has_assoc_network (const Dwg_Data *dwg, const Dwg_Object *def)
+{
+  return xdic_item (dwg, def, "ACAD_ASSOCNETWORK") != NULL;
+}
+
+int
+dynblock_is_parametric (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  const Dwg_Object *graph = definition_graph (dwg, obj);
+  const Dwg_Object_EVALUATION_GRAPH *_graph;
+  if (has_assoc_network (dwg, obj))
+    return 1;
+  if (!graph)
+    return 0;
+  _graph = graph->tio.object->tio.EVALUATION_GRAPH;
+  for (BITCODE_BL i = 0; _graph->nodes && i < _graph->num_nodes; i++)
+    {
+      const Dwg_Object *node = ref_object (dwg, _graph->nodes[i].evalexpr);
+      if (node && dynblock_is_parametric_node (dwg, node))
+        return 1;
+    }
+  return 0;
+}
+
 /* The properties of the parameters in graph, in node order, into list.
    *parametricp is set when the graph is constraint-based, and
    list->unknown_class names a node of a class LibreDWG can't decode. A
@@ -509,12 +567,10 @@ collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
         }
       if (!obj)
         continue;
-      if (obj->fixedtype == DWG_TYPE_DYNAMICBLOCKPROXYNODE
-          || strEQc (class_name (dwg, obj), "ACDB_DYNAMICBLOCKPROXYNODE"))
-        {
-          *parametricp = 1;
-          continue;
-        }
+      if (dynblock_is_parametric_node (dwg, obj))
+        *parametricp = 1;
+      if (is_proxy_node (dwg, obj))
+        continue;
       if (obj->fixedtype == DWG_TYPE_UNKNOWN_OBJ && !list->unknown_class)
         list->unknown_class = class_name (dwg, obj);
       switch (obj->fixedtype)
@@ -619,31 +675,26 @@ collect_params (const Dwg_Data *dwg, const Dwg_Object *graph,
         case DWG_TYPE_BLOCKHORIZONTALCONSTRAINTPARAMETER:
         case DWG_TYPE_BLOCKVERTICALCONSTRAINTPARAMETER:
           // these four share BLOCKLINEARCONSTRAINTPARAMETER_fields
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKLINEARCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKANGULARCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKANGULARCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKDIAMETRICCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKDIAMETRICCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKRADIALCONSTRAINTPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_CONSTRAINT,
                      obj->tio.object->tio.BLOCKRADIALCONSTRAINTPARAMETER
                          ->expr_name);
           break;
         case DWG_TYPE_BLOCKUSERPARAMETER:
-          *parametricp = 1;
           add_param (list, dwg, obj, DWG_DYNPARAM_USER,
                      obj->tio.object->tio.BLOCKUSERPARAMETER->name);
           break;
@@ -677,7 +728,7 @@ definition_params (const Dwg_Data *dwg, const BITCODE_RLL def_handle,
     }
   collect_params (dwg, graph, list, parametricp);
   // a parametric block's constraints are in its ACAD_ASSOCNETWORK
-  if (xdic_item (dwg, def, "ACAD_ASSOCNETWORK"))
+  if (has_assoc_network (dwg, def))
     *parametricp = 1;
   if (list->error)
     {
@@ -1491,6 +1542,12 @@ is_graph_element (const Dwg_Object *obj)
     }
 }
 
+int
+dynblock_is_graph_element (const Dwg_Object *obj)
+{
+  return is_graph_element (obj);
+}
+
 /* The starts of a two-point parameter's struct (linear, alignment, flip,
    rotation, XY, polar) and of a one-point one's (visibility, base point,
    point). */
@@ -1932,6 +1989,81 @@ stretch_points (const Dwg_Object *obj)
     }
 }
 
+BITCODE_BL
+dynblock_stretch_points (const Dwg_Object *obj)
+{
+  return stretch_points (obj);
+}
+
+/* Whether extrusion ext is along +Z. An extrusion of 0, as the decoder
+   leaves an LWPOLYLINE that stores none, is +Z, as for entity_delta (). */
+static int
+is_along_z (const BITCODE_BE *ext)
+{
+  return ext->x == 0.0 && ext->y == 0.0 && ext->z >= 0.0;
+}
+
+/* Keep in step with stretch_points (): the points it counts, in its
+   order. */
+int
+dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
+                        BITCODE_3BD *pt)
+{
+  if (i >= stretch_points (obj))
+    return 0;
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      *pt = i ? obj->tio.entity->tio.LINE->end
+              : obj->tio.entity->tio.LINE->start;
+      return 1;
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *_obj = obj->tio.entity->tio.LWPOLYLINE;
+        if (!is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->points[i].x;
+        pt->y = _obj->points[i].y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    case DWG_TYPE_CIRCLE:
+      if (!is_along_z (&obj->tio.entity->tio.CIRCLE->extrusion))
+        return 0;
+      *pt = obj->tio.entity->tio.CIRCLE->center;
+      return 1;
+    case DWG_TYPE_INSERT:
+      if (!is_along_z (&obj->tio.entity->tio.INSERT->extrusion))
+        return 0;
+      *pt = obj->tio.entity->tio.INSERT->ins_pt;
+      return 1;
+    case DWG_TYPE_TEXT:
+      {
+        const Dwg_Entity_TEXT *_obj = obj->tio.entity->tio.TEXT;
+        if (_obj->horiz_alignment || _obj->vert_alignment
+            || !is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->ins_pt.x;
+        pt->y = _obj->ins_pt.y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    case DWG_TYPE_ATTDEF:
+      {
+        const Dwg_Entity_ATTDEF *_obj = obj->tio.entity->tio.ATTDEF;
+        if (_obj->horiz_alignment || _obj->vert_alignment
+            || !is_along_z (&_obj->extrusion))
+          return 0;
+        pt->x = _obj->ins_pt.x;
+        pt->y = _obj->ins_pt.y;
+        pt->z = _obj->elevation;
+        return 1;
+      }
+    default:
+      return 0;
+    }
+}
+
 /* Whether the evaluator moves an entity of obj's type whole. */
 static int
 is_movable (const Dwg_Object *obj)
@@ -2000,6 +2132,14 @@ entity_delta (const Dwg_Object *obj, const BITCODE_3BD *delta,
   const BITCODE_BE *ext = entity_ocs (obj, &planar);
   if (!ext || (ext->x == 0.0 && ext->y == 0.0 && ext->z >= 0.0))
     *out = *delta;
+  else if (ext->x == 0.0 && ext->y == 0.0)
+    {
+      // along -Z, the OCS turns x and z over; transform_OCS () turns over
+      // only x
+      out->x = -delta->x;
+      out->y = delta->y;
+      out->z = -delta->z;
+    }
   else
     transform_OCS (out, *delta, *ext);
 }
@@ -2022,6 +2162,34 @@ check_planar (Dynblock_Plan *plan, const Dwg_Object *obj,
               "moving %s " FORMAT_HV " out of its plane is not supported",
               dwg_type_name (obj->fixedtype), obj->handle.value);
   return DYNBLOCK_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+}
+
+/* As check_planar () refuses, for obj and the ATTRIBs an INSERT owns, as
+   plan_whole () checks them. */
+int
+dynblock_leaves_plane (const Dwg_Data *dwg, const Dwg_Object *obj,
+                       const BITCODE_3BD *wcs_delta)
+{
+  int planar;
+  BITCODE_3BD d;
+  if (entity_ocs (obj, &planar) && planar)
+    {
+      entity_delta (obj, wcs_delta, &d);
+      if (fabs (d.z) > DYNBLOCK_VALUE_EPSILON)
+        return 1;
+    }
+  if (obj->fixedtype == DWG_TYPE_INSERT)
+    {
+      const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+      for (BITCODE_BL i = 0; _obj->attribs && i < _obj->num_owned; i++)
+        {
+          const Dwg_Object *attrib = ref_object (dwg, _obj->attribs[i]);
+          if (attrib && attrib->fixedtype == DWG_TYPE_ATTRIB
+              && dynblock_leaves_plane (dwg, attrib, wcs_delta))
+            return 1;
+        }
+    }
+  return 0;
 }
 
 /* Grows the box lo, hi to hold the point x, y. */
@@ -3705,6 +3873,25 @@ move_whole (Dwg_Data *dwg, Dwg_Object *obj, const BITCODE_3BD *wcs_delta)
     default:
       break;
     }
+}
+
+int
+dynblock_is_movable (const Dwg_Object *obj)
+{
+  return is_movable (obj);
+}
+
+double
+dynblock_entity_reach (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return entity_reach (dwg, obj);
+}
+
+void
+dynblock_move_entity (Dwg_Data *dwg, Dwg_Object *obj,
+                      const BITCODE_3BD *wcs_delta)
+{
+  move_whole (dwg, obj, wcs_delta);
 }
 
 /* Moves stretch point point of copy obj, a LINE or LWPOLYLINE, by

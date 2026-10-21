@@ -5770,7 +5770,7 @@ test_copy_all_blocks (void)
       Dwg_Object_BLOCK_HEADER *copy;
       Block_Copies found;
       int error;
-      if (!is_copyable_block (&src, blk))
+      if (!is_copyable_block (&src, blk, 0))
         {
           layouts++;
           continue;
@@ -6308,7 +6308,7 @@ test_copy_block_refused (void)
   ps = dwg_paper_space_object (&src);
   blocks = table_blocks (&src2000, 0, &num_blocks);
   for (BITCODE_BL i = 0; i < num_blocks && !blk2000; i++)
-    if (is_copyable_block (&src2000, blocks[i]))
+    if (is_copyable_block (&src2000, blocks[i], 0))
       blk2000 = blocks[i];
   free (blocks);
   if (!window || !door_elevation || !ms || !ps || !blk2000)
@@ -7109,6 +7109,117 @@ done:
   return numfailed ();
 }
 
+/* dynblock_copy_entities (), which dwg_dynblock_copy_entities () copies
+   entities with: the Door's entities into a block of a new document, with
+   each of its allocations failing in turn, returns DWG_ERR_OUTOFMEM, also
+   when the first lists of matches can't grow, which the copy checks
+   before it looks for what to copy. A failure in the object copy itself
+   may leave copies no block lists, as documented; one before it adds
+   nothing. Then it copies them all. */
+static int
+test_copy_entities_out_of_memory (void)
+{
+  const char *what = "entity copy out of memory";
+  char path[256];
+  Dwg_Data src;
+  const Dwg_Object *door;
+  const Dwg_Object_BLOCK_HEADER *blk;
+  BITCODE_RLL *tops = NULL;
+  long n;
+  unsigned failures = 0, wrong = 0, none_added = 0;
+
+  failed = 0;
+  if (!test_file (DYNBLOCKS, path, sizeof (path))
+      || read_dwg (path, &src) >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: %s read failed", what, DYNBLOCKS);
+      return 1;
+    }
+  door = dynamic_block (&src, "Door - Imperial");
+  blk = door ? door->tio.object->tio.BLOCK_HEADER : NULL;
+  tops = blk && blk->num_owned
+             ? (BITCODE_RLL *)calloc (blk->num_owned, sizeof (BITCODE_RLL))
+             : NULL;
+  if (!tops)
+    {
+      FAIL ("%s: the Door not found", what);
+      free_dwg (&src);
+      return 1;
+    }
+  for (BITCODE_BL i = 0; i < blk->num_owned; i++)
+    tops[i] = ref_target (blk->entities[i]);
+  for (n = 1;; n++)
+    {
+      Dwg_Data *dst = dwg_new_Document (R_2004, 0, tracelevel);
+      Dwg_Object_BLOCK_HEADER *target
+          = dst ? dwg_add_BLOCK_HEADER (dst, "TARGET") : NULL;
+      Dwg_Copy_Map *map = dwg_copy_map_new ();
+      BITCODE_BL num_objects, copied = 0;
+      int error;
+      loglevel = test_loglevel;
+      if (!target || !map)
+        {
+          FAIL ("%s: dst not made", what);
+          if (dst)
+            {
+              free_dwg (dst);
+              free (dst);
+            }
+          dwg_copy_map_free (map);
+          break;
+        }
+      num_objects = dst->num_objects;
+      alloc_calls = 0;
+      alloc_failed = 0;
+      alloc_countdown = n;
+      alloc_counting = 1;
+      loglevel = 0; // the copy logs its failure
+      error = dynblock_copy_entities (
+          dst, &src, door->handle.value,
+          dst->object[target->parent->objid].handle.value, tops,
+          blk->num_owned, map);
+      loglevel = test_loglevel;
+      alloc_counting = 0;
+      alloc_countdown = 0;
+      for (BITCODE_BL i = 0; i < blk->num_owned; i++)
+        if (dwg_copy_map_get (map, tops[i]))
+          copied++;
+      if (alloc_failed)
+        {
+          failures++;
+          if (dst->num_objects == num_objects)
+            none_added++;
+          if (!(error & DWG_ERR_OUTOFMEM))
+            {
+              if (!wrong++)
+                printf ("  # allocation %ld failed: error 0x%x\n", n,
+                        (unsigned)error);
+            }
+        }
+      // the first allocations come before the object copy
+      else if (failures > 4 && !wrong && none_added > 4
+               && error < DWG_ERR_CRITICAL && copied == blk->num_owned)
+        OK ("%s: each of the %u allocations failed in turn, "
+            "DWG_ERR_OUTOFMEM, %u of them before anything was added; then "
+            "the %u entities copied",
+            what, failures, none_added, (unsigned)blk->num_owned);
+      else
+        FAIL ("%s: %u allocations failed, %u without DWG_ERR_OUTOFMEM, %u "
+              "before anything was added; then error 0x%x, %u of %u "
+              "copied",
+              what, failures, wrong, none_added, (unsigned)error,
+              (unsigned)copied, (unsigned)blk->num_owned);
+      dwg_copy_map_free (map);
+      free_dwg (dst);
+      free (dst);
+      if (!alloc_failed)
+        break;
+    }
+  free (tops);
+  free_dwg (&src);
+  return numfailed ();
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -7189,6 +7300,7 @@ main (int argc, char *argv[])
   error += test_copy_block_matching_utf8 ();
   error += test_copy_block_true_name_codepage ();
   error += test_copy_block_out_of_memory ();
+  error += test_copy_entities_out_of_memory ();
   error += test_copy_block_text_alignment (0);
   error += test_copy_block_text_alignment (1);
   return error ? 1 : 0;
