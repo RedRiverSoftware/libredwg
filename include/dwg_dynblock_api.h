@@ -21,7 +21,7 @@
  * chosen values, as AutoCAD stores a placement; give a block a linear
  * property with stretch and move actions, as AutoCAD's Block Editor
  * stores them; and move a block's contents so that its base point is the
- * origin, where AutoCAD expects a dynamic block's.
+ * origin, as a drawing that AutoCAD inserts as a dynamic block needs.
  *
  * A dynamic block definition is a block whose extension dictionary holds
  * an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK. Its parameters are the
@@ -893,13 +893,18 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
 /* Moves the contents of block blk so that its base point is the origin:
    its entities, and the points of the parameters, grips and actions of
    its evaluation graph, move by minus its base point, which becomes
-   (0, 0, 0). An INSERT of blk then draws it where it did. AutoCAD draws a
-   dynamic block's grips as if its base point were the origin, which its
-   Block Editor keeps it at: those of a definition whose base point is
-   elsewhere are drawn off its geometry by that point. blk may be a block
-   definition, dynamic or not, or model space, whose base point is the
-   drawing's INSBASE, from which AutoCAD inserts the drawing as a block. A
-   block whose base point is the origin is left as it is.
+   (0, 0, 0). An INSERT of blk then draws it where it did. blk may be
+   model space, whose base point is the drawing's INSBASE, or a block
+   definition, dynamic or not. A block whose base point is the origin is
+   left as it is.
+
+   A drawing whose model space holds a dynamic block, as AutoCAD's WBLOCK
+   writes one, needs its INSBASE at the origin: AutoCAD inserts the
+   drawing as a block by moving its entities by minus its INSBASE, and
+   leaves the parameters, grips and actions where they are, so that their
+   grips are drawn off the geometry by INSBASE. A block definition's base
+   point AutoCAD takes into account for the grips too; the dynamic block
+   definitions it makes have it at the origin.
 
    Entities move whole, as dwg_dynblock_evaluate () moves them, with the
    ATTRIBs an INSERT owns. The points that move are a linear parameter's
