@@ -108,12 +108,22 @@ submodule, and rewritten SHAs break that pin.
     cableflow's `.gitattributes` LFS patterns and its
     `LibraryVersionCorrect` test need updating.
 - After merging, copy the merged upstream tag into the fork
-  (`git push origin refs/tags/<tag>`). The build takes its version from
-  the nearest tag, and CI only fetches the last 50 commits. Without that
-  tag the version is empty, and upstream's `add_test` fails in the
-  `--enable-release` CI job. The tag push also triggers upstream's
-  workflow, which publishes a GitHub Release for it; cancel that run, or
-  delete the Release (keep the tag).
+  (`git push origin refs/tags/<tag>`) before the sync branch's CI runs.
+  The build takes its version from the nearest tag of any name
+  (`build-aux/git-version-gen`). A nearest tag that does not start with
+  a digit gives an empty version, and `add_test` fails in the
+  `--enable-release` CI job. The `linux` CI job checks out the full
+  history for branches and pull requests (a tag push checks out the tag
+  itself), so without the new tag the version is the previous tag's with
+  a long commit count (`<previous tag>.<commits>_<hash>`). If the merge
+  changed `LIBREDWG_VERSION_MAJOR` or `LIBREDWG_VERSION_MINOR` in
+  `include/dwg.h`, `add_test`'s `test_api_version` then fails in the
+  `linux` jobs that run it (all but `--disable-write`, which does not
+  build it, and `--enable-debug`, which runs no tests); otherwise CI
+  passes with the wrong version. Check the `checking PACKAGE_VERSION`
+  line in the `linux (--enable-release)` job log. The tag push also
+  triggers upstream's workflow, which publishes a GitHub Release for it;
+  cancel that run, or delete the Release (keep the tag).
 - Last sync: tag `0.14.8601` (id:366853). Plan and runbook:
   `docs/runbooks/libredwg-upstream-sync/` in cableflow.
 
