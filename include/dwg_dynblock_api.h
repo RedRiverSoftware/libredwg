@@ -18,9 +18,10 @@
  * and evaluate a definition at chosen values into the geometry of a
  * representation block, with a check of that evaluation against the
  * representation blocks AutoCAD stored in a drawing; place a definition at
- * chosen values, as AutoCAD stores a placement; and give a block a linear
+ * chosen values, as AutoCAD stores a placement; give a block a linear
  * property with stretch and move actions, as AutoCAD's Block Editor
- * stores them.
+ * stores them; and move a block's contents so that its base point is the
+ * origin, where AutoCAD expects a dynamic block's.
  *
  * A dynamic block definition is a block whose extension dictionary holds
  * an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK. Its parameters are the
@@ -888,6 +889,52 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
                        const BITCODE_RLL *objects,
                        const BITCODE_BL num_objects, const double multiplier,
                        int *errorp);
+
+/* Moves the contents of block blk so that its base point is the origin:
+   its entities, and the points of the parameters, grips and actions of
+   its evaluation graph, move by minus its base point, which becomes
+   (0, 0, 0). An INSERT of blk then draws it where it did. AutoCAD draws a
+   dynamic block's grips as if its base point were the origin, which its
+   Block Editor keeps it at: those of a definition whose base point is
+   elsewhere are drawn off its geometry by that point. blk may be a block
+   definition, dynamic or not, or model space, whose base point is the
+   drawing's INSBASE, from which AutoCAD inserts the drawing as a block. A
+   block whose base point is the origin is left as it is.
+
+   Entities move whole, as dwg_dynblock_evaluate () moves them, with the
+   ATTRIBs an INSERT owns. The points that move are a linear parameter's
+   base and end points, a visibility parameter's point, the location of
+   their grips, an action's display location, and a stretch action's
+   frame. A linear grip's orientation, a vector, and an action's offsets
+   stay as they are, as do the drawing's views, its limits and its record
+   of its extents.
+
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
+   not a BLOCK_HEADER of its document, an entry of its entity list that doesn't
+   resolve to an entity or names one listed before, or a node of its
+   evaluation graph that doesn't resolve or isn't a parameter, action, grip or
+   grip location component (DWG_ERR_INVALIDHANDLE); a drawing other than
+   r2004, a constraint-based (parametric) block as for dwg_dynblock_add_linear
+   (), a block with placements (an INSERT or MINSERT of it, or a
+   representation block of it, which a placement at values other than the
+   defaults draws), whose stored data hold its points as they are, an entity
+   of a type the move doesn't handle, which are those dwg_dynblock_copy_entities
+   () moves, or one whose 2D points the move would take out of their plane,
+   or a node of another class, among them base point parameters and rotate and
+   scale actions, whose stored points AutoCAD's files have only shown at the
+   origin (DWG_ERR_NOTYETSUPPORTED); a node of a class LibreDWG can't decode
+   (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block, an xref or a
+   block that depends on one (DWG_ERR_INVALIDTYPE); a base point that isn't
+   finite, or a move that would take a coordinate beyond what a double holds
+   (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes or
+   edges it doesn't have (no further bit). Each refusal is DWG_ERR_INVALIDDWG
+   with the bit given, logged at LOG_ERROR but for a NULL argument. In a
+   LibreDWG built without write support, all are refused
+   (DWG_ERR_NOTYETSUPPORTED).
+
+   @return 0, or the DWG_ERR_* bits of a refusal, or DWG_ERR_OUTOFMEM, with
+           nothing changed. */
+EXPORT int dwg_dynblock_move_to_origin (Dwg_Object_BLOCK_HEADER *blk);
 
 /* The name of a kind, such as "linear", or "unknown". */
 EXPORT const char *dwg_dynparam_kind_name (const Dwg_DynParam_Kind kind);

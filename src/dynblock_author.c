@@ -12,10 +12,10 @@
 
 /*
  * dynblock_author.c: making dynamic blocks. Copying the entities of a
- * block, or of model space, into a block of another document, and giving a
+ * block, or of model space, into a block of another document, giving a
  * block a linear property with the stretch and move actions it drives, as
- * AutoCAD's Block Editor stores them in r2004 files. See
- * dwg_dynblock_api.h.
+ * AutoCAD's Block Editor stores them in r2004 files, and moving a block's
+ * contents so that its base point is the origin. See dwg_dynblock_api.h.
  *
  * A property is a parameter node of the block's evaluation graph, with a
  * grip node and the grip's two location components, which give the grip's
@@ -2243,4 +2243,292 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
   free_block (&ab);
   return refused_move (errorp, AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED);
 #endif
+}
+
+/*--------------------------------------------------------------------------------
+ * The base point
+ */
+
+/* The points of an evaluation graph node that are positions in its block:
+   at most two, and a stretch action's frame. */
+typedef struct _author_node_points
+{
+  BITCODE_3BD *pts[2];
+  int num_pts;
+  BITCODE_2RD *frame;
+  BITCODE_BL num_frame;
+} Author_Node_Points;
+
+/* The points of graph node obj that are positions in its block, into *p.
+   A linear grip's orientation is a vector, and a move or stretch action's
+   offsets multiply its parameter's change: they stay as they are. Returns
+   0 for a node of another class, whose points are not moved: base point
+   parameters and rotate and scale actions, whose stored points AutoCAD's
+   files have only shown at the origin, and the other kinds, which no test
+   drawing covers. */
+static int
+node_points (Dwg_Object *obj, Author_Node_Points *p)
+{
+  memset (p, 0, sizeof (*p));
+  switch (obj->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARPARAMETER:
+      {
+        Dwg_Object_BLOCKLINEARPARAMETER *_obj
+            = obj->tio.object->tio.BLOCKLINEARPARAMETER;
+        p->pts[p->num_pts++] = &_obj->def_basept;
+        p->pts[p->num_pts++] = &_obj->def_endpt;
+      }
+      return 1;
+    case DWG_TYPE_BLOCKVISIBILITYPARAMETER:
+      p->pts[p->num_pts++]
+          = &obj->tio.object->tio.BLOCKVISIBILITYPARAMETER->def_pt;
+      return 1;
+    case DWG_TYPE_BLOCKLINEARGRIP:
+      p->pts[p->num_pts++]
+          = &obj->tio.object->tio.BLOCKLINEARGRIP->bg_location;
+      return 1;
+    case DWG_TYPE_BLOCKVISIBILITYGRIP:
+      p->pts[p->num_pts++]
+          = &obj->tio.object->tio.BLOCKVISIBILITYGRIP->bg_location;
+      return 1;
+    case DWG_TYPE_BLOCKMOVEACTION:
+      p->pts[p->num_pts++]
+          = &obj->tio.object->tio.BLOCKMOVEACTION->display_location;
+      return 1;
+    case DWG_TYPE_BLOCKSTRETCHACTION:
+      {
+        Dwg_Object_BLOCKSTRETCHACTION *_obj
+            = obj->tio.object->tio.BLOCKSTRETCHACTION;
+        p->pts[p->num_pts++] = &_obj->display_location;
+        p->frame = _obj->pts;
+        p->num_frame = _obj->pts ? _obj->num_pts : 0;
+      }
+      return 1;
+    case DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT:
+      // it names a value of its parameter, whose points hold the grip's
+      return 1;
+    default:
+      return 0;
+    }
+}
+
+/* The definition named by the AcDbBlockRepBTag EED of block obj, which
+   makes obj a representation block that placements of the definition
+   draw, or 0. */
+static BITCODE_RLL
+btag_definition (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  const Dwg_Object_Object *o = obj->tio.object;
+  const int start = find_group (dwg, o->eed, o->num_eed, "AcDbBlockRepBTag");
+  BITCODE_RLL handle = 0;
+  if (start < 0)
+    return 0;
+  for (BITCODE_BL i = (BITCODE_BL)start; i < o->num_eed; i++)
+    {
+      if (i > (BITCODE_BL)start && o->eed[i].size)
+        break;
+      if (o->eed[i].data && o->eed[i].data->code == 5)
+        {
+          // Dwg_Eed_Data is packed
+          memcpy (&handle, &o->eed[i].data->u.eed_5.entity, sizeof (handle));
+          break;
+        }
+    }
+  return handle;
+}
+
+/* Whether a placement of block blk_handle is in dwg: an INSERT or MINSERT
+   of it, or a representation block of it, which its placements at values
+   other than the defaults draw. */
+static int
+has_placements (const Dwg_Data *dwg, const BITCODE_RLL blk_handle)
+{
+  for (BITCODE_BL i = 0; i < dwg->num_objects; i++)
+    {
+      const Dwg_Object *obj = &dwg->object[i];
+      BITCODE_RLL drawn = 0;
+      if (obj->fixedtype == DWG_TYPE_INSERT && obj->tio.entity
+          && obj->tio.entity->tio.INSERT)
+        drawn = ref_handle (obj->tio.entity->tio.INSERT->block_header);
+      else if (obj->fixedtype == DWG_TYPE_MINSERT && obj->tio.entity
+               && obj->tio.entity->tio.MINSERT)
+        drawn = ref_handle (obj->tio.entity->tio.MINSERT->block_header);
+      else if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER && obj->tio.object)
+        drawn = btag_definition (dwg, obj);
+      if (drawn == blk_handle)
+        return 1;
+    }
+  return 0;
+}
+
+/* Checks that the contents of ab's block move by delta: each entity once,
+   of a type the evaluator moves whole, staying in its plane, and each node
+   of its graph of a class whose points move, all within what a double
+   holds. */
+static int
+check_contents (const Author_Block *ab, const BITCODE_3BD *delta,
+                const char *func)
+{
+  const Dwg_Object_BLOCK_HEADER *blk
+      = handle_object (ab->dwg, ab->blk)->tio.object->tio.BLOCK_HEADER;
+  const double size = fabs (delta->x) + fabs (delta->y) + fabs (delta->z);
+  dwg_inthash *seen = hash_new (blk->num_owned * 2 + 8);
+  int error = 0;
+  if (!seen)
+    return DWG_ERR_OUTOFMEM;
+  for (BITCODE_BL i = 0; blk->entities && i < blk->num_owned && !error; i++)
+    {
+      const BITCODE_RLL handle = ref_handle (blk->entities[i]);
+      const Dwg_Object *obj = handle_object (ab->dwg, handle);
+      if (!obj || obj->supertype != DWG_SUPERTYPE_ENTITY || !obj->tio.entity)
+        {
+          LOG_ERROR ("%s: entity " FORMAT_HV " of blk doesn't resolve to an "
+                     "entity",
+                     func, handle);
+          error = AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
+        }
+      else if (hash_get (seen, handle) != HASH_NOT_FOUND)
+        {
+          LOG_ERROR ("%s: entity " FORMAT_HV " is listed twice in blk", func,
+                     handle);
+          error = AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
+        }
+      else if (!dynblock_is_movable (obj))
+        {
+          LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
+                     dwg_type_name (obj->fixedtype), handle);
+          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      else if (dynblock_leaves_plane (ab->dwg, obj, delta))
+        {
+          LOG_ERROR ("%s: moving %s " FORMAT_HV " out of its plane is not "
+                     "supported",
+                     func, dwg_type_name (obj->fixedtype), handle);
+          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+        }
+      else if (!isfinite (dynblock_entity_reach (ab->dwg, obj) + size))
+        {
+          LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond what "
+                     "a double holds",
+                     func, dwg_type_name (obj->fixedtype), handle);
+          error = AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+        }
+      else
+        hash_set (seen, handle, 1);
+    }
+  hash_free (seen);
+  if (error || !ab->graph)
+    return error;
+  {
+    const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (ab->dwg, ab->graph);
+    for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
+      {
+        // check_graph () has checked that each node resolves
+        Dwg_Object *obj = node_object (ab->dwg, graph, i);
+        Author_Node_Points p;
+        int finite = 1;
+        if (!node_points (obj, &p))
+          {
+            LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
+                       dwg_type_name (obj->fixedtype), obj->handle.value);
+            return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+          }
+        for (int k = 0; k < p.num_pts; k++)
+          finite = finite && isfinite (p.pts[k]->x + delta->x)
+                   && isfinite (p.pts[k]->y + delta->y)
+                   && isfinite (p.pts[k]->z + delta->z);
+        for (BITCODE_BL k = 0; k < p.num_frame; k++)
+          finite = finite && isfinite (p.frame[k].x + delta->x)
+                   && isfinite (p.frame[k].y + delta->y);
+        if (!finite)
+          {
+            LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond "
+                       "what a double holds",
+                       func, dwg_type_name (obj->fixedtype),
+                       obj->handle.value);
+            return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+          }
+      }
+  }
+  return 0;
+}
+
+EXPORT int
+dwg_dynblock_move_to_origin (Dwg_Object_BLOCK_HEADER *blk)
+{
+  static const char func[] = "dwg_dynblock_move_to_origin";
+  Author_Block ab;
+  BITCODE_3BD *base;
+  BITCODE_3BD delta;
+  int error;
+  if (!blk)
+    return AUTHOR_REFUSED | DWG_ERR_INTERNALERROR;
+  error = author_block (blk, func, &ab);
+  if (error)
+    {
+      free_block (&ab);
+      return error;
+    }
+  // the base point of model space is the drawing's INSBASE, as for
+  // dwg_dynblock_copy_entities ()
+  base = dynblock_is_model_space (ab.dwg, handle_object (ab.dwg, ab.blk))
+             ? &ab.dwg->header_vars.INSBASE
+             : &blk->base_pt;
+  if (!is_finite_3d (base))
+    {
+      LOG_ERROR ("%s: the base point isn't finite", func);
+      free_block (&ab);
+      return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+    }
+  if (base->x == 0.0 && base->y == 0.0 && base->z == 0.0)
+    {
+      free_block (&ab);
+      return 0;
+    }
+  delta.x = -base->x;
+  delta.y = -base->y;
+  delta.z = -base->z;
+  if (has_placements (ab.dwg, ab.blk))
+    {
+      LOG_ERROR ("%s: the block has placements, whose stored data hold its "
+                 "points as they are: not supported",
+                 func);
+      error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (!error)
+    error = check_contents (&ab, &delta, func);
+  if (!error)
+    {
+      for (BITCODE_BL i = 0; blk->entities && i < blk->num_owned; i++)
+        dynblock_move_entity (
+            ab.dwg, handle_object (ab.dwg, ref_handle (blk->entities[i])),
+            &delta);
+      if (ab.graph)
+        {
+          const Dwg_Object_EVALUATION_GRAPH *graph
+              = graph_of (ab.dwg, ab.graph);
+          for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
+            {
+              Author_Node_Points p;
+              node_points (node_object (ab.dwg, graph, i), &p);
+              for (int k = 0; k < p.num_pts; k++)
+                {
+                  p.pts[k]->x += delta.x;
+                  p.pts[k]->y += delta.y;
+                  p.pts[k]->z += delta.z;
+                }
+              for (BITCODE_BL k = 0; k < p.num_frame; k++)
+                {
+                  p.frame[k].x += delta.x;
+                  p.frame[k].y += delta.y;
+                }
+            }
+        }
+      base->x = 0.0;
+      base->y = 0.0;
+      base->z = 0.0;
+    }
+  free_block (&ab);
+  return error;
 }
