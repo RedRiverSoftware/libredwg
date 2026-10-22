@@ -76,6 +76,7 @@ static int test_loglevel;
 #define WRITTEN_COPY "dynblock_author_test_copy.dwg"
 #define WRITTEN_LWPOLYLINE "dynblock_author_test_lwpolyline.dwg"
 #define WRITTEN_LOCKED "dynblock_author_test_locked.dwg"
+#define WRITTEN_VISIBILITY "dynblock_author_test_visibility.dwg"
 
 /* The fixture's definitions */
 #define TREES 0xB45B
@@ -1587,6 +1588,30 @@ test_carried_parameter (void)
   return failures;
 }
 
+/* Of the fixture's Trees, block trees of dwg: a horizontal LINE reaching x
+   60, into *linep, and the CIRCLE, into *circlep. */
+static void
+trees_line_circle (const Dwg_Data *dwg, const Dwg_Object_BLOCK_HEADER *trees,
+                   BITCODE_RLL *linep, BITCODE_RLL *circlep)
+{
+  *linep = *circlep = 0;
+  for (BITCODE_BL i = 0; i < trees->num_owned; i++)
+    {
+      const Dwg_Object *e = nth_entity (dwg, trees, i);
+      if (e && e->fixedtype == DWG_TYPE_CIRCLE)
+        *circlep = e->handle.value;
+      else if (!*linep && e && e->fixedtype == DWG_TYPE_LINE
+               && fabs (e->tio.entity->tio.LINE->start.y
+                        - e->tio.entity->tio.LINE->end.y)
+                      < 1e-6
+               && fabs (fmax (e->tio.entity->tio.LINE->start.x,
+                              e->tio.entity->tio.LINE->end.x)
+                        - 60.0)
+                      < 1e-6)
+        *linep = e->handle.value;
+    }
+}
+
 /* The fixture's Trees, with AutoCAD's visibility parameter, copied into a
    new document: the Width joins its graph after AutoCAD's ids, and its
    move carries the visibility parameter with its grip. */
@@ -1625,22 +1650,7 @@ test_autocad_graph (Dwg_Data *src)
       vis = params[0].handle;
     dwg_dynblock_free_params (params, count);
   }
-  // a horizontal LINE reaching x 60, and the CIRCLE
-  for (BITCODE_BL i = 0; i < trees->num_owned; i++)
-    {
-      const Dwg_Object *e = nth_entity (dwg, trees, i);
-      if (e && e->fixedtype == DWG_TYPE_CIRCLE)
-        circle = e->handle.value;
-      else if (!line && e && e->fixedtype == DWG_TYPE_LINE
-               && fabs (e->tio.entity->tio.LINE->start.y
-                        - e->tio.entity->tio.LINE->end.y)
-                      < 1e-6
-               && fabs (fmax (e->tio.entity->tio.LINE->start.x,
-                              e->tio.entity->tio.LINE->end.x)
-                        - 60.0)
-                      < 1e-6)
-        line = e->handle.value;
-    }
+  trees_line_circle (dwg, trees, &line, &circle);
   CHECK (vis && line && circle && nodes == 4 && first_id == 4,
          "AutoCAD's graph: Trees, its visibility, a LINE and the CIRCLE, "
          "its 4 nodes with ids up to 4");
@@ -1697,6 +1707,224 @@ test_autocad_graph (Dwg_Data *src)
       }
     }
   free_document (dwg);
+  return failures;
+}
+
+/* The visibility parameter of block blk's graph, or NULL. */
+static Dwg_Object_BLOCKVISIBILITYPARAMETER *
+visibility_of (const Dwg_Data *dwg, const BITCODE_RLL blk)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  for (BITCODE_BL i = 0; graph && i < graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj = node_object (dwg, graph, i);
+      if (obj && obj->fixedtype == DWG_TYPE_BLOCKVISIBILITYPARAMETER)
+        return obj->tio.object->tio.BLOCKVISIBILITYPARAMETER;
+    }
+  return NULL;
+}
+
+/* The handle of the element of node i of block blk's graph, or 0. */
+static BITCODE_RLL
+node_handle (const Dwg_Data *dwg, const BITCODE_RLL blk, const BITCODE_BL i)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  const Dwg_Object *obj = graph && graph->nodes && i < graph->num_nodes
+                              ? node_object (dwg, graph, i)
+                              : NULL;
+  return obj ? obj->handle.value : 0;
+}
+
+/* How many times state lists handle. */
+static int
+times_listed (const Dwg_BLOCKVISIBILITYPARAMETER_state *state,
+              const BITCODE_RLL handle)
+{
+  int n = 0;
+  for (BITCODE_BL k = 0; state->params && k < state->num_params; k++)
+    if (ref (state->params[k]) == handle)
+      n++;
+  return n;
+}
+
+#define TREES_STATES 12
+
+/* Whether state lists the count handles of want, in that order, and no
+   more. */
+static int
+lists_are (const Dwg_BLOCKVISIBILITYPARAMETER_state *state,
+           const BITCODE_RLL *want, const BITCODE_BL count)
+{
+  if (state->num_params != count || (count && !state->params))
+    return 0;
+  for (BITCODE_BL k = 0; k < count; k++)
+    if (ref (state->params[k]) != want[k])
+      return 0;
+  return 1;
+}
+
+/* The fixture's Trees, whose visibility states each list its visibility
+   parameter and grip, copied into a new document. AutoCAD shows a linear
+   property of a block with a visibility parameter, and its grip, only in
+   the states that list them: a Width, its grip, its stretch and its move are
+   listed in every state, after what the state listed before; the move of
+   a second property, taken out of two states, only in the states that
+   still list that property; and the lists read back from a written
+   file. */
+static int
+test_visibility_states (Dwg_Data *src)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Data back;
+  Dwg_Object_BLOCK_HEADER *trees;
+  Dwg_Object_BLOCKVISIBILITYPARAMETER *vis;
+  Dwg_Object_BLOCKLINEARPARAMETER *width = NULL, *shift = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s = NULL;
+  Dwg_Object_BLOCKMOVEACTION *m = NULL, *shift_move = NULL;
+  BITCODE_RLL blk, vis_h, line, circle, before[TREES_STATES][2];
+  BITCODE_RLL grip = 0, shift_grip = 0;
+  BITCODE_BL nodes;
+  int error = 0, failures = 0, good;
+  trees = dwg ? dwg_dynblock_copy_block (dwg, src, block_header (src, TREES),
+                                         &error)
+              : NULL;
+  loglevel = test_loglevel;
+  vis = trees ? visibility_of (dwg, handle_of (dwg, trees)) : NULL;
+  if (!vis || vis->num_states != TREES_STATES || !vis->states)
+    {
+      FAIL ("visibility states: copying Trees failed, or it hasn't %d "
+            "states (0x%x)",
+            TREES_STATES, error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  blk = handle_of (dwg, trees);
+  vis_h = handle_of (dwg, vis);
+  nodes = graph_of (dwg, blk)->num_nodes;
+  trees_line_circle (dwg, trees, &line, &circle);
+  good = line && circle;
+  for (BITCODE_BL j = 0; good && j < TREES_STATES; j++)
+    {
+      const Dwg_BLOCKVISIBILITYPARAMETER_state *st = &vis->states[j];
+      good = st->num_params == 2 && st->params && ref (st->params[0]) == vis_h;
+      before[j][0] = good ? ref (st->params[0]) : 0;
+      before[j][1] = good ? ref (st->params[1]) : 0;
+    }
+  CHECK (good, "visibility states: Trees' states each list its visibility "
+             "parameter and grip, and it has the LINE and the CIRCLE");
+  if (!good)
+    {
+      free_document (dwg);
+      return failures;
+    }
+
+  {
+    const BITCODE_3BD b = { -60, 0, 0 }, e = { 60, 0, 0 };
+    const BITCODE_2RD f1 = { 50, -100 }, f2 = { 70, 100 };
+    BITCODE_RLL moved[2];
+    width = dwg_dynblock_add_linear (block_header (dwg, blk), "Width", &b, &e,
+                                     &error);
+    // the grip is the node after the parameter's
+    grip = width && !error ? node_handle (dwg, blk, nodes + 1) : 0;
+    s = grip ? dwg_dynblock_add_stretch (block_header (dwg, blk), width, &f1,
+                                         &f2, &line, 1, &error)
+             : NULL;
+    moved[0] = circle;
+    moved[1] = vis_h;
+    m = s && !error ? dwg_dynblock_add_move (block_header (dwg, blk), width,
+                                             moved, 2, 0.5, &error)
+                    : NULL;
+    loglevel = test_loglevel;
+  }
+  vis = visibility_of (dwg, blk);
+  good = m && !error;
+  for (BITCODE_BL j = 0; good && j < TREES_STATES; j++)
+    {
+      const BITCODE_RLL want[6] = {
+        before[j][0], before[j][1], handle_of (dwg, width),
+        grip,         handle_of (dwg, s), handle_of (dwg, m)
+      };
+      good = lists_are (&vis->states[j], want, 6);
+    }
+  CHECK (good, "visibility states: the Width, its grip, its stretch and its "
+             "move listed in every state, after what it listed (0x%x)",
+         error);
+
+  // a second property, taken out of the first two states, as AutoCAD
+  // stores a property it shows in some states only
+  if (good)
+    {
+      const BITCODE_3BD b = { -60, -20, 0 }, e = { -40, -20, 0 };
+      nodes = graph_of (dwg, blk)->num_nodes;
+      shift = dwg_dynblock_add_linear (block_header (dwg, blk), "Shift", &b,
+                                       &e, &error);
+      loglevel = test_loglevel;
+      shift_grip = shift && !error ? node_handle (dwg, blk, nodes + 1) : 0;
+      vis = visibility_of (dwg, blk);
+      good = shift_grip != 0;
+      for (BITCODE_BL j = 0; good && j < TREES_STATES; j++)
+        {
+          Dwg_BLOCKVISIBILITYPARAMETER_state *st = &vis->states[j];
+          good = st->num_params == 8
+               && ref (st->params[6]) == handle_of (dwg, shift)
+               && ref (st->params[7]) == shift_grip;
+          if (j < 2)
+            st->num_params = 6;
+        }
+      CHECK (good, "visibility states: Shift and its grip listed in every "
+                 "state (0x%x)",
+             error);
+      shift_move = good ? dwg_dynblock_add_move (block_header (dwg, blk),
+                                                 shift, &circle, 1, 1.0,
+                                                 &error)
+                        : NULL;
+      loglevel = test_loglevel;
+      vis = visibility_of (dwg, blk);
+      good = shift_move && !error;
+      for (BITCODE_BL j = 0; good && j < TREES_STATES; j++)
+        {
+          const Dwg_BLOCKVISIBILITYPARAMETER_state *st = &vis->states[j];
+          good = j < 2 ? st->num_params == 6
+                           && !times_listed (st, handle_of (dwg, shift_move))
+                     : st->num_params == 9
+                           && ref (st->params[8])
+                                  == handle_of (dwg, shift_move);
+        }
+      CHECK (good, "visibility states: Shift's move listed only in the states "
+                 "that list Shift (0x%x)",
+             error);
+    }
+
+  error = write_dwg (WRITTEN_VISIBILITY, dwg);
+  CHECK (error < DWG_ERR_CRITICAL, "visibility states: written (0x%x)",
+         error);
+  error = error < DWG_ERR_CRITICAL ? read_dwg (WRITTEN_VISIBILITY, &back)
+                                   : error;
+  CHECK (error < DWG_ERR_CRITICAL, "visibility states: read back (0x%x)",
+         error);
+  if (error < DWG_ERR_CRITICAL)
+    {
+      const Dwg_Object_BLOCKVISIBILITYPARAMETER *bvis
+          = visibility_of (&back, blk);
+      vis = visibility_of (dwg, blk);
+      good = bvis && bvis->num_states == TREES_STATES && bvis->states;
+      for (BITCODE_BL j = 0; good && j < TREES_STATES; j++)
+        {
+          const Dwg_BLOCKVISIBILITYPARAMETER_state *st = &vis->states[j];
+          const Dwg_BLOCKVISIBILITYPARAMETER_state *bst = &bvis->states[j];
+          good = bst->num_params == st->num_params
+               && (!st->num_params || bst->params);
+          for (BITCODE_BL k = 0; good && k < st->num_params; k++)
+            good = ref (bst->params[k]) == ref (st->params[k]);
+        }
+      CHECK (good, "visibility states: every state's list reads back");
+      free_dwg (&back);
+    }
+  free_document (dwg);
+  // kept to look at when a check failed
+  if (!failures)
+    unlink (WRITTEN_VISIBILITY);
   return failures;
 }
 
@@ -3528,6 +3756,7 @@ main (int argc, char *argv[])
   failures += test_preflight ();
   failures += test_carried_parameter ();
   failures += test_autocad_graph (&src);
+  failures += test_visibility_states (&src);
   failures += test_lwpolyline_from_dwg (&src);
   failures += test_written ();
   failures += test_locked_attdefs ();
