@@ -34,6 +34,8 @@
  * location, and the edges parameter to each location (1 value) and grip to
  * parameter (2); an action adds its node and an edge from its parameter (2
  * values, its X and Y deltas). A move of another parameter adds no edge.
+ * In a block with a visibility parameter, each visibility state also lists
+ * the parameters, grips and actions it shows.
  */
 
 #include "config.h"
@@ -1427,6 +1429,57 @@ dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
   return count;
 }
 
+#ifdef USE_WRITE
+/* Lists the n objects handles in the states of each visibility parameter
+   of the graph with handle graph_handle: in every state when with is 0,
+   else in each state that lists with. Each state lists the parameters,
+   grips and actions it shows: AutoCAD shows the property of a parameter,
+   and each of its grips, only in the states that list them, and its Block
+   Editor lists a parameter's actions in the states that list the
+   parameter (test/test-data/2004/Dynblocks.dwg's Door lists all its
+   parameters, grips and actions in each of its states). */
+static int
+show_in_states (Dwg_Data *dwg, const BITCODE_RLL graph_handle,
+                const BITCODE_RLL with, const BITCODE_RLL *handles,
+                const BITCODE_BL n)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, graph_handle);
+  for (BITCODE_BL i = 0; graph->nodes && i < graph->num_nodes; i++)
+    {
+      Dwg_Object *obj = node_object (dwg, graph, i);
+      Dwg_Object_BLOCKVISIBILITYPARAMETER *vis;
+      if (!obj || obj->fixedtype != DWG_TYPE_BLOCKVISIBILITYPARAMETER)
+        continue;
+      vis = obj->tio.object->tio.BLOCKVISIBILITYPARAMETER;
+      for (BITCODE_BL j = 0; vis->states && j < vis->num_states; j++)
+        {
+          Dwg_BLOCKVISIBILITYPARAMETER_state *state = &vis->states[j];
+          const BITCODE_BL num = state->params ? state->num_params : 0;
+          BITCODE_H *params;
+          int listed = !with;
+          for (BITCODE_BL k = 0; !listed && k < num; k++)
+            listed = ref_handle (state->params[k]) == with;
+          if (!listed)
+            continue;
+          params = (BITCODE_H *)realloc (state->params,
+                                         (num + n) * sizeof (BITCODE_H));
+          if (!params)
+            return DWG_ERR_OUTOFMEM;
+          state->params = params;
+          state->num_params = num;
+          for (BITCODE_BL k = 0; k < n; k++)
+            {
+              params[num + k] = dwg_add_handleref (dwg, 4, handles[k], NULL);
+              if (!params[num + k])
+                return DWG_ERR_OUTOFMEM;
+              state->num_params++;
+            }
+        }
+    }
+  return 0;
+}
+#endif
+
 EXPORT Dwg_Object_BLOCKLINEARPARAMETER *
 dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
                          const BITCODE_3BD *base_pt,
@@ -1612,6 +1665,11 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
         if (!_loc->grip_expr)
           error = DWG_ERR_OUTOFMEM;
       }
+    // the parameter and its grip in every visibility state, so that
+    // AutoCAD shows the property and the grip whichever state a placement
+    // is in
+    if (!error)
+      error = show_in_states (dwg, ab.graph, 0, h, 2);
     if (!error)
       error = number_entities (dwg, ab.blk);
     free_block (&ab);
@@ -1847,9 +1905,12 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
   {
     Dwg_Data *dwg = ab.dwg;
     Dwg_Object_BLOCKSTRETCHACTION *_a = NULL;
+    // saved before new_object (), which can move paramobj
+    const BITCODE_RLL param_handle = paramobj->handle.value;
     Dwg_Object *obj = new_object (dwg, DWG_TYPE_BLOCKSTRETCHACTION,
                                   "BLOCKSTRETCHACTION", "BLOCKSTRETCHACTION",
                                   dwg_setup_BLOCKSTRETCHACTION);
+    const BITCODE_RLL action = obj ? obj->handle.value : 0;
     BITCODE_3BD display;
     // halves first: the sum of two finite corners can overflow
     display.x = lo.x / 2.0 + hi.x / 2.0;
@@ -1909,6 +1970,7 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
         _a->action_offset_x = 1.0;
         _a->action_offset_y = 0.0;
         _a->xy_type = 0;
+        error = show_in_states (dwg, ab.graph, param_handle, &action, 1);
         for (BITCODE_BL i = 0; !error && i < num_entities; i++)
           error = lock_attdef (dwg, stretched[i].handle, &attr_appid);
         if (!error)
@@ -2167,9 +2229,12 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
   {
     Dwg_Data *dwg = ab.dwg;
     Dwg_Object_BLOCKMOVEACTION *_a = NULL;
+    // saved before new_object (), which can move paramobj
+    const BITCODE_RLL param_handle = paramobj->handle.value;
     Dwg_Object *obj = new_object (dwg, DWG_TYPE_BLOCKMOVEACTION,
                                   "BLOCKMOVEACTION", "BLOCKMOVEACTION",
                                   dwg_setup_BLOCKMOVEACTION);
+    const BITCODE_RLL action = obj ? obj->handle.value : 0;
     BITCODE_BL d = 0, c = 0;
     if (!obj)
       error = DWG_ERR_OUTOFMEM;
@@ -2227,6 +2292,7 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
         _a->action_offset_x = multiplier;
         _a->action_offset_y = 0.0;
         _a->xy_type = 0;
+        error = show_in_states (dwg, ab.graph, param_handle, &action, 1);
         for (BITCODE_BL i = 0; !error && i < num_objects; i++)
           error = lock_attdef (dwg, moved[i].handle, &attr_appid);
         if (!error)

@@ -729,7 +729,11 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
    actions. It is stored as AutoCAD's Block Editor stores a linear
    parameter with one grip, in r2004 files: the parameter, its grip and
    the grip's two location components, as nodes of blk's evaluation
-   graph.
+   graph. On a block with a visibility parameter, the parameter and its
+   grip are also listed in each of its visibility states: AutoCAD shows a
+   property of such a block, and each grip, only in the visibility states
+   that list them, so a property listed in none has neither a grip nor a
+   place in the Properties palette.
 
    blk may be a block definition, or model space: a drawing whose model
    space holds a dynamic block's evaluation graph is how AutoCAD writes a
@@ -800,7 +804,10 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    on the rectangle's edge is in it. The action is stored as AutoCAD's
    Block Editor stores a stretch of those entities with that frame: each
    entity with the indexes of its stretch points in the frame, numbered as
-   dwg_dynblock_evaluate () numbers them. Its distance multiplier is 1.
+   dwg_dynblock_evaluate () numbers them. Its distance multiplier is 1. On
+   a block with a visibility parameter, the action is listed in each
+   visibility state that lists param, as AutoCAD's Block Editor lists a
+   parameter's actions.
 
    entities are the handles of blk's entities to stretch, each with at
    least one stretch point in the frame: AutoCAD moves whole an entity of
@@ -866,8 +873,9 @@ dwg_dynblock_add_stretch (Dwg_Object_BLOCK_HEADER *blk,
    with its grips, and listed by node id among the parameters it moves, as
    AutoCAD's Block Editor stores a move whose selection holds a parameter.
    The entities are numbered as dwg_dynblock_add_linear () numbers them,
-   and the ATTDEFs among them locked as dwg_dynblock_add_stretch () locks
-   them.
+   the ATTDEFs among them locked as dwg_dynblock_add_stretch () locks
+   them, and the action listed in visibility states as
+   dwg_dynblock_add_stretch () lists a stretch.
 
    Refused, with nothing changed: as for dwg_dynblock_add_stretch (), for blk,
    param and the entities, with a handle that is neither one of blk's entities
