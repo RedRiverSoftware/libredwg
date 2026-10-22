@@ -467,7 +467,7 @@ append_lock (Dwg_Eed **eedp, BITCODE_BL *num_eedp, const BITCODE_RLL appid)
    AutoCAD's move actions leave one that isn't locked where it is, and a
    placement's ATTRIBs follow their definitions only when locked
    (dynblock_is_locked_attdef ()). An AcDbAttr group it has gives way to a
-   new group at the end of its EED, rather than being changed, as
+   new group appended to its EED, rather than being changed, as
    number_entities () replaces a counter; one already locked is left as it
    is. Its lock_position_flag, which r2007 and later files store instead,
    is set too. *appidp is the handle of the AcDbAttr APPID, found or added

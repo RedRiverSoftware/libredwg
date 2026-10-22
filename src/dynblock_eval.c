@@ -1254,14 +1254,18 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * A LINEAR value moves its parameter's end point along the parameter, to
  * the value's distance from its base point. The stretch and move actions
  * connected to that end point then move entities by its change: a move
- * action its whole selection, a stretch action the stretch points its
- * frame holds, which AutoCAD lists with the action (hdls) by their index
- * in the entity's own list of stretch points. An entity wholly inside the
- * frame has all its stretch points listed and so moves whole. AutoCAD also
- * moves whole an entity of the selection (deps) that lies wholly outside
- * the frame; how it lists one is not known, so the evaluator refuses an
- * entity of the selection with no stretch point listed. Each action scales
- * the change by its distance multiplier and turns it by its angle offset.
+ * action its whole selection, but for an ATTDEF whose position isn't
+ * locked (dynblock_is_locked_attdef ()), which AutoCAD leaves where it
+ * is; a stretch action the stretch points its frame holds, which AutoCAD
+ * lists with the action (hdls) by their index in the entity's own list of
+ * stretch points. An entity wholly inside the frame has all its stretch
+ * points listed and so moves whole, an ATTDEF whether locked or not.
+ * AutoCAD also moves whole an entity of the selection (deps) that lies
+ * wholly outside the frame, but for an ATTDEF that isn't locked, which
+ * stays; how it lists one is not known, so the evaluator refuses an
+ * entity of the selection with no stretch point listed, other than such
+ * an ATTDEF. Each action scales the change by its distance multiplier and
+ * turns it by its angle offset.
  *
  * Actions also move the points of other parameters in their selection
  * (codes, for a stretch, and the node ids a move or rotate action lists),

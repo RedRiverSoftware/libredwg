@@ -518,9 +518,10 @@ etag_index (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RS *valuep,
    2007 and later keep an attribute's lock position in that group in files
    before r2007, which have no field for it: they write 1070 0, 1070 1 for
    a locked attribute and no group for another, and read 1070 0, 1070 0 as
-   not locked too. An ATTRIB without the group is not locked, and AutoCAD
-   may then leave it where it is when an edit of the placement moves its
-   definition. Returns 0 when from has no such group. A group that isn't
+   not locked too. An ATTRIB without the group is not locked: AutoCAD
+   leaves it where it is when an edit of the placement moves its
+   definition, so add_attributes () starts it where the definition's own
+   ATTDEF starts. Returns 0 when from has no such group. A group that isn't
    all 1070 items, the only form AutoCAD writes, or whose items don't hold
    all the bytes read for it, is left out, with DWG_ERR_INVALIDEED. */
 static int

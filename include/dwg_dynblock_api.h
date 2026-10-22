@@ -573,10 +573,12 @@ typedef struct _dwg_attvalue
    isn't (0, 0, 1), out of the XY plane, or with a tag dwg_add_ATTRIB ()
    refuses, such as one with a period (DWG_ERR_NOTYETSUPPORTED); an
    attribute definition whose placed position, alignment point, height or
-   thickness, where the evaluation moved it, is beyond what a double holds,
-   at a huge scale, or an attribute tag that names no attribute definition
-   that isn't constant, is given twice, or has no value
-   (DWG_ERR_VALUEOUTOFBOUNDS). In a
+   thickness is beyond what a double holds, at a huge scale, its position
+   and alignment point being where its ATTRIB starts from: where the
+   evaluation moved it when its position is locked, and def's own
+   otherwise (see Attributes above), or an attribute tag that names no
+   attribute definition that isn't constant, is given twice, or has no
+   value (DWG_ERR_VALUEOUTOFBOUNDS). In a
    LibreDWG built without write support, a placement at other values than
    the definition's is refused (DWG_ERR_NOTYETSUPPORTED).
 
@@ -778,7 +780,7 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
                  DWG_ERR_OUTOFMEM, which may leave some of what was made
                  in the document; below it, DWG_ERR_INVALIDEED when blk's
                  counter of entity numbers leaves no room for more, and
-                 its entities are left as they are.
+                 its entities without a number are left without one.
    @return the new parameter, or NULL. */
 EXPORT Dwg_Object_BLOCKLINEARPARAMETER *
 dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
@@ -809,13 +811,16 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    definition an action moves: AutoCAD's move actions leave one that isn't
    locked where it is, and the ATTRIBs of its placements stay behind when
    their definition moves. Its AcDbAttr EED group becomes 1070 0, 1070 1, a
-   new group at the end of its EED in place of any it had, and the
-   document gets the AcDbAttr APPID when it has none; its
-   lock_position_flag, which r2007 and later files store instead, is set
-   too. An ATTDEF already locked is left as it is. The lock is the
-   ATTDEF's own, so the block's other move actions that select it move it
-   too from then on. The ATTRIBs of placements made before keep their own
-   AcDbAttr EED.
+   new group appended to its EED in place of any it had, and the document
+   gets the AcDbAttr APPID when it has none; its lock_position_flag, which
+   r2007 and later files store instead, is set too. An ATTDEF already
+   locked is left as it is. The lock is the ATTDEF's own, so from then on
+   the block's other move actions that select it move it too, and a
+   stretch action that selects it wholly outside its frame moves it whole,
+   as AutoCAD moves any entity selected so: dwg_dynblock_evaluate () then
+   refuses the values that run that action, as it refuses such a selection
+   of any other entity. The ATTRIBs of placements made before keep their
+   own AcDbAttr EED.
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
    not a BLOCK_HEADER of its document, param not a linear parameter of blk's
