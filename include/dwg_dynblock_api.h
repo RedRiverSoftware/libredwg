@@ -912,7 +912,8 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
    their grips, an action's display location, and a stretch action's
    frame. A linear grip's orientation, a vector, and an action's offsets
    stay as they are, as do the drawing's views, its limits and its record
-   of its extents.
+   of its extents. A stretch action read from a file is written from its
+   fields once moved, not from the raw bits it was read with.
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
    not a BLOCK_HEADER of its document, an entry of its entity list that doesn't
@@ -930,7 +931,9 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
    origin (DWG_ERR_NOTYETSUPPORTED); a node of a class LibreDWG can't decode
    (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block, an xref or a
    block that depends on one (DWG_ERR_INVALIDTYPE); a base point that isn't
-   finite, or a move that would take a coordinate beyond what a double holds
+   finite, or a move that could take a coordinate beyond what a double
+   holds, which for an entity is checked as dwg_dynblock_copy_entities ()
+   checks it, its largest coordinate plus the move's size
    (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes or
    edges it doesn't have (no further bit). Each refusal is DWG_ERR_INVALIDDWG
    with the bit given, logged at LOG_ERROR but for a NULL argument. In a

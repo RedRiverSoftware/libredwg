@@ -2510,8 +2510,17 @@ dwg_dynblock_move_to_origin (Dwg_Object_BLOCK_HEADER *blk)
               = graph_of (ab.dwg, ab.graph);
           for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
             {
+              Dwg_Object *obj = node_object (ab.dwg, graph, i);
               Author_Node_Points p;
-              node_points (node_object (ab.dwg, graph, i), &p);
+              node_points (obj, &p);
+              if (!p.num_pts && !p.num_frame)
+                continue;
+              // a node read with its raw bits, as a stretch action is,
+              // would be written as it was read: it must be written from
+              // its fields now, which give AutoCAD's bits (dynblocks_test)
+              free (obj->unknown_bits);
+              obj->unknown_bits = NULL;
+              obj->num_unknown_bits = 0;
               for (int k = 0; k < p.num_pts; k++)
                 {
                   p.pts[k]->x += delta.x;

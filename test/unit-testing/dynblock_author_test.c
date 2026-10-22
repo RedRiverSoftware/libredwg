@@ -3503,6 +3503,8 @@ test_copy_turned_over (void)
 
 #define WRITTEN_ORIGIN "dynblock_author_test_origin.dwg"
 #define WRITTEN_ORIGIN_MS "dynblock_author_test_origin_ms.dwg"
+#define WRITTEN_ORIGIN_READ "dynblock_author_test_origin_read.dwg"
+#define WRITTEN_ORIGIN_READ2 "dynblock_author_test_origin_read2.dwg"
 
 /* Where the blocks of these tests have their base point. */
 static const BITCODE_3BD origin_base = { 4, -3, 0 };
@@ -4135,6 +4137,106 @@ test_origin_autocad (Dwg_Data *src)
   return failures;
 }
 
+/* The number of stretch actions of the graph of block blk that have raw
+   bits, which the encoder writes as they were read. */
+static int
+raw_stretches (const Dwg_Data *dwg, const BITCODE_RLL blk)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  int n = 0;
+  for (BITCODE_BL i = 0; graph && i < graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj = node_object (dwg, graph, i);
+      n += obj && obj->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION
+           && obj->num_unknown_bits && obj->unknown_bits;
+    }
+  return n;
+}
+
+/* The fixture's Window, copied into a new document with its base point at
+   origin_base, written and read back: its three stretch actions are read
+   with their raw bits, which the encoder would write as they were read.
+   Moved to the origin, they lose them, and the file written then reads
+   back with the stretch frames moved, as the rest. */
+static int
+test_origin_read_from_dwg (Dwg_Data *src)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Data before, moved, after;
+  Dwg_Object_BLOCK_HEADER *w = NULL;
+  const double dx = -origin_base.x, dy = -origin_base.y;
+  BITCODE_RLL blk;
+  int error = 0, failures = 0, raw;
+  if (dwg)
+    w = dwg_dynblock_copy_block (dwg, src, block_header (src, WINDOW),
+                                 &error);
+  loglevel = test_loglevel;
+  if (!w || error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: copying Window failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  blk = handle_of (dwg, w);
+  w->base_pt = origin_base;
+  error = write_dwg (WRITTEN_ORIGIN_READ, dwg);
+  free_document (dwg);
+  memset (&before, 0, sizeof (before));
+  memset (&moved, 0, sizeof (moved));
+  memset (&after, 0, sizeof (after));
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ, &before);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ, &moved);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: writing or reading Window failed (0x%x)", error);
+      free_dwg (&before);
+      free_dwg (&moved);
+      return 1;
+    }
+  raw = raw_stretches (&moved, blk);
+  CHECK (raw == 3, "origin, read: Window's 3 stretch actions read with "
+                   "their raw bits (%d)",
+         raw);
+  error = dwg_dynblock_move_to_origin (block_header (&moved, blk));
+  loglevel = test_loglevel;
+  raw = raw_stretches (&moved, blk);
+  CHECK (!error && !raw,
+         "origin, read: moved, the stretch actions' raw bits dropped (0x%x, "
+         "%d left)",
+         error, raw);
+  error = write_dwg (WRITTEN_ORIGIN_READ2, &moved);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ2, &after);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: writing or reading the moved Window failed "
+            "(0x%x)",
+            error);
+      free_dwg (&before);
+      free_dwg (&moved);
+      free_dwg (&after);
+      return failures + 1;
+    }
+  CHECK (is_origin (&block_header (&after, blk)->base_pt)
+             && entities_moved (&before, block_header (&before, blk), &after,
+                                block_header (&after, blk), dx, dy)
+             && graph_moved (&before, blk, &after, blk, dx, dy),
+         "origin, read: written, Window reads back moved, the stretch frames "
+         "too");
+  free_dwg (&before);
+  free_dwg (&moved);
+  free_dwg (&after);
+  if (!failures)
+    {
+      unlink (WRITTEN_ORIGIN_READ);
+      unlink (WRITTEN_ORIGIN_READ2);
+    }
+  return failures;
+}
+
 /* What test_origin_refusals () does to a block before calling
    dwg_dynblock_move_to_origin () on it. */
 enum
@@ -4453,6 +4555,7 @@ main (int argc, char *argv[])
   failures += test_origin_block ();
   failures += test_origin_model_space ();
   failures += test_origin_autocad (&src);
+  failures += test_origin_read_from_dwg (&src);
   failures += test_origin_refusals (&src);
   free_dwg (&src);
   return failures ? 1 : 0;
