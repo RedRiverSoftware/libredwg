@@ -194,6 +194,53 @@ etag (const Dwg_Data *dwg, const Dwg_Object *obj, BITCODE_RL *indexp,
   return found;
 }
 
+/* Gives entity ent an AcDbAttr EED group, 1070 0, 1070 lock, adding its
+   APPID to dwg when it has none: AutoCAD 2007 and later keep an
+   attribute's position lock there in files before r2007, 1070 0, 1070 1
+   when locked. Returns 0 when memory runs out. */
+static int
+add_attr_eed (Dwg_Data *dwg, Dwg_Object_Entity *ent, const BITCODE_RS lock)
+{
+  BITCODE_H found = dwg_find_tablehandle (dwg, "AcDbAttr", "APPID");
+  BITCODE_RLL appid = found ? found->absolute_ref : 0;
+  const BITCODE_RS values[2] = { 0, lock };
+  const BITCODE_BL first = ent->num_eed;
+  Dwg_Eed *eed;
+  loglevel = test_loglevel;
+  if (!appid)
+    {
+      Dwg_Object_APPID *_appid = dwg_add_APPID (dwg, "AcDbAttr");
+      loglevel = test_loglevel;
+      if (!_appid)
+        return 0;
+      appid = dwg_obj_generic_handlevalue (_appid);
+    }
+  eed = (Dwg_Eed *)realloc (ent->eed, (first + 2) * sizeof (Dwg_Eed));
+  if (!eed)
+    return 0;
+  ent->eed = eed;
+  memset (&eed[first], 0, 2 * sizeof (Dwg_Eed));
+  for (int i = 0; i < 2; i++)
+    {
+      eed[first + i].data
+          = (Dwg_Eed_Data *)calloc (1, sizeof (Dwg_Eed_Data));
+      if (!eed[first + i].data)
+        return 0;
+      ent->num_eed++;
+      eed[first + i].data->code = 70;
+      // Dwg_Eed_Data is packed
+      memcpy (&eed[first + i].data->u.eed_70.rs, &values[i],
+              sizeof (values[i]));
+    }
+  // a 1070 takes 3 bytes in a file
+  eed[first].size = 6;
+  eed[first].handle.code = 5;
+  for (BITCODE_RLL v = appid; v; v >>= 8)
+    eed[first].handle.size++;
+  eed[first].handle.value = appid;
+  return 1;
+}
+
 static const Dwg_DynParam *
 find_param (const Dwg_DynParam *params, const BITCODE_BL count,
             const char *name)
@@ -2063,10 +2110,12 @@ is_moved (Dwg_Data *dwg, const Dwg_Object *src, const Dwg_Object *copy,
 
 /* Entities of each type the evaluator moves whole, added to the Window and
    listed with 'Stretch Width', with all their stretch points: at Window
-   Width 24 they move by -12 in x. A mirrored CIRCLE, whose OCS x axis
-   points the other way, moves by +12 in its OCS. Then what the evaluator
-   refuses: part of an ARC, an entity of another type, a HATCH crossing the
-   frame. */
+   Width 24 they move by -12 in x, an ATTDEF whether its position is locked
+   or not (with no AcDbAttr group, or with 1070 0, 1070 0), as AutoCAD's
+   stretch moves one whose insertion point its frame holds. A mirrored
+   CIRCLE, whose OCS x axis points the other way, moves by +12 in its OCS.
+   Then what the evaluator refuses: part of an ARC, an entity of another
+   type, a HATCH crossing the frame. */
 static int
 test_stretch_whole (Dwg_Data *dwg)
 {
@@ -2081,14 +2130,14 @@ test_stretch_whole (Dwg_Data *dwg)
   const dwg_point_3d tan = { 1.0, 0.0, 0.0 };
   const dwg_point_3d line_end = { 34.0, 6.0, 0.0 };
   dwg_point_3d pt;
-  Added list[16];
+  Added list[18];
   int n = 0, failures = 0;
   Dwg_Entity_ARC *arc;
   Dwg_Entity_CIRCLE *circle, *mirrored, *boundary, *crossing;
   Dwg_Entity_ELLIPSE *ellipse, *elliptical_arc;
   Dwg_Entity_SPLINE *spline;
   Dwg_Entity_TEXT *text, *centred, *unstored;
-  Dwg_Entity_ATTDEF *attdef;
+  Dwg_Entity_ATTDEF *attdef, *unlocked, *unlocked_00;
   Dwg_Entity_MTEXT *mtext;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_ATTRIB *attrib;
@@ -2132,6 +2181,11 @@ test_stretch_whole (Dwg_Data *dwg)
   centred = dwg_add_TEXT (def, "centred", &pt, 1.0);
   pt.y = 24.0;
   attdef = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "TAG", "default");
+  pt.y = 25.0;
+  unlocked = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE", "default");
+  pt.y = 25.5;
+  unlocked_00
+      = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE00", "default");
   pt.y = 26.0;
   mtext = dwg_add_MTEXT (def, &pt, 2.0, "mtext");
   pt.y = 28.0;
@@ -2150,7 +2204,8 @@ test_stretch_whole (Dwg_Data *dwg)
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
   if (!line || !arc || !circle || !mirrored || !ellipse || !elliptical_arc
-      || !spline || !text || !unstored || !centred || !attdef || !mtext
+      || !spline || !text || !unstored || !centred || !attdef || !unlocked
+      || !unlocked_00 || !mtext
       || !insert || !attrib || !boundary || !lwpline || !crossing || !point)
     {
       fail ("stretch whole: could not add the entities");
@@ -2193,6 +2248,12 @@ test_stretch_whole (Dwg_Data *dwg)
   // the same for a middle-aligned ATTRIB, moved with its INSERT
   attrib->horiz_alignment = 4;
   attrib->dataflags = 0x02;
+  if (!add_attr_eed (dwg, attdef->parent, 1)
+      || !add_attr_eed (dwg, unlocked_00->parent, 0))
+    {
+      fail ("stretch whole: out of memory");
+      return 1;
+    }
 
   list[n++] = added (dwg, line->parent, 2, "LINE");
   list[n++] = added (dwg, arc->parent, 2, "ARC");
@@ -2204,7 +2265,10 @@ test_stretch_whole (Dwg_Data *dwg)
   list[n++] = added (dwg, centred->parent, 1, "centred TEXT");
   list[n++] = added (dwg, unstored->parent, 1,
                      "centred TEXT with no alignment point stored");
-  list[n++] = added (dwg, attdef->parent, 1, "ATTDEF");
+  list[n++] = added (dwg, attdef->parent, 1, "locked ATTDEF");
+  list[n++] = added (dwg, unlocked->parent, 1, "ATTDEF not locked");
+  list[n++] = added (dwg, unlocked_00->parent, 1,
+                     "ATTDEF with 1070 0, 1070 0, not locked");
   list[n++] = added (dwg, mtext->parent, 5, "MTEXT");
   list[n++] = added (dwg, insert->parent, 1, "INSERT with an ATTRIB");
   list[n++] = added (dwg, boundary->parent, 1, "HATCH's CIRCLE");
@@ -2284,9 +2348,11 @@ test_stretch_whole (Dwg_Data *dwg)
    selection that lies wholly outside its frame, with none of its points
    listed; the evaluator refuses one, before adding anything. Here a LINE
    added to the Window outside 'Stretch Width''s frame joins the action's
-   selection with no stretch point listed, or listed with none; and the
-   action lists Window Height with none of its points. The parameter and
-   grip the fixture's selection holds are allowed, as test_linear shows. */
+   selection with no stretch point listed, or listed with none; so does a
+   locked ATTDEF, both ways; and the action lists Window Height with none
+   of its points. An ATTDEF that isn't locked stays where it is, both
+   ways, as AutoCAD leaves it. The parameter and grip the fixture's
+   selection holds are allowed, as test_linear shows. */
 static int
 test_stretch_selection (Dwg_Data *dwg)
 {
@@ -2356,6 +2422,71 @@ test_stretch_selection (Dwg_Data *dwg)
                                 "points listed");
       pop_stretch_code (stretch);
     }
+  {
+    const dwg_point_3d at = { 50.0, 12.0, 0.0 };
+    Dwg_Entity_ATTDEF *attdef = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &at,
+                                                "OUTSIDE", "default");
+    const BITCODE_RLL h_attdef
+        = attdef ? entity_handle (dwg, attdef->parent) : 0;
+    Dwg_Object_BLOCK_HEADER *rep;
+    loglevel = test_loglevel;
+    if (!attdef
+        || !add_dep (dwg, &stretch->deps, &stretch->num_deps, h_attdef))
+      {
+        fail ("stretch selection: out of memory");
+        return failures + 1;
+      }
+    rep = evaluate (dwg, WINDOW, &v, 1,
+                    "stretch selection, an ATTDEF outside the frame");
+    if (rep
+        && is_moved (dwg, dwg_resolve_handle (dwg, h_attdef),
+                     copy_of (dwg, def, rep, h_attdef), 0.0, 0.0))
+      OK ("stretch selection: a selected ATTDEF outside the frame, not "
+          "locked, stays");
+    else
+      {
+        fail ("stretch selection: a selected ATTDEF outside the frame, not "
+              "locked, doesn't stay");
+        failures++;
+      }
+    if (!add_stretch_entity (dwg, stretch, h_attdef, NULL, 0))
+      {
+        fail ("stretch selection: out of memory");
+        return failures + 1;
+      }
+    rep = evaluate (dwg, WINDOW, &v, 1,
+                    "stretch selection, an ATTDEF listed with no point");
+    if (rep
+        && is_moved (dwg, dwg_resolve_handle (dwg, h_attdef),
+                     copy_of (dwg, def, rep, h_attdef), 0.0, 0.0))
+      OK ("stretch selection: a selected ATTDEF listed with no stretch "
+          "point, not locked, stays");
+    else
+      {
+        fail ("stretch selection: a selected ATTDEF listed with no stretch "
+              "point, not locked, doesn't stay");
+        failures++;
+      }
+    if (add_attr_eed (dwg, attdef->parent, 1))
+      {
+        failures += test_refusal (dwg, WINDOW, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a selected locked ATTDEF listed with no "
+                                  "stretch point");
+        pop_stretch_entity (stretch);
+        failures += test_refusal (dwg, WINDOW, &v, 1,
+                                  REFUSED (DWG_ERR_NOTYETSUPPORTED),
+                                  "a selected locked ATTDEF with no stretch "
+                                  "point listed");
+      }
+    else
+      {
+        pop_stretch_entity (stretch);
+        fail ("stretch selection: out of memory");
+        failures++;
+      }
+    stretch->num_deps--;
+  }
   // the Window's extension dictionary, neither an entity of it nor a node
   if (add_dep (dwg, &stretch->deps, &stretch->num_deps,
                def->parent->xdicobjhandle->absolute_ref))
@@ -2375,25 +2506,34 @@ test_stretch_selection (Dwg_Data *dwg)
 
 /* The Door's move action MoveSwing moves its selection by half Wall
    Thickness's change: entities added to it, at Wall Thickness 6, move by
-   -0.5 in y. A POINT in it is refused. */
+   -0.5 in y, an ATTDEF when its position is locked. ATTDEFs that aren't
+   locked, with no AcDbAttr group, with 1070 0, 1070 0, or with a group
+   other than AutoCAD's two 1070s (here 1071 0, 1070 1; 1070 0, 1071 1;
+   and 1070 0 alone, followed by another application's group of 1070 1),
+   stay where they are, as AutoCAD leaves them. A POINT in it is
+   refused. */
 static int
 test_move (Dwg_Data *dwg)
 {
   Dwg_Object_BLOCK_HEADER *def = block_header (dwg, DOOR);
   Dwg_Object_BLOCKMOVEACTION *move = move_action (dwg, DOOR, "MoveSwing");
+  BITCODE_H acad = dwg_find_tablehandle (dwg, "ACAD", "APPID");
   dwg_point_3d pt = { 10.0, -2.0, 0.0 };
   const dwg_point_3d mc_pt = { -2.3, -1.25, 0.0 },
                      ml_pt = { 0.0, -1.25, 0.0 },
                      aligned_pt = { 1.0, 1.0, 0.0 };
   Dwg_Entity_TEXT *text, *centred, *middle_left, *aligned;
+  Dwg_Entity_ATTDEF *locked, *unlocked, *unlocked_00, *odd, *lock_71,
+      *one_item;
   Dwg_Entity_INSERT *insert;
   Dwg_Entity_POINT *point;
   Dwg_Object_BLOCK_HEADER *rep;
   Dwg_DynValue v;
-  BITCODE_RLL h_text, h_centred, h_middle_left, h_aligned, h_insert;
+  BITCODE_RLL h_text, h_centred, h_middle_left, h_aligned, h_insert,
+      h_locked, h_unlocked, h_unlocked_00, h_odd, h_lock_71, h_one_item;
   int failures = 0;
   memset (&v, 0, sizeof (v));
-  if (!def || !move)
+  if (!def || !move || !acad)
     {
       fail ("move: fixture objects not found");
       return 1;
@@ -2402,16 +2542,53 @@ test_move (Dwg_Data *dwg)
   centred = dwg_add_TEXT (def, "MC", &mc_pt, 2.5);
   middle_left = dwg_add_TEXT (def, "ML", &ml_pt, 2.5);
   aligned = dwg_add_TEXT (def, "aligned", &aligned_pt, 1.0);
+  locked = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "LOCKED", "default");
+  unlocked = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE", "default");
+  unlocked_00
+      = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "FREE00", "default");
+  odd = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "ODD", "default");
+  lock_71 = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "LOCK71", "default");
+  one_item
+      = dwg_add_ATTDEF (def, 1.0, 0, "Prompt", &pt, "ONEITEM", "default");
   insert = dwg_add_INSERT (def, &pt, "t", 1.0, 1.0, 1.0, 0.0);
   if (insert && !dwg_add_ATTRIB (insert, 1.0, 0, &pt, "TAG", "value"))
     insert = NULL;
   point = dwg_add_POINT (def, &pt);
   loglevel = test_loglevel;
-  if (!text || !centred || !middle_left || !aligned || !insert || !point)
+  if (!text || !centred || !middle_left || !aligned || !locked || !unlocked
+      || !unlocked_00 || !odd || !lock_71 || !one_item || !insert || !point)
     {
       fail ("move: could not add the entities");
       return 1;
     }
+  if (!add_attr_eed (dwg, locked->parent, 1)
+      || !add_attr_eed (dwg, unlocked_00->parent, 0)
+      || !add_attr_eed (dwg, odd->parent, 1)
+      || !add_attr_eed (dwg, lock_71->parent, 0)
+      || !add_attr_eed (dwg, one_item->parent, 1))
+    {
+      fail ("move: out of memory");
+      return 1;
+    }
+  // its group's first item a 1071 0 (a 1071 takes 5 bytes in a file)
+  odd->parent->eed[odd->parent->num_eed - 2].data->code = 71;
+  odd->parent->eed[odd->parent->num_eed - 2].size = 8;
+  // its group's second item a 1071 1
+  {
+    Dwg_Eed *eed = &lock_71->parent->eed[lock_71->parent->num_eed - 2];
+    const BITCODE_RL one = 1;
+    eed[1].data->code = 71;
+    // Dwg_Eed_Data is packed
+    memcpy (&eed[1].data->u.eed_71.rl, &one, sizeof (one));
+    eed[0].size = 8;
+  }
+  // its group's second item made the first of the ACAD APPID's group
+  {
+    Dwg_Eed *eed = &one_item->parent->eed[one_item->parent->num_eed - 2];
+    eed[0].size = 3;
+    eed[1].size = 3;
+    eed[1].handle = acad->handleref;
+  }
   text->dataflags = 0x02;
   // middle-centred on the block's base point, as AutoCAD writes it: the
   // alignment point (0,0) isn't stored
@@ -2431,10 +2608,22 @@ test_move (Dwg_Data *dwg)
   h_middle_left = entity_handle (dwg, middle_left->parent);
   h_aligned = entity_handle (dwg, aligned->parent);
   h_insert = entity_handle (dwg, insert->parent);
+  h_locked = entity_handle (dwg, locked->parent);
+  h_unlocked = entity_handle (dwg, unlocked->parent);
+  h_unlocked_00 = entity_handle (dwg, unlocked_00->parent);
+  h_odd = entity_handle (dwg, odd->parent);
+  h_lock_71 = entity_handle (dwg, lock_71->parent);
+  h_one_item = entity_handle (dwg, one_item->parent);
   if (!add_move_entity (dwg, move, h_text)
       || !add_move_entity (dwg, move, h_centred)
       || !add_move_entity (dwg, move, h_middle_left)
       || !add_move_entity (dwg, move, h_aligned)
+      || !add_move_entity (dwg, move, h_locked)
+      || !add_move_entity (dwg, move, h_unlocked)
+      || !add_move_entity (dwg, move, h_unlocked_00)
+      || !add_move_entity (dwg, move, h_odd)
+      || !add_move_entity (dwg, move, h_lock_71)
+      || !add_move_entity (dwg, move, h_one_item)
       || !add_move_entity (dwg, move, h_insert))
     {
       fail ("move: out of memory");
@@ -2483,6 +2672,40 @@ test_move (Dwg_Data *dwg)
   else
     {
       fail ("move: the aligned TEXT doesn't move both its points by -0.5");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_locked),
+                   copy_of (dwg, def, rep, h_locked), 0.0, -0.5))
+    OK ("move: the locked ATTDEF moves by -0.5");
+  else
+    {
+      fail ("move: the locked ATTDEF doesn't move by -0.5");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_unlocked),
+                   copy_of (dwg, def, rep, h_unlocked), 0.0, 0.0)
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_unlocked_00),
+                   copy_of (dwg, def, rep, h_unlocked_00), 0.0, 0.0)
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_odd),
+                   copy_of (dwg, def, rep, h_odd), 0.0, 0.0)
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_lock_71),
+                   copy_of (dwg, def, rep, h_lock_71), 0.0, 0.0))
+    OK ("move: the ATTDEFs that aren't locked stay");
+  else
+    {
+      fail ("move: an ATTDEF that isn't locked moves");
+      failures++;
+    }
+  if (rep
+      && is_moved (dwg, dwg_resolve_handle (dwg, h_one_item),
+                   copy_of (dwg, def, rep, h_one_item), 0.0, 0.0))
+    OK ("move: the ATTDEF whose AcDbAttr group has one item stays, though "
+        "the next group's is 1070 1");
+  else
+    {
+      fail ("move: the ATTDEF whose AcDbAttr group has one item moves");
       failures++;
     }
   if (add_move_entity (dwg, move, entity_handle (dwg, point->parent)))

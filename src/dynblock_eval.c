@@ -1254,14 +1254,18 @@ detach_copy (Dwg_Object *copy, dwg_inthash *copies)
  * A LINEAR value moves its parameter's end point along the parameter, to
  * the value's distance from its base point. The stretch and move actions
  * connected to that end point then move entities by its change: a move
- * action its whole selection, a stretch action the stretch points its
- * frame holds, which AutoCAD lists with the action (hdls) by their index
- * in the entity's own list of stretch points. An entity wholly inside the
- * frame has all its stretch points listed and so moves whole. AutoCAD also
- * moves whole an entity of the selection (deps) that lies wholly outside
- * the frame; how it lists one is not known, so the evaluator refuses an
- * entity of the selection with no stretch point listed. Each action scales
- * the change by its distance multiplier and turns it by its angle offset.
+ * action its whole selection, but for an ATTDEF whose position isn't
+ * locked (dynblock_is_locked_attdef ()), which AutoCAD leaves where it
+ * is; a stretch action the stretch points its frame holds, which AutoCAD
+ * lists with the action (hdls) by their index in the entity's own list of
+ * stretch points. An entity wholly inside the frame has all its stretch
+ * points listed and so moves whole, an ATTDEF whether locked or not.
+ * AutoCAD also moves whole an entity of the selection (deps) that lies
+ * wholly outside the frame, but for an ATTDEF that isn't locked, which
+ * stays; how it lists one is not known, so the evaluator refuses an
+ * entity of the selection with no stretch point listed, other than such
+ * an ATTDEF. Each action scales the change by its distance multiplier and
+ * turns it by its angle offset.
  *
  * Actions also move the points of other parameters in their selection
  * (codes, for a stretch, and the node ids a move or rotate action lists),
@@ -2064,6 +2068,45 @@ dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
     }
 }
 
+/* Whether ATTDEF obj has its position locked. AutoCAD's move actions
+   move an attribute definition only when it is, and so do its stretch
+   actions one wholly outside their frame; a stretch whose frame holds its
+   insertion point moves it either way. A placement's ATTRIBs follow their
+   definitions only when locked. Files before r2007, which have no field
+   for the lock, keep it in the ATTDEF's AcDbAttr EED group, two 1070s:
+   AutoCAD 2007 and later write 1070 0, 1070 1 for a locked attribute
+   definition and no group for another, and read 1070 0, 1070 0 as not
+   locked too. lock_position_flag, which r2004 files don't store, isn't
+   read. */
+int
+dynblock_is_locked_attdef (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  const Dwg_Object_Entity *ent = obj->tio.entity;
+  const int start = eed_group (dwg, obj, "AcDbAttr");
+  const Dwg_Eed *version, *lock;
+  BITCODE_RS value;
+  if (start < 0 || (BITCODE_BL)start + 1 >= ent->num_eed)
+    return 0;
+  version = &ent->eed[start];
+  lock = &ent->eed[start + 1];
+  if (!version->data || version->data->code != 70 || lock->size
+      || !lock->data || lock->data->code != 70)
+    return 0;
+  // Dwg_Eed_Data is packed
+  memcpy (&value, &lock->data->u.eed_70.rs, sizeof (value));
+  return value != 0;
+}
+
+/* Whether a move action, or a stretch action selecting it wholly outside
+   its frame, leaves entity obj where it is, as AutoCAD leaves an ATTDEF
+   whose position isn't locked. */
+static int
+is_left_attdef (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return obj->fixedtype == DWG_TYPE_ATTDEF
+         && !dynblock_is_locked_attdef (dwg, obj);
+}
+
 /* Whether the evaluator moves an entity of obj's type whole. */
 static int
 is_movable (const Dwg_Object *obj)
@@ -2378,10 +2421,11 @@ plan_whole (Dynblock_Plan *plan, const Dynblock_Action *a,
 
 /* Refuses an entity that stretch action a selects (deps) with none of its
    stretch points listed (hdls): one wholly outside the action's frame,
-   which AutoCAD moves whole. The parameters and grips the action selects
-   are nodes of the graph: it lists the points of the parameters it moves
-   by node id (codes), and its own parameter, whose end point the value
-   moves, with no entry; check_selected_dep () checks the others. */
+   which AutoCAD moves whole, unless it is an ATTDEF whose position isn't
+   locked, which stays where it is. The parameters and grips the action
+   selects are nodes of the graph: it lists the points of the parameters it
+   moves by node id (codes), and its own parameter, whose end point the
+   value moves, with no entry; check_selected_dep () checks the others. */
 static int
 check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
 {
@@ -2408,7 +2452,8 @@ check_stretch_selection (Dynblock_Plan *plan, const Dynblock_Action *a)
           continue;
         }
       obj = selected_entity (plan, a, handle, &error);
-      if (obj && hash_get (listed, handle) == HASH_NOT_FOUND)
+      if (obj && !is_left_attdef (plan->dwg, obj)
+          && hash_get (listed, handle) == HASH_NOT_FOUND)
         {
           set_reason (plan->reason, plan->reason_size,
                       "stretch action '%s' selects %s " FORMAT_HV
@@ -2441,6 +2486,10 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
       unsigned char *seen;
       if (!obj)
         break;
+      // listed with none of its points, so wholly outside the frame, where
+      // an ATTDEF that isn't locked stays
+      if ((!h->indexes || !h->num_indexes) && is_left_attdef (plan->dwg, obj))
+        continue;
       count = stretch_points (obj);
       if (!count)
         {
@@ -2591,8 +2640,8 @@ plan_stretch (Dynblock_Plan *plan, const Dynblock_Action *a,
   return 0;
 }
 
-/* Plans move action a moving the entities it selects by delta, and the
-   parameters it lists. */
+/* Plans move action a moving the entities it selects by delta, but an
+   ATTDEF whose position isn't locked, and the parameters it lists. */
 static int
 plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
            const BITCODE_3BD *delta)
@@ -2614,7 +2663,7 @@ plan_move (Dynblock_Plan *plan, const Dynblock_Action *a,
           continue;
         }
       obj = selected_entity (plan, a, handle, &error);
-      if (obj)
+      if (obj && !is_left_attdef (plan->dwg, obj))
         error = plan_whole (plan, a, obj, delta);
     }
   for (BITCODE_BL i = 0; !error && _a->actions && i < _a->num_actions; i++)
@@ -4412,7 +4461,9 @@ dynblock_free_state (Dynblock_State *state)
 /* Adds to state the points of each of the definition's ATTDEFs that plan
    moves, after its moves: replayed in plan's order, as apply_moves () and
    MOVE_TEXT apply them to the copy, as a sum of the moves could round
-   differently. */
+   differently. Not one whose position isn't locked, whose ATTRIBs stay
+   where its own place puts them, as AutoCAD's ATTRIBs follow their
+   definitions only when locked. */
 static int
 add_attdef_places (const Dynblock_Plan *plan, Dynblock_State *state)
 {
@@ -4428,7 +4479,8 @@ add_attdef_places (const Dynblock_Plan *plan, Dynblock_State *state)
       Dynblock_Attdef_Place *place;
       BITCODE_3BD delta;
       BITCODE_BL j;
-      if (m->point >= 0 || !obj || obj->fixedtype != DWG_TYPE_ATTDEF)
+      if (m->point >= 0 || !obj || obj->fixedtype != DWG_TYPE_ATTDEF
+          || !dynblock_is_locked_attdef (plan->dwg, obj))
         continue;
       _obj = obj->tio.entity->tio.ATTDEF;
       for (j = 0; j < state->num_attdefs; j++)
