@@ -730,10 +730,11 @@ dwg_dynblock_free_check_report (Dwg_DynBlock_Check_Report *report);
    parameter with one grip, in r2004 files: the parameter, its grip and
    the grip's two location components, as nodes of blk's evaluation
    graph. On a block with a visibility parameter, the parameter and its
-   grip are also listed in each of its visibility states: AutoCAD shows a
-   property of such a block, and each grip, only in the visibility states
-   that list them, so a property listed in none has neither a grip nor a
-   place in the Properties palette.
+   grip are also appended to each of its visibility states, after what the
+   state lists already: AutoCAD shows a linear property of such a block,
+   and its grip, only in the visibility states that list them, so one
+   listed in none has neither a grip nor a place in the Properties
+   palette.
 
    blk may be a block definition, or model space: a drawing whose model
    space holds a dynamic block's evaluation graph is how AutoCAD writes a
@@ -805,9 +806,12 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
    Block Editor stores a stretch of those entities with that frame: each
    entity with the indexes of its stretch points in the frame, numbered as
    dwg_dynblock_evaluate () numbers them. Its distance multiplier is 1. On
-   a block with a visibility parameter, the action is listed in each
-   visibility state that lists param, as AutoCAD's Block Editor lists a
-   parameter's actions.
+   a block with a visibility parameter, the action is also appended to
+   each visibility state that lists param, as the Door block of
+   test/test-data/2004/Dynblocks.dwg lists its actions with their
+   parameters. AutoCAD doesn't require it: it runs an action that no state
+   lists, and the same file's Toilet lists its flip and rotate actions in
+   one state only. dwg_dynblock_evaluate () doesn't read these lists.
 
    entities are the handles of blk's entities to stretch, each with at
    least one stretch point in the frame: AutoCAD moves whole an entity of

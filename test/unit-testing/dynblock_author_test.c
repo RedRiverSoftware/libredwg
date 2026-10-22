@@ -1764,9 +1764,9 @@ lists_are (const Dwg_BLOCKVISIBILITYPARAMETER_state *state,
 }
 
 /* The fixture's Trees, whose visibility states each list its visibility
-   parameter and grip, copied into a new document. AutoCAD shows a
-   property and a grip of a block with a visibility parameter only in the
-   states that list them: a Width, its grip, its stretch and its move are
+   parameter and grip, copied into a new document. AutoCAD shows a linear
+   property of a block with a visibility parameter, and its grip, only in
+   the states that list them: a Width, its grip, its stretch and its move are
    listed in every state, after what the state listed before; the move of
    a second property, taken out of two states, only in the states that
    still list that property; and the lists read back from a written

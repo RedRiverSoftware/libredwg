@@ -1430,14 +1430,16 @@ dwg_dynblock_copy_entities (Dwg_Object_BLOCK_HEADER *dst_block,
 }
 
 #ifdef USE_WRITE
-/* Lists the n objects handles in the states of each visibility parameter
-   of the graph with handle graph_handle: in every state when with is 0,
-   else in each state that lists with. Each state lists the parameters,
-   grips and actions it shows: AutoCAD shows the property of a parameter,
-   and each of its grips, only in the states that list them, and its Block
-   Editor lists a parameter's actions in the states that list the
-   parameter (test/test-data/2004/Dynblocks.dwg's Door lists all its
-   parameters, grips and actions in each of its states). */
+/* Appends the handles of the n objects to the states of each visibility
+   parameter of the graph with handle graph_handle: to every state when
+   with is 0, else to each state that lists with. AutoCAD shows a linear
+   property and its grip only in the states that list them, but the
+   visibility property in every state, listed or not. Actions are listed
+   with their parameter as test/test-data/2004/Dynblocks.dwg's Door lists
+   them, though AutoCAD doesn't require it: it runs an action that no
+   state lists, and the same file's Toilet lists its flip and rotate
+   actions in one state only. dwg_dynblock_evaluate () and
+   dwg_dynblock_insert () don't read these lists. */
 static int
 show_in_states (Dwg_Data *dwg, const BITCODE_RLL graph_handle,
                 const BITCODE_RLL with, const BITCODE_RLL *handles,
