@@ -4513,7 +4513,7 @@ origin_case (Dwg_Data *dwg, const BITCODE_RLL blk, const int c)
         memset (&block_header (dwg, blk)->base_pt, 0, sizeof (BITCODE_3BD));
       break;
     case ORIGIN_NAN:
-      b->base_pt.x = NAN;
+      b->base_pt.x = (double)NAN;
       break;
     case ORIGIN_FAR_GRIP:
       node_object (dwg, graph_of (dwg, blk), 1)
@@ -4708,7 +4708,7 @@ test_origin_refusals (Dwg_Data *src)
       empty = NULL;
     loglevel = test_loglevel;
     if (empty)
-      empty->base_pt.y = NAN;
+      empty->base_pt.y = (double)NAN;
     error = empty ? dwg_dynblock_move_to_origin (empty) : 0;
     loglevel = test_loglevel;
     CHECK (empty && error == REFUSED (DWG_ERR_VALUEOUTOFBOUNDS)
