@@ -1728,7 +1728,10 @@ visibility_of (const Dwg_Data *dwg, const BITCODE_RLL blk)
 static BITCODE_RLL
 node_handle (const Dwg_Data *dwg, const BITCODE_RLL blk, const BITCODE_BL i)
 {
-  const Dwg_Object *obj = node_object (dwg, graph_of (dwg, blk), i);
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  const Dwg_Object *obj = graph && graph->nodes && i < graph->num_nodes
+                              ? node_object (dwg, graph, i)
+                              : NULL;
   return obj ? obj->handle.value : 0;
 }
 
@@ -1896,7 +1899,8 @@ test_visibility_states (Dwg_Data *src)
   error = write_dwg (WRITTEN_VISIBILITY, dwg);
   CHECK (error < DWG_ERR_CRITICAL, "visibility states: written (0x%x)",
          error);
-  error = read_dwg (WRITTEN_VISIBILITY, &back);
+  error = error < DWG_ERR_CRITICAL ? read_dwg (WRITTEN_VISIBILITY, &back)
+                                   : error;
   CHECK (error < DWG_ERR_CRITICAL, "visibility states: read back (0x%x)",
          error);
   if (error < DWG_ERR_CRITICAL)
