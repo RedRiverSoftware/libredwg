@@ -274,6 +274,12 @@ dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj)
   return definition_graph (dwg, obj);
 }
 
+BITCODE_RLL
+dynblock_btag_definition (const Dwg_Data *dwg, const Dwg_Object *obj)
+{
+  return btag_definition (dwg, obj);
+}
+
 static int
 check_version (const Dwg_Data *dwg, char *reason, const size_t reason_size)
 {

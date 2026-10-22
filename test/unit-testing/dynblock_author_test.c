@@ -12,16 +12,18 @@
 /*****************************************************************************/
 
 /* dwg_dynblock_add_linear (), dwg_dynblock_add_stretch (),
-   dwg_dynblock_add_move () and dwg_dynblock_copy_entities (). A box block
-   built with the add API gets a Width that stretches its right side and
-   moves its caption by half the change, as a block is laid out at a
-   chosen width: the graph, its nodes and edges and the elements are as
-   AutoCAD's Block Editor stores them (test-data/2004/Dynblocks.dwg's
-   Window has the same parameter, grip and stretch); the evaluator
-   evaluates the block, placements of it check, and a written r2004 file
-   reads back the same. The blocks of test-data/2004/Dynblocks.dwg that
-   AutoCAD made dynamic get a Width too, and their entities copy into
-   other documents. */
+   dwg_dynblock_add_move (), dwg_dynblock_copy_entities () and
+   dwg_dynblock_move_to_origin (). A box block built with the add API gets
+   a Width that stretches its right side and moves its caption by half the
+   change, as a block is laid out at a chosen width: the graph, its nodes
+   and edges and the elements are as AutoCAD's Block Editor stores them
+   (test-data/2004/Dynblocks.dwg's Window has the same parameter, grip and
+   stretch); the evaluator evaluates the block, placements of it check, and
+   a written r2004 file reads back the same. The blocks of
+   test-data/2004/Dynblocks.dwg that AutoCAD made dynamic get a Width too,
+   and their entities copy into other documents. Blocks whose base point
+   isn't the origin, AutoCAD's among them, move there with their
+   parameters, grips and actions, and evaluate as before. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -3723,6 +3725,1067 @@ test_copy_turned_over (void)
   return failures;
 }
 
+/*--------------------------------------------------------------------------------
+ * The base point at the origin
+ */
+
+#define WRITTEN_ORIGIN "dynblock_author_test_origin.dwg"
+#define WRITTEN_ORIGIN_MS "dynblock_author_test_origin_ms.dwg"
+#define WRITTEN_ORIGIN_READ "dynblock_author_test_origin_read.dwg"
+#define WRITTEN_ORIGIN_READ2 "dynblock_author_test_origin_read2.dwg"
+
+/* Where the blocks of these tests have their base point. */
+static const BITCODE_3BD origin_base = { 4, -3, 0 };
+
+/* Whether point (bx, by) is point (ax, ay) moved by (dx, dy). */
+static int
+moved_2d (const double ax, const double ay, const double bx,
+          const double by, const double dx, const double dy)
+{
+  return near (bx, ax + dx) && near (by, ay + dy);
+}
+
+/* Whether point b is point a moved by (dx, dy), at a's height. */
+static int
+moved_3d (const BITCODE_3BD *a, const BITCODE_3BD *b, const double dx,
+          const double dy)
+{
+  return moved_2d (a->x, a->y, b->x, b->y, dx, dy) && near (b->z, a->z);
+}
+
+/* Whether TEXT, ATTDEF or ATTRIB q is p moved by (dx, dy): its insertion
+   point, and its alignment point when it isn't left on its baseline, which
+   else stays. */
+#define TEXT_MOVED(p, q, dx, dy)                                              \
+  (moved_2d ((p)->ins_pt.x, (p)->ins_pt.y, (q)->ins_pt.x, (q)->ins_pt.y,     \
+             dx, dy)                                                          \
+   && (p)->horiz_alignment == (q)->horiz_alignment                            \
+   && (p)->vert_alignment == (q)->vert_alignment                              \
+   && ((p)->horiz_alignment || (p)->vert_alignment                            \
+           ? moved_2d ((p)->alignment_pt.x, (p)->alignment_pt.y,              \
+                       (q)->alignment_pt.x, (q)->alignment_pt.y, dx, dy)      \
+           : moved_2d ((p)->alignment_pt.x, (p)->alignment_pt.y,              \
+                       (q)->alignment_pt.x, (q)->alignment_pt.y, 0.0, 0.0)))
+
+/* Whether entity b of dwg_b is entity a of dwg_a moved by (dx, dy), with
+   its size and its invisible flag as they were: a LINE, LWPOLYLINE,
+   CIRCLE, ARC, POINT, TEXT, ATTDEF, or INSERT with its ATTRIBs. */
+static int
+entity_moved (const Dwg_Data *dwg_a, const Dwg_Object *a,
+              const Dwg_Data *dwg_b, const Dwg_Object *b, const double dx,
+              const double dy)
+{
+  if (!a || !b || a->fixedtype != b->fixedtype
+      || a->tio.entity->invisible != b->tio.entity->invisible)
+    return 0;
+  switch (a->fixedtype)
+    {
+    case DWG_TYPE_LINE:
+      return moved_3d (&a->tio.entity->tio.LINE->start,
+                       &b->tio.entity->tio.LINE->start, dx, dy)
+             && moved_3d (&a->tio.entity->tio.LINE->end,
+                          &b->tio.entity->tio.LINE->end, dx, dy);
+    case DWG_TYPE_LWPOLYLINE:
+      {
+        const Dwg_Entity_LWPOLYLINE *p = a->tio.entity->tio.LWPOLYLINE;
+        const Dwg_Entity_LWPOLYLINE *q = b->tio.entity->tio.LWPOLYLINE;
+        if (p->num_points != q->num_points)
+          return 0;
+        for (BITCODE_BL i = 0; i < p->num_points; i++)
+          if (!moved_2d (p->points[i].x, p->points[i].y, q->points[i].x,
+                         q->points[i].y, dx, dy))
+            return 0;
+        return 1;
+      }
+    case DWG_TYPE_CIRCLE:
+      return moved_3d (&a->tio.entity->tio.CIRCLE->center,
+                       &b->tio.entity->tio.CIRCLE->center, dx, dy)
+             && a->tio.entity->tio.CIRCLE->radius
+                    == b->tio.entity->tio.CIRCLE->radius;
+    case DWG_TYPE_ARC:
+      {
+        const Dwg_Entity_ARC *p = a->tio.entity->tio.ARC;
+        const Dwg_Entity_ARC *q = b->tio.entity->tio.ARC;
+        return moved_3d (&p->center, &q->center, dx, dy)
+               && p->radius == q->radius && p->start_angle == q->start_angle
+               && p->end_angle == q->end_angle;
+      }
+    case DWG_TYPE_POINT:
+      {
+        const Dwg_Entity_POINT *p = a->tio.entity->tio.POINT;
+        const Dwg_Entity_POINT *q = b->tio.entity->tio.POINT;
+        return moved_2d (p->x, p->y, q->x, q->y, dx, dy) && near (q->z, p->z);
+      }
+    case DWG_TYPE_TEXT:
+      return TEXT_MOVED (a->tio.entity->tio.TEXT, b->tio.entity->tio.TEXT, dx,
+                         dy);
+    case DWG_TYPE_ATTDEF:
+      return TEXT_MOVED (a->tio.entity->tio.ATTDEF,
+                         b->tio.entity->tio.ATTDEF, dx, dy);
+    case DWG_TYPE_INSERT:
+      {
+        const Dwg_Entity_INSERT *p = a->tio.entity->tio.INSERT;
+        const Dwg_Entity_INSERT *q = b->tio.entity->tio.INSERT;
+        if (!moved_3d (&p->ins_pt, &q->ins_pt, dx, dy)
+            || p->num_owned != q->num_owned)
+          return 0;
+        for (BITCODE_BL i = 0; i < p->num_owned; i++)
+          {
+            const Dwg_Object *pa = object (dwg_a, ref (p->attribs[i]));
+            const Dwg_Object *qa = object (dwg_b, ref (q->attribs[i]));
+            if (!pa || !qa || pa->fixedtype != DWG_TYPE_ATTRIB
+                || qa->fixedtype != DWG_TYPE_ATTRIB
+                || !TEXT_MOVED (pa->tio.entity->tio.ATTRIB,
+                                qa->tio.entity->tio.ATTRIB, dx, dy))
+              return 0;
+          }
+        return 1;
+      }
+    default:
+      return 0;
+    }
+}
+
+/* Whether block b of dwg_b holds the entities of block a of dwg_a, in its
+   order, each moved by (dx, dy). */
+static int
+entities_moved (const Dwg_Data *dwg_a, const Dwg_Object_BLOCK_HEADER *a,
+                const Dwg_Data *dwg_b, const Dwg_Object_BLOCK_HEADER *b,
+                const double dx, const double dy)
+{
+  if (!a || !b || !a->num_owned || a->num_owned != b->num_owned)
+    return 0;
+  for (BITCODE_BL i = 0; i < a->num_owned; i++)
+    if (!entity_moved (dwg_a, nth_entity (dwg_a, a, i), dwg_b,
+                       nth_entity (dwg_b, b, i), dx, dy))
+      return 0;
+  return 1;
+}
+
+/* Whether graph node b is graph node a moved by (dx, dy): a linear or
+   visibility parameter's points, a grip's location, an action's display
+   location and a stretch action's frame, with a linear parameter's
+   distance, a grip's orientation, an action's offsets and a grip location
+   component's expression and value as they were. */
+static int
+node_moved (const Dwg_Object *a, const Dwg_Object *b, const double dx,
+            const double dy)
+{
+  if (!a || !b || a->fixedtype != b->fixedtype)
+    return 0;
+  switch (a->fixedtype)
+    {
+    case DWG_TYPE_BLOCKLINEARPARAMETER:
+      {
+        const Dwg_Object_BLOCKLINEARPARAMETER *p
+            = a->tio.object->tio.BLOCKLINEARPARAMETER;
+        const Dwg_Object_BLOCKLINEARPARAMETER *q
+            = b->tio.object->tio.BLOCKLINEARPARAMETER;
+        return moved_3d (&p->def_basept, &q->def_basept, dx, dy)
+               && moved_3d (&p->def_endpt, &q->def_endpt, dx, dy)
+               && p->distance == q->distance;
+      }
+    case DWG_TYPE_BLOCKVISIBILITYPARAMETER:
+      return moved_3d (&a->tio.object->tio.BLOCKVISIBILITYPARAMETER->def_pt,
+                       &b->tio.object->tio.BLOCKVISIBILITYPARAMETER->def_pt,
+                       dx, dy);
+    case DWG_TYPE_BLOCKLINEARGRIP:
+      {
+        const Dwg_Object_BLOCKLINEARGRIP *p
+            = a->tio.object->tio.BLOCKLINEARGRIP;
+        const Dwg_Object_BLOCKLINEARGRIP *q
+            = b->tio.object->tio.BLOCKLINEARGRIP;
+        return moved_3d (&p->bg_location, &q->bg_location, dx, dy)
+               && moved_3d (&p->orientation, &q->orientation, 0.0, 0.0);
+      }
+    case DWG_TYPE_BLOCKVISIBILITYGRIP:
+      return moved_3d (&a->tio.object->tio.BLOCKVISIBILITYGRIP->bg_location,
+                       &b->tio.object->tio.BLOCKVISIBILITYGRIP->bg_location,
+                       dx, dy);
+    case DWG_TYPE_BLOCKMOVEACTION:
+      {
+        const Dwg_Object_BLOCKMOVEACTION *p
+            = a->tio.object->tio.BLOCKMOVEACTION;
+        const Dwg_Object_BLOCKMOVEACTION *q
+            = b->tio.object->tio.BLOCKMOVEACTION;
+        return moved_3d (&p->display_location, &q->display_location, dx, dy)
+               && p->action_offset_x == q->action_offset_x
+               && p->action_offset_y == q->action_offset_y;
+      }
+    case DWG_TYPE_BLOCKSTRETCHACTION:
+      {
+        const Dwg_Object_BLOCKSTRETCHACTION *p
+            = a->tio.object->tio.BLOCKSTRETCHACTION;
+        const Dwg_Object_BLOCKSTRETCHACTION *q
+            = b->tio.object->tio.BLOCKSTRETCHACTION;
+        if (!moved_3d (&p->display_location, &q->display_location, dx, dy)
+            || p->action_offset_x != q->action_offset_x
+            || p->action_offset_y != q->action_offset_y
+            || p->num_pts != q->num_pts || !p->num_pts)
+          return 0;
+        for (BITCODE_BL i = 0; i < p->num_pts; i++)
+          if (!moved_2d (p->pts[i].x, p->pts[i].y, q->pts[i].x, q->pts[i].y,
+                         dx, dy))
+            return 0;
+        return 1;
+      }
+    case DWG_TYPE_BLOCKGRIPLOCATIONCOMPONENT:
+      {
+        const Dwg_Object_BLOCKGRIPLOCATIONCOMPONENT *p
+            = a->tio.object->tio.BLOCKGRIPLOCATIONCOMPONENT;
+        const Dwg_Object_BLOCKGRIPLOCATIONCOMPONENT *q
+            = b->tio.object->tio.BLOCKGRIPLOCATIONCOMPONENT;
+        return p->grip_type == q->grip_type && p->grip_expr && q->grip_expr
+               && !strcmp (p->grip_expr, q->grip_expr)
+               && p->evalexpr.value_code == q->evalexpr.value_code
+               && (p->evalexpr.value_code != 40
+                   || p->evalexpr.value.num40 == q->evalexpr.value.num40);
+      }
+    default:
+      return 0;
+    }
+}
+
+/* Whether the graph of block blk_b of dwg_b has the nodes of block blk_a's
+   of dwg_a, in their order, each moved by (dx, dy). */
+static int
+graph_moved (const Dwg_Data *dwg_a, const BITCODE_RLL blk_a,
+             const Dwg_Data *dwg_b, const BITCODE_RLL blk_b, const double dx,
+             const double dy)
+{
+  const Dwg_Object_EVALUATION_GRAPH *ga = graph_of (dwg_a, blk_a);
+  const Dwg_Object_EVALUATION_GRAPH *gb = graph_of (dwg_b, blk_b);
+  if (!ga || !gb || !ga->num_nodes || ga->num_nodes != gb->num_nodes)
+    return 0;
+  for (BITCODE_BL i = 0; i < ga->num_nodes; i++)
+    if (!node_moved (node_object (dwg_a, ga, i), node_object (dwg_b, gb, i),
+                     dx, dy))
+      return 0;
+  return 1;
+}
+
+static int
+is_origin (const BITCODE_3BD *pt)
+{
+  return pt->x == 0.0 && pt->y == 0.0 && pt->z == 0.0;
+}
+
+/* A drawing whose block BOX holds the box, with a centred attribute
+   definition NAME and an INSERT of block MARK with a centred ATTRIB, and
+   the box's Width, whose move takes NAME and the INSERT too. BOX has its
+   base point at origin_base. Its handle goes into *blkp, those of the
+   box's entities into h. */
+static Dwg_Data *
+origin_box (BITCODE_RLL *blkp, BITCODE_RLL *h)
+{
+  Dwg_Data *dwg = new_document ();
+  const dwg_point_3d o = { 0, 0, 0 }, o2 = { 1, 1, 0 }, at = { 8, -2, 0 },
+                     mk = { 14, -4, 0 }, tag = { 13, -6, 0 };
+  Dwg_Object_BLOCK_HEADER *mark = dwg ? dwg_add_BLOCK_HEADER (dwg, "MARK")
+                                      : NULL;
+  Dwg_Entity_ATTDEF *att = NULL;
+  Dwg_Entity_INSERT *ins = NULL;
+  Dwg_Entity_ATTRIB *attrib = NULL;
+  Dwg_Object_BLOCKSTRETCHACTION *s;
+  Dwg_Object_BLOCKMOVEACTION *m;
+  BITCODE_RLL more[2];
+  int error = 0;
+  *blkp = 0;
+  if (mark && dwg_add_BLOCK (mark, "MARK") && dwg_add_LINE (mark, &o, &o2)
+      && dwg_add_ENDBLK (mark))
+    *blkp = add_box_block (dwg, "BOX", h);
+  if (*blkp)
+    {
+      att = dwg_add_ATTDEF (block_header (dwg, *blkp), 1.0, 0, "Prompt", &at,
+                            "NAME", "X");
+      ins = dwg_add_INSERT (block_header (dwg, *blkp), &mk, "MARK", 1, 1, 1,
+                            0);
+      attrib = ins ? dwg_add_ATTRIB (ins, 1.0, 0, &tag, "TAG", "value")
+                   : NULL;
+    }
+  loglevel = test_loglevel;
+  if (!att || !attrib)
+    {
+      if (dwg)
+        free_document (dwg);
+      return NULL;
+    }
+  att->width_factor = 1.0;
+  att->horiz_alignment = 1;
+  att->alignment_pt.x = 10.0;
+  att->alignment_pt.y = -2.0;
+  attrib->width_factor = 1.0;
+  attrib->horiz_alignment = 1;
+  attrib->alignment_pt.x = 14.0;
+  attrib->alignment_pt.y = -6.0;
+  more[0] = handle_of (dwg, att);
+  more[1] = handle_of (dwg, ins);
+  if (!add_width (dwg, *blkp, h, more, 2, &s, &m, &error) || !s || !m
+      || error)
+    {
+      free_document (dwg);
+      return NULL;
+    }
+  block_header (dwg, *blkp)->base_pt = origin_base;
+  return dwg;
+}
+
+/* dwg_dynblock_move_to_origin () on a block built with the add API, its
+   base point at (4, -3): its entities, with the ATTRIB of an INSERT, and
+   its Width's parameter, grip and actions move by (-4, 3), and its base
+   point becomes the origin. It evaluates to the same shapes moved, a
+   placement of it made after checks against its representation block, and
+   a written r2004 file reads back the same. Called again, it changes
+   nothing. */
+static int
+test_origin_block (void)
+{
+  BITCODE_RLL h[BOX_ENTITIES], rh[BOX_ENTITIES], blk = 0, ref_blk = 0;
+  Dwg_Data *ref_dwg = origin_box (&ref_blk, rh);
+  Dwg_Data *dwg = origin_box (&blk, h);
+  const double dx = -origin_base.x, dy = -origin_base.y;
+  Dwg_DynBlock_Check_Report *report;
+  Dwg_Data back;
+  int error, failures = 0;
+  if (!ref_dwg || !dwg || blk != ref_blk)
+    {
+      FAIL ("origin: building the blocks failed");
+      if (ref_dwg)
+        free_document (ref_dwg);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  error = dwg_dynblock_move_to_origin (block_header (dwg, blk));
+  loglevel = test_loglevel;
+  CHECK (!error && is_origin (&block_header (dwg, blk)->base_pt),
+         "origin: moved, the base point at the origin (0x%x)", error);
+  CHECK (entities_moved (ref_dwg, block_header (ref_dwg, ref_blk), dwg,
+                         block_header (dwg, blk), dx, dy),
+         "origin: the entities, the INSERT's ATTRIB and the centred "
+         "alignment points moved by (%g, %g)",
+         dx, dy);
+  CHECK (graph_moved (ref_dwg, ref_blk, dwg, blk, dx, dy),
+         "origin: the parameter, grip and actions moved, the grip's "
+         "orientation, the offsets and the grip locations kept");
+  {
+    // the Width: parameter, grip, two locations, stretch, move
+    const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+    const Dwg_Object *p = node_object (dwg, graph, 0);
+    const Dwg_Object *g = node_object (dwg, graph, 1);
+    const Dwg_Object *st = node_object (dwg, graph, 4);
+    const Dwg_Object *top = nth_entity (dwg, block_header (dwg, blk), TOP);
+    CHECK (p && p->fixedtype == DWG_TYPE_BLOCKLINEARPARAMETER && g
+               && g->fixedtype == DWG_TYPE_BLOCKLINEARGRIP && st
+               && st->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION && top
+               && top->fixedtype == DWG_TYPE_LINE
+               && near (p->tio.object->tio.BLOCKLINEARPARAMETER->def_basept.x,
+                        -4.0)
+               && near (p->tio.object->tio.BLOCKLINEARPARAMETER->def_basept.y,
+                        3.0)
+               && near (p->tio.object->tio.BLOCKLINEARPARAMETER->def_endpt.x,
+                        16.0)
+               && near (g->tio.object->tio.BLOCKLINEARGRIP->bg_location.x,
+                        16.0)
+               && near (g->tio.object->tio.BLOCKLINEARGRIP->bg_location.y,
+                        3.0)
+               // the frame's corners, top-right first, as AutoCAD stores them
+               && near (st->tio.object->tio.BLOCKSTRETCHACTION->pts[0].x,
+                        21.0)
+               && near (st->tio.object->tio.BLOCKSTRETCHACTION->pts[0].y,
+                        8.0)
+               && near (st->tio.object->tio.BLOCKSTRETCHACTION->pts[1].x,
+                        11.0)
+               && near (st->tio.object->tio.BLOCKSTRETCHACTION->pts[1].y,
+                        -12.0)
+               && near (top->tio.entity->tio.LINE->start.x, -4.0)
+               && near (top->tio.entity->tio.LINE->start.y, 3.0),
+           "origin: the Width from (-4, 3) to (16, 3), its grip at (16, 3), "
+           "the frame from (21, 8) to (11, -12), the top from (-4, 3)");
+  }
+  {
+    const Dwg_DynValue v = value ("Width", 40.0);
+    int ref_error = 0;
+    Dwg_Object_BLOCK_HEADER *ref_rep = dwg_dynblock_evaluate (
+        block_header (ref_dwg, ref_blk), &v, 1, &ref_error);
+    Dwg_Object_BLOCK_HEADER *rep
+        = dwg_dynblock_evaluate (block_header (dwg, blk), &v, 1, &error);
+    loglevel = test_loglevel;
+    CHECK (ref_rep && rep && !ref_error && !error
+               && entities_moved (ref_dwg, ref_rep, dwg, rep, dx, dy),
+           "origin: evaluated at Width 40, the same shapes moved (0x%x, "
+           "0x%x)",
+           ref_error, error);
+  }
+  {
+    const BITCODE_3BD at = { 100, 50, 0 };
+    const Dwg_DynValue v = value ("Width", 33.0);
+    Dwg_Entity_INSERT *ins
+        = dwg_dynblock_insert (model_space (dwg), block_header (dwg, blk),
+                               &at, 1.0, 0.0, &v, 1, NULL, 0, &error);
+    loglevel = test_loglevel;
+    CHECK (ins && !error, "origin: placed at Width 33 (0x%x)", error);
+  }
+  error = dwg_dynblock_move_to_origin (block_header (dwg, blk));
+  loglevel = test_loglevel;
+  CHECK (!error
+             && entities_moved (ref_dwg, block_header (ref_dwg, ref_blk), dwg,
+                                block_header (dwg, blk), dx, dy)
+             && graph_moved (ref_dwg, ref_blk, dwg, blk, dx, dy),
+         "origin: called again, with the base point at the origin, nothing "
+         "changes (0x%x)",
+         error);
+  error = write_dwg (WRITTEN_ORIGIN, dwg);
+  CHECK (error < DWG_ERR_CRITICAL, "origin: written (0x%x)", error);
+  error = read_dwg (WRITTEN_ORIGIN, &back);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin: reading back failed (0x%x)", error);
+      free_dwg (&back);
+      free_document (ref_dwg);
+      free_document (dwg);
+      return failures + 1;
+    }
+  CHECK (block_header (&back, blk)
+             && is_origin (&block_header (&back, blk)->base_pt)
+             && entities_moved (dwg, block_header (dwg, blk), &back,
+                                block_header (&back, blk), 0.0, 0.0)
+             && graph_moved (dwg, blk, &back, blk, 0.0, 0.0)
+             && same_graph (dwg, blk, &back, blk),
+         "origin: read back the same, the base point at the origin");
+  report = dwg_dynblock_check (&back, 1e-9);
+  loglevel = test_loglevel;
+  CHECK (report && report->num_checks == 1 && report->num_match == 1,
+         "origin: the placement at Width 33 checks against its "
+         "representation block");
+  dwg_dynblock_free_check_report (report);
+  free_dwg (&back);
+  free_document (ref_dwg);
+  free_document (dwg);
+  // kept to look at when a check failed
+  if (!failures)
+    unlink (WRITTEN_ORIGIN);
+  return failures;
+}
+
+/* box_drawing (), its model space with the INSBASE (100, 200), given a
+   Width from (100, 200) to (120, 200) that stretches its LINEs, and moves
+   its ATTDEF and its INSERT, with an ATTRIB, by half. */
+static Dwg_Data *
+origin_drawing (BITCODE_RLL *h)
+{
+  Dwg_Data *dwg = box_drawing (h);
+  const BITCODE_3BD b = { 100, 200, 0 }, e = { 120, 200, 0 };
+  const BITCODE_2RD f1 = { 115, 205 }, f2 = { 125, 185 };
+  const dwg_point_3d tag = { 108, 193, 0 };
+  Dwg_Object_BLOCKLINEARPARAMETER *param = NULL;
+  Dwg_Object *mi;
+  int error = 0;
+  if (!dwg)
+    return NULL;
+  mi = object (dwg, h[3]);
+  if (mi && dwg_add_ATTRIB (mi->tio.entity->tio.INSERT, 1.0, 0, &tag, "TAG",
+                            "value"))
+    param = dwg_dynblock_add_linear (model_space (dwg), "Width", &b, &e,
+                                     &error);
+  if (param && !error
+      && (!dwg_dynblock_add_stretch (model_space (dwg), param, &f1, &f2, h, 2,
+                                     &error)
+          || error
+          || !dwg_dynblock_add_move (model_space (dwg), param, &h[2], 2, 0.5,
+                                     &error)))
+    param = NULL;
+  loglevel = test_loglevel;
+  if (!param || error)
+    {
+      free_document (dwg);
+      return NULL;
+    }
+  return dwg;
+}
+
+/* Model space, its INSBASE at (100, 200): its entities and its Width move
+   by (-100, -200), INSBASE becomes the origin, the drawing evaluates to the
+   same shapes moved, and a written r2004 file reads back the same. */
+static int
+test_origin_model_space (void)
+{
+  BITCODE_RLL h[4], rh[4], ms, ref_ms;
+  Dwg_Data *ref_dwg = origin_drawing (rh);
+  Dwg_Data *dwg = origin_drawing (h);
+  Dwg_Data back;
+  int error, failures = 0;
+  if (!ref_dwg || !dwg)
+    {
+      FAIL ("origin, model space: building the drawings failed");
+      if (ref_dwg)
+        free_document (ref_dwg);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  ms = dwg_model_space_object (dwg)->handle.value;
+  ref_ms = dwg_model_space_object (ref_dwg)->handle.value;
+  error = dwg_dynblock_move_to_origin (model_space (dwg));
+  loglevel = test_loglevel;
+  CHECK (!error && is_origin (&dwg->header_vars.INSBASE)
+             && is_origin (&model_space (dwg)->base_pt),
+         "origin, model space: moved, INSBASE at the origin (0x%x)", error);
+  CHECK (entities_moved (ref_dwg, model_space (ref_dwg), dwg,
+                         model_space (dwg), -100.0, -200.0)
+             && graph_moved (ref_dwg, ref_ms, dwg, ms, -100.0, -200.0),
+         "origin, model space: the entities, the INSERT's ATTRIB and the "
+         "Width moved by (-100, -200)");
+  {
+    const Dwg_Object *l1 = object (dwg, h[0]);
+    const Dwg_Object *p = node_object (dwg, graph_of (dwg, ms), 0);
+    CHECK (l1 && l1->fixedtype == DWG_TYPE_LINE && p
+               && p->fixedtype == DWG_TYPE_BLOCKLINEARPARAMETER
+               && is_origin (&l1->tio.entity->tio.LINE->start)
+               && is_origin (
+                   &p->tio.object->tio.BLOCKLINEARPARAMETER->def_basept),
+           "origin, model space: the first LINE and the Width start at the "
+           "origin");
+  }
+  {
+    const Dwg_DynValue v = value ("Width", 30.0);
+    int ref_error = 0;
+    Dwg_Object_BLOCK_HEADER *ref_rep = dwg_dynblock_evaluate (
+        model_space (ref_dwg), &v, 1, &ref_error);
+    Dwg_Object_BLOCK_HEADER *rep
+        = dwg_dynblock_evaluate (model_space (dwg), &v, 1, &error);
+    loglevel = test_loglevel;
+    CHECK (ref_rep && rep && !ref_error && !error
+               && entities_moved (ref_dwg, ref_rep, dwg, rep, -100.0, -200.0),
+           "origin, model space: evaluated at Width 30, the same shapes "
+           "moved (0x%x, 0x%x)",
+           ref_error, error);
+  }
+  error = write_dwg (WRITTEN_ORIGIN_MS, dwg);
+  CHECK (error < DWG_ERR_CRITICAL, "origin, model space: written (0x%x)",
+         error);
+  error = read_dwg (WRITTEN_ORIGIN_MS, &back);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, model space: reading back failed (0x%x)", error);
+      free_dwg (&back);
+      free_document (ref_dwg);
+      free_document (dwg);
+      return failures + 1;
+    }
+  CHECK (is_origin (&back.header_vars.INSBASE)
+             && entities_moved (dwg, model_space (dwg), &back,
+                                model_space (&back), 0.0, 0.0)
+             && graph_moved (dwg, ms, &back,
+                             dwg_model_space_object (&back)->handle.value,
+                             0.0, 0.0),
+         "origin, model space: read back the same, INSBASE at the origin");
+  free_dwg (&back);
+  free_document (ref_dwg);
+  free_document (dwg);
+  if (!failures)
+    unlink (WRITTEN_ORIGIN_MS);
+  return failures;
+}
+
+/* Definition def of the fixture, which AutoCAD made, copied into two new
+   documents, each with its base point at origin_base: in one, moved to the
+   origin with its parameters, grips and actions, it evaluates at values to
+   the other's shapes moved. */
+static int
+origin_autocad (Dwg_Data *src, const BITCODE_RLL def,
+                const Dwg_DynValue *values, const BITCODE_BL num_values,
+                const char *what)
+{
+  Dwg_Data *ref_dwg = new_document ();
+  Dwg_Data *dwg = new_document ();
+  const double dx = -origin_base.x, dy = -origin_base.y;
+  Dwg_Object_BLOCK_HEADER *a = NULL, *b = NULL;
+  BITCODE_RLL ha, hb;
+  int error = 0, ref_error = 0, failures = 0;
+  if (ref_dwg && dwg)
+    {
+      a = dwg_dynblock_copy_block (ref_dwg, src, block_header (src, def),
+                                   &ref_error);
+      b = dwg_dynblock_copy_block (dwg, src, block_header (src, def), &error);
+    }
+  loglevel = test_loglevel;
+  if (!a || !b || ref_error >= DWG_ERR_CRITICAL || error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("%s: copying it failed (0x%x)", what, error | ref_error);
+      if (ref_dwg)
+        free_document (ref_dwg);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  ha = handle_of (ref_dwg, a);
+  hb = handle_of (dwg, b);
+  a->base_pt = origin_base;
+  b->base_pt = origin_base;
+  error = dwg_dynblock_move_to_origin (b);
+  loglevel = test_loglevel;
+  CHECK (!error && is_origin (&block_header (dwg, hb)->base_pt)
+             && entities_moved (ref_dwg, block_header (ref_dwg, ha), dwg,
+                                block_header (dwg, hb), dx, dy)
+             && graph_moved (ref_dwg, ha, dwg, hb, dx, dy),
+         "%s: moved to the origin, with AutoCAD's parameters, grips and "
+         "actions (0x%x)",
+         what, error);
+  {
+    Dwg_Object_BLOCK_HEADER *ref_rep = dwg_dynblock_evaluate (
+        block_header (ref_dwg, ha), values, num_values, &ref_error);
+    Dwg_Object_BLOCK_HEADER *rep = dwg_dynblock_evaluate (
+        block_header (dwg, hb), values, num_values, &error);
+    loglevel = test_loglevel;
+    CHECK (ref_rep && rep && !ref_error && !error
+               && entities_moved (ref_dwg, ref_rep, dwg, rep, dx, dy),
+           "%s: evaluated, the same shapes moved (0x%x, 0x%x)", what,
+           ref_error, error);
+  }
+  free_document (ref_dwg);
+  free_document (dwg);
+  return failures;
+}
+
+/* The fixture's Trees, with AutoCAD's visibility parameter, evaluated in
+   another state, and Window, with two linear parameters and three
+   stretches, at another width and height. */
+static int
+test_origin_autocad (Dwg_Data *src)
+{
+  Dwg_DynValue trees, window[2];
+  int failures = 0;
+  trees = value ("Type (view)", 0.0);
+  trees.state = (char *)"Shrub (Plan)";
+  window[0] = value ("Window Width", 48.0);
+  window[1] = value ("Window Height", 24.0);
+  failures += origin_autocad (src, TREES, &trees, 1, "origin, Trees");
+  failures += origin_autocad (src, WINDOW, window, 2, "origin, Window");
+  return failures;
+}
+
+/* The number of stretch actions of the graph of block blk that have raw
+   bits, which the encoder writes as they were read. */
+static int
+raw_stretches (const Dwg_Data *dwg, const BITCODE_RLL blk)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  int n = 0;
+  for (BITCODE_BL i = 0; graph && i < graph->num_nodes; i++)
+    {
+      const Dwg_Object *obj = node_object (dwg, graph, i);
+      n += obj && obj->fixedtype == DWG_TYPE_BLOCKSTRETCHACTION
+           && obj->num_unknown_bits && obj->unknown_bits;
+    }
+  return n;
+}
+
+/* The fixture's Window, copied into a new document with its base point at
+   origin_base, written and read back: its three stretch actions are read
+   with their raw bits, which the encoder would write as they were read.
+   Moved to the origin, they lose them, and the file written then reads
+   back with the stretch frames moved, as the rest. */
+static int
+test_origin_read_from_dwg (Dwg_Data *src)
+{
+  Dwg_Data *dwg = new_document ();
+  Dwg_Data before, moved, after;
+  Dwg_Object_BLOCK_HEADER *w = NULL;
+  const double dx = -origin_base.x, dy = -origin_base.y;
+  BITCODE_RLL blk;
+  int error = 0, failures = 0, raw;
+  if (dwg)
+    w = dwg_dynblock_copy_block (dwg, src, block_header (src, WINDOW),
+                                 &error);
+  loglevel = test_loglevel;
+  if (!w || error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: copying Window failed (0x%x)", error);
+      if (dwg)
+        free_document (dwg);
+      return 1;
+    }
+  blk = handle_of (dwg, w);
+  w->base_pt = origin_base;
+  error = write_dwg (WRITTEN_ORIGIN_READ, dwg);
+  free_document (dwg);
+  memset (&before, 0, sizeof (before));
+  memset (&moved, 0, sizeof (moved));
+  memset (&after, 0, sizeof (after));
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ, &before);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ, &moved);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: writing or reading Window failed (0x%x)", error);
+      free_dwg (&before);
+      free_dwg (&moved);
+      return 1;
+    }
+  raw = raw_stretches (&moved, blk);
+  CHECK (raw == 3, "origin, read: Window's 3 stretch actions read with "
+                   "their raw bits (%d)",
+         raw);
+  error = dwg_dynblock_move_to_origin (block_header (&moved, blk));
+  loglevel = test_loglevel;
+  raw = raw_stretches (&moved, blk);
+  CHECK (!error && !raw,
+         "origin, read: moved, the stretch actions' raw bits dropped (0x%x, "
+         "%d left)",
+         error, raw);
+  error = write_dwg (WRITTEN_ORIGIN_READ2, &moved);
+  if (error < DWG_ERR_CRITICAL)
+    error = read_dwg (WRITTEN_ORIGIN_READ2, &after);
+  if (error >= DWG_ERR_CRITICAL)
+    {
+      FAIL ("origin, read: writing or reading the moved Window failed "
+            "(0x%x)",
+            error);
+      free_dwg (&before);
+      free_dwg (&moved);
+      free_dwg (&after);
+      return failures + 1;
+    }
+  CHECK (is_origin (&block_header (&after, blk)->base_pt)
+             && entities_moved (&before, block_header (&before, blk), &after,
+                                block_header (&after, blk), dx, dy)
+             && graph_moved (&before, blk, &after, blk, dx, dy),
+         "origin, read: written, Window reads back moved, the stretch frames "
+         "too");
+  free_dwg (&before);
+  free_dwg (&moved);
+  free_dwg (&after);
+  if (!failures)
+    {
+      unlink (WRITTEN_ORIGIN_READ);
+      unlink (WRITTEN_ORIGIN_READ2);
+    }
+  return failures;
+}
+
+/* What test_origin_refusals () does to a block before calling
+   dwg_dynblock_move_to_origin () on it. */
+enum
+{
+  ORIGIN_PLACED,     /* an INSERT of it at its defaults */
+  ORIGIN_PLACED_33,  /* a placement at Width 33: a representation block */
+  ORIGIN_POINT,      /* a POINT, which the move doesn't take */
+  ORIGIN_POINT_AT_0, /* the same, with the base point at the origin */
+  ORIGIN_NAN,        /* a base point that isn't finite */
+  ORIGIN_FAR_GRIP,   /* a grip the move takes beyond a double */
+  ORIGIN_FAR_LINE,   /* a LINE the move takes beyond a double */
+  ORIGIN_TWICE,      /* an entity listed twice */
+  ORIGIN_RAISED,     /* a base point above the plane of its TEXT */
+  ORIGIN_MINSERT,    /* a MINSERT of it */
+  ORIGIN_NODE_TWICE, /* a graph element two nodes name */
+  ORIGIN_ATTRIB_TWICE, /* an INSERT listing its ATTRIB twice */
+  ORIGIN_CASES
+};
+
+/* Does case c to the block blk of dwg that origin_box () made. */
+static int
+origin_case (Dwg_Data *dwg, const BITCODE_RLL blk, const int c)
+{
+  Dwg_Object_BLOCK_HEADER *b = block_header (dwg, blk);
+  const dwg_point_3d o = { 0, 0, 0 }, far1 = { 1e308, 0, 0 },
+                     far2 = { 1e308, 1, 0 };
+  int error = 0;
+  switch (c)
+    {
+    case ORIGIN_PLACED:
+      error = !dwg_add_INSERT_block (model_space (dwg), &o, b, 1, 1, 1, 0);
+      break;
+    case ORIGIN_PLACED_33:
+      {
+        const Dwg_DynValue v = value ("Width", 33.0);
+        int insert_error = 0;
+        error = !dwg_dynblock_insert (model_space (dwg), b, &origin_base, 1.0,
+                                      0.0, &v, 1, NULL, 0, &insert_error)
+                || insert_error;
+      }
+      break;
+    case ORIGIN_POINT:
+    case ORIGIN_POINT_AT_0:
+      error = !dwg_add_POINT (b, &o);
+      if (c == ORIGIN_POINT_AT_0)
+        memset (&block_header (dwg, blk)->base_pt, 0, sizeof (BITCODE_3BD));
+      break;
+    case ORIGIN_NAN:
+      b->base_pt.x = (double)NAN;
+      break;
+    case ORIGIN_FAR_GRIP:
+      node_object (dwg, graph_of (dwg, blk), 1)
+          ->tio.object->tio.BLOCKLINEARGRIP->bg_location.x
+          = 1e308;
+      b->base_pt.x = -1e308;
+      break;
+    case ORIGIN_FAR_LINE:
+      error = !dwg_add_LINE (b, &far1, &far2);
+      block_header (dwg, blk)->base_pt.x = -1e308;
+      break;
+    case ORIGIN_TWICE:
+      {
+        BITCODE_H *entities = (BITCODE_H *)realloc (
+            b->entities, (b->num_owned + 1) * sizeof (BITCODE_H));
+        if (!entities)
+          return 1;
+        b->entities = entities;
+        entities[b->num_owned]
+            = dwg_add_handleref (dwg, 4, ref (entities[0]), NULL);
+        b->num_owned++;
+      }
+      break;
+    case ORIGIN_RAISED:
+      b->base_pt.z = 2.0;
+      break;
+    case ORIGIN_MINSERT:
+      error = !dwg_add_MINSERT (model_space (dwg), &o, "BOX", 1, 1, 1, 0, 2,
+                                2, 1, 1);
+      break;
+    case ORIGIN_NODE_TWICE:
+      {
+        // the Width's grip, node 1, named by another node too
+        Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+        Dwg_EVAL_Node *nodes = (Dwg_EVAL_Node *)realloc (
+            graph->nodes, (graph->num_nodes + 1) * sizeof (Dwg_EVAL_Node));
+        if (!nodes)
+          return 1;
+        graph->nodes = nodes;
+        nodes[graph->num_nodes] = nodes[1];
+        nodes[graph->num_nodes].id = graph->num_nodes;
+        nodes[graph->num_nodes].evalexpr
+            = dwg_add_handleref (dwg, 3, ref (nodes[1].evalexpr), NULL);
+        graph->num_nodes++;
+      }
+      break;
+    case ORIGIN_ATTRIB_TWICE:
+      {
+        // the INSERT of MARK
+        Dwg_Entity_INSERT *ins = NULL;
+        BITCODE_H *attribs;
+        for (BITCODE_BL i = 0; i < b->num_owned; i++)
+          {
+            Dwg_Object *e = object (dwg, ref (b->entities[i]));
+            if (e && e->fixedtype == DWG_TYPE_INSERT)
+              ins = e->tio.entity->tio.INSERT;
+          }
+        if (!ins || !ins->num_owned || !ins->attribs)
+          return 1;
+        attribs = (BITCODE_H *)realloc (
+            ins->attribs, (ins->num_owned + 1) * sizeof (BITCODE_H));
+        if (!attribs)
+          return 1;
+        ins->attribs = attribs;
+        attribs[ins->num_owned]
+            = dwg_add_handleref (dwg, 4, ref (attribs[0]), NULL);
+        ins->num_owned++;
+      }
+      break;
+    default:
+      break;
+    }
+  loglevel = test_loglevel;
+  return error;
+}
+
+/* Whether block blk of dwg is as block blk of ref_dwg is: its base point,
+   its entities and its graph, as for a refusal, which changes nothing. */
+static int
+origin_unchanged (const Dwg_Data *ref_dwg, const Dwg_Data *dwg,
+                  const BITCODE_RLL blk)
+{
+  const Dwg_Object_BLOCK_HEADER *a = block_header (ref_dwg, blk);
+  const Dwg_Object_BLOCK_HEADER *b = block_header (dwg, blk);
+  return a && b
+         && !memcmp (&a->base_pt, &b->base_pt, sizeof (BITCODE_3BD))
+         && entities_moved (ref_dwg, a, dwg, b, 0.0, 0.0)
+         && graph_moved (ref_dwg, blk, dwg, blk, 0.0, 0.0);
+}
+
+/* The end point of the first node of the graph of block blk, a linear or
+   an alignment parameter, or NULL. */
+static const BITCODE_3BD *
+first_param_end (const Dwg_Data *dwg, const BITCODE_RLL blk)
+{
+  const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+  const Dwg_Object *obj
+      = graph && graph->num_nodes ? node_object (dwg, graph, 0) : NULL;
+  if (obj && obj->fixedtype == DWG_TYPE_BLOCKLINEARPARAMETER)
+    return &obj->tio.object->tio.BLOCKLINEARPARAMETER->def_endpt;
+  if (obj && obj->fixedtype == DWG_TYPE_BLOCKALIGNMENTPARAMETER)
+    return &obj->tio.object->tio.BLOCKALIGNMENTPARAMETER->def_endpt;
+  return NULL;
+}
+
+/* dwg_dynblock_move_to_origin () refuses, changing nothing: a NULL block; a
+   definition with placements (an INSERT, a MINSERT, or a representation
+   block); a POINT, or another entity the evaluator doesn't move; a base
+   point that isn't finite, or a move beyond what a double holds, of a grip
+   or of an entity; an entity, an ATTRIB or a graph element the move would
+   reach twice; a TEXT the move would take out of its plane; paper space; a
+   drawing other
+   than r2004; and a definition with a rotate action (the fixture's
+   Toilet), or with a scale action and a base point parameter (its Door),
+   whose stored points AutoCAD's files have only shown at the origin. A
+   block whose base point is the origin is left as it is, whatever it
+   holds. */
+static int
+test_origin_refusals (Dwg_Data *src)
+{
+  static const int expected[ORIGIN_CASES] = {
+    REFUSED (DWG_ERR_NOTYETSUPPORTED), REFUSED (DWG_ERR_NOTYETSUPPORTED),
+    REFUSED (DWG_ERR_NOTYETSUPPORTED), 0,
+    REFUSED (DWG_ERR_VALUEOUTOFBOUNDS), REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
+    REFUSED (DWG_ERR_VALUEOUTOFBOUNDS), REFUSED (DWG_ERR_INVALIDHANDLE),
+    REFUSED (DWG_ERR_NOTYETSUPPORTED), REFUSED (DWG_ERR_NOTYETSUPPORTED),
+    REFUSED (DWG_ERR_INVALIDHANDLE),   REFUSED (DWG_ERR_INVALIDHANDLE)
+  };
+  static const char *names[ORIGIN_CASES] = {
+    "placed at its defaults",
+    "placed at Width 33",
+    "a POINT",
+    "a POINT, the base point at the origin",
+    "a base point that isn't finite",
+    "a grip moved beyond a double",
+    "a LINE moved beyond a double",
+    "an entity listed twice",
+    "a base point above the plane of its TEXT",
+    "a MINSERT of it",
+    "a graph element two nodes name",
+    "an INSERT listing its ATTRIB twice",
+  };
+  int error, failures = 0;
+  error = dwg_dynblock_move_to_origin (NULL);
+  CHECK (error == REFUSED (DWG_ERR_INTERNALERROR),
+         "origin refused: a NULL block (0x%x)", error);
+  for (int c = 0; c < ORIGIN_CASES; c++)
+    {
+      BITCODE_RLL h[BOX_ENTITIES], rh[BOX_ENTITIES], blk = 0, ref_blk = 0;
+      Dwg_Data *ref_dwg = origin_box (&ref_blk, rh);
+      Dwg_Data *dwg = origin_box (&blk, h);
+      if (!ref_dwg || !dwg || blk != ref_blk || origin_case (ref_dwg, blk, c)
+          || origin_case (dwg, blk, c))
+        {
+          FAIL ("origin refused: %s: building the block failed", names[c]);
+          failures++;
+        }
+      else
+        {
+          error = dwg_dynblock_move_to_origin (block_header (dwg, blk));
+          loglevel = test_loglevel;
+          // a NAN base point isn't equal to itself; the bytes are
+          CHECK (error == expected[c] && origin_unchanged (ref_dwg, dwg, blk),
+                 "origin %s: %s, nothing changed (0x%x)",
+                 expected[c] ? "refused" : "left as it is", names[c], error);
+        }
+      if (ref_dwg)
+        free_document (ref_dwg);
+      if (dwg)
+        free_document (dwg);
+    }
+  {
+    Dwg_Data *dwg = new_document ();
+    if (dwg)
+      dwg->header_vars.INSBASE.x = 5.0;
+    error = dwg ? dwg_dynblock_move_to_origin (
+                      dwg_paper_space_object (dwg)->tio.object->tio.BLOCK_HEADER)
+                : 0;
+    loglevel = test_loglevel;
+    CHECK (dwg && error == REFUSED (DWG_ERR_INVALIDTYPE)
+               && dwg->header_vars.INSBASE.x == 5.0,
+           "origin refused: paper space (0x%x)", error);
+    if (dwg)
+      free_document (dwg);
+  }
+  {
+    // with no entities and no graph, nothing else refuses it
+    Dwg_Data *dwg = new_document ();
+    Dwg_Object_BLOCK_HEADER *empty
+        = dwg ? dwg_add_BLOCK_HEADER (dwg, "EMPTY") : NULL;
+    if (empty && (!dwg_add_BLOCK (empty, "EMPTY") || !dwg_add_ENDBLK (empty)))
+      empty = NULL;
+    loglevel = test_loglevel;
+    if (empty)
+      empty->base_pt.y = (double)NAN;
+    error = empty ? dwg_dynblock_move_to_origin (empty) : 0;
+    loglevel = test_loglevel;
+    CHECK (empty && error == REFUSED (DWG_ERR_VALUEOUTOFBOUNDS)
+               && isnan (empty->base_pt.y),
+           "origin refused: an empty block whose base point isn't finite "
+           "(0x%x)",
+           error);
+    if (dwg)
+      free_document (dwg);
+  }
+  {
+    Dwg_Data *dwg = dwg_new_Document (R_2000, 0, tracelevel);
+    loglevel = test_loglevel;
+    if (dwg)
+      dwg->header_vars.INSBASE.x = 5.0;
+    error = dwg ? dwg_dynblock_move_to_origin (model_space (dwg)) : 0;
+    loglevel = test_loglevel;
+    CHECK (dwg && error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+               && dwg->header_vars.INSBASE.x == 5.0,
+           "origin refused: an r2000 drawing (0x%x)", error);
+    if (dwg)
+      free_document (dwg);
+  }
+  {
+    const BITCODE_RLL defs[2] = { TOILET, DOOR };
+    const char *what[2] = { "Toilet, with a rotate action",
+                            "Door, with a scale action and a base point "
+                            "parameter" };
+    for (int i = 0; i < 2; i++)
+      {
+        Dwg_Data *ref_dwg = new_document ();
+        Dwg_Data *dwg = new_document ();
+        Dwg_Object_BLOCK_HEADER *a = NULL, *b = NULL;
+        int ref_error = 0, copy_error = 0;
+        if (ref_dwg && dwg)
+          {
+            a = dwg_dynblock_copy_block (ref_dwg, src,
+                                         block_header (src, defs[i]),
+                                         &ref_error);
+            b = dwg_dynblock_copy_block (dwg, src,
+                                         block_header (src, defs[i]),
+                                         &copy_error);
+          }
+        loglevel = test_loglevel;
+        if (!a || !b || ref_error >= DWG_ERR_CRITICAL
+            || copy_error >= DWG_ERR_CRITICAL)
+          {
+            FAIL ("origin refused: %s: copying it failed (0x%x)", what[i],
+                  ref_error | copy_error);
+            failures++;
+          }
+        else
+          {
+            const BITCODE_3BD *r0, *n0;
+            a->base_pt = origin_base;
+            b->base_pt = origin_base;
+            error = dwg_dynblock_move_to_origin (b);
+            loglevel = test_loglevel;
+            r0 = first_param_end (ref_dwg, handle_of (ref_dwg, a));
+            n0 = first_param_end (dwg, handle_of (dwg, b));
+            CHECK (error == REFUSED (DWG_ERR_NOTYETSUPPORTED)
+                       && !memcmp (&b->base_pt, &origin_base,
+                                   sizeof (BITCODE_3BD))
+                       && entities_moved (ref_dwg, a, dwg, b, 0.0, 0.0)
+                       && r0 && n0 && moved_3d (r0, n0, 0.0, 0.0),
+                   "origin refused: %s, nothing changed (0x%x)", what[i],
+                   error);
+          }
+        if (ref_dwg)
+          free_document (ref_dwg);
+        if (dwg)
+          free_document (dwg);
+      }
+  }
+  return failures;
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -3770,6 +4833,11 @@ main (int argc, char *argv[])
   failures += test_far_frame ();
   failures += test_copy_turned_over ();
   failures += test_graph_read_from_dwg (&src);
+  failures += test_origin_block ();
+  failures += test_origin_model_space ();
+  failures += test_origin_autocad (&src);
+  failures += test_origin_read_from_dwg (&src);
+  failures += test_origin_refusals (&src);
   free_dwg (&src);
   return failures ? 1 : 0;
 }

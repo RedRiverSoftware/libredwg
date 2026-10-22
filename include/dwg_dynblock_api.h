@@ -18,9 +18,10 @@
  * and evaluate a definition at chosen values into the geometry of a
  * representation block, with a check of that evaluation against the
  * representation blocks AutoCAD stored in a drawing; place a definition at
- * chosen values, as AutoCAD stores a placement; and give a block a linear
+ * chosen values, as AutoCAD stores a placement; give a block a linear
  * property with stretch and move actions, as AutoCAD's Block Editor
- * stores them.
+ * stores them; and move a block's contents so that its base point is the
+ * origin, as a drawing that AutoCAD inserts as a dynamic block needs.
  *
  * A dynamic block definition is a block whose extension dictionary holds
  * an EVALUATION_GRAPH under ACAD_ENHANCEDBLOCK. Its parameters are the
@@ -900,6 +901,63 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
                        const BITCODE_RLL *objects,
                        const BITCODE_BL num_objects, const double multiplier,
                        int *errorp);
+
+/* Moves the contents of block blk so that its base point is the origin:
+   its entities, and the points of the parameters, grips and actions of
+   its evaluation graph, move by minus its base point, which becomes
+   (0, 0, 0). An INSERT of blk then draws it where it did. blk may be
+   model space, whose base point is the drawing's INSBASE, or a block
+   definition, dynamic or not. A block whose base point is the origin is
+   left as it is.
+
+   A drawing whose model space holds a dynamic block, as AutoCAD's WBLOCK
+   writes one, needs its INSBASE at the origin: AutoCAD inserts the
+   drawing as a block by moving its entities by minus its INSBASE, and
+   leaves the parameters, grips and actions where they are, so that their
+   grips are drawn off the geometry by INSBASE. A block definition's base
+   point AutoCAD takes into account for the grips too; the dynamic block
+   definitions it makes have it at the origin.
+
+   Entities move whole, as dwg_dynblock_evaluate () moves them, with the
+   ATTRIBs an INSERT owns. The points that move are a linear parameter's
+   base and end points, a visibility parameter's point, the location of
+   their grips, an action's display location, and a stretch action's
+   frame. A linear grip's orientation, a vector, and an action's offsets
+   stay as they are. So does what looks at model space from elsewhere:
+   the drawing's viewports, layout viewports included, its named views and
+   UCSs, its limits and its record of its extents. A stretch action read
+   from a file is written from its fields once moved, not from the raw
+   bits it was read with.
+
+   Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
+   not a BLOCK_HEADER of its document, an entry of its entity list that doesn't
+   resolve to an entity, a node of its evaluation graph that doesn't resolve
+   or isn't a parameter, action, grip or grip location component, or an
+   entity, an ATTRIB an INSERT owns or a graph element that the move would
+   reach twice (DWG_ERR_INVALIDHANDLE); a drawing other than
+   r2004, a constraint-based (parametric) block as for dwg_dynblock_add_linear
+   (), a block with placements (an INSERT or MINSERT of it, or a
+   representation block of it, which a placement at values other than the
+   defaults draws), whose stored data hold its points as they are, an entity
+   of a type the move doesn't handle, which are those dwg_dynblock_copy_entities
+   () moves, or one whose 2D points the move would take out of their plane,
+   or a node of another class, among them base point parameters and rotate and
+   scale actions, whose stored points AutoCAD's files have only shown at the
+   origin (DWG_ERR_NOTYETSUPPORTED); a node of a class LibreDWG can't decode
+   (DWG_ERR_UNHANDLEDCLASS); paper space or another layout block, an xref or a
+   block that depends on one (DWG_ERR_INVALIDTYPE); a base point that isn't
+   finite, or a move that could take a coordinate beyond what a double
+   holds, which for an entity is checked as dwg_dynblock_copy_entities ()
+   checks it, its largest coordinate plus the move's size
+   (DWG_ERR_VALUEOUTOFBOUNDS); a graph whose nodes and edges index nodes or
+   edges it doesn't have (no further bit). Each refusal is DWG_ERR_INVALIDDWG
+   with the bit given, logged at LOG_ERROR but for a NULL argument. In a
+   LibreDWG built without write support, all are refused
+   (DWG_ERR_NOTYETSUPPORTED).
+
+   @return 0, or the DWG_ERR_* bits of a refusal, or DWG_ERR_OUTOFMEM, with
+           nothing changed. */
+EXPORT int dwg_dynblock_move_to_origin (Dwg_Object_BLOCK_HEADER *blk);
 
 /* The name of a kind, such as "linear", or "unknown". */
 EXPORT const char *dwg_dynparam_kind_name (const Dwg_DynParam_Kind kind);
