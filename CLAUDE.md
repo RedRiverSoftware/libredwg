@@ -117,9 +117,10 @@ submodule, and rewritten SHAs break that pin.
   itself), so without the new tag the version is the previous tag's with
   a long commit count (`<previous tag>.<commits>_<hash>`). If the merge
   changed `LIBREDWG_VERSION_MAJOR` or `LIBREDWG_VERSION_MINOR` in
-  `include/dwg.h`, `add_test`'s `test_api_version` then fails in every
-  `linux` job but `--disable-write`, which does not build it; otherwise
-  CI passes with the wrong version. Check the `checking PACKAGE_VERSION`
+  `include/dwg.h`, `add_test`'s `test_api_version` then fails in the
+  `linux` jobs that run it (all but `--disable-write`, which does not
+  build it, and `--enable-debug`, which runs no tests); otherwise CI
+  passes with the wrong version. Check the `checking PACKAGE_VERSION`
   line in the `linux (--enable-release)` job log. The tag push also
   triggers upstream's workflow, which publishes a GitHub Release for it;
   cancel that run, or delete the Release (keep the tag).
