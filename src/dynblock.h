@@ -119,6 +119,12 @@ int dynblock_stretch_point (const Dwg_Object *obj, const BITCODE_BL i,
    block definition. */
 Dwg_Object *dynblock_graph (const Dwg_Data *dwg, const Dwg_Object *obj);
 
+/* The definition named by the AcDbBlockRepBTag EED of block obj, which
+   makes obj a representation block that placements of the definition
+   draw, or 0. */
+BITCODE_RLL dynblock_btag_definition (const Dwg_Data *dwg,
+                                      const Dwg_Object *obj);
+
 /* Whether obj is of a type of evaluation graph node the evaluator takes: a
    parameter, an action, a grip, a grip location component or a proxy
    node, whose struct starts with the evaluation expression. */

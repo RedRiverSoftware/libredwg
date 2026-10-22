@@ -683,6 +683,19 @@ make_definition (Dwg_Data *dwg, const BITCODE_RLL blk_handle,
  * The evaluation graph
  */
 
+/* Drops the raw bits that obj was read with, which the encoder writes as
+   they were read when the drawing is written in the version it was read
+   in. A changed object must be written from its fields, which give
+   AutoCAD's bits for the evaluation graph and the stretch actions LibreDWG
+   reads with their raw bits (dynblocks_test). */
+static void
+drop_raw_bits (Dwg_Object *obj)
+{
+  free (obj->unknown_bits);
+  obj->unknown_bits = NULL;
+  obj->num_unknown_bits = 0;
+}
+
 static Dwg_Object_EVALUATION_GRAPH *
 graph_of (const Dwg_Data *dwg, const BITCODE_RLL graph_handle)
 {
@@ -1201,6 +1214,38 @@ refused_linear (int *errorp, const int error)
  * The API
  */
 
+/* Refuses, for function func, a move of entity obj of dwg by delta that
+   the evaluator's whole-entity move doesn't make: of an entity of another
+   type, out of the plane of its 2D points, or with its largest coordinate
+   plus the move's size beyond what a double holds. */
+static int
+check_entity_move (const Dwg_Data *dwg, const Dwg_Object *obj,
+                   const BITCODE_3BD *delta, const char *func)
+{
+  const double size = fabs (delta->x) + fabs (delta->y) + fabs (delta->z);
+  if (!dynblock_is_movable (obj))
+    {
+      LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
+                 dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (dynblock_leaves_plane (dwg, obj, delta))
+    {
+      LOG_ERROR ("%s: moving %s " FORMAT_HV " out of its plane is not "
+                 "supported",
+                 func, dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  if (!isfinite (dynblock_entity_reach (dwg, obj) + size))
+    {
+      LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond what a "
+                 "double holds",
+                 func, dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+    }
+  return 0;
+}
+
 /* The handles of the entities of block blkobj of src into a new array
    *topsp, of *nump, after checking that each resolves, and when the
    copies move by delta, that the evaluator's move takes it. */
@@ -1211,7 +1256,6 @@ entities_to_copy (const Dwg_Data *src, const Dwg_Object *blkobj,
 {
   const Dwg_Object_BLOCK_HEADER *blk = blkobj->tio.object->tio.BLOCK_HEADER;
   const int moves = delta->x != 0.0 || delta->y != 0.0 || delta->z != 0.0;
-  const double size = fabs (delta->x) + fabs (delta->y) + fabs (delta->z);
   BITCODE_RLL *tops;
   BITCODE_BL n = 0;
   *topsp = NULL;
@@ -1231,27 +1275,9 @@ entities_to_copy (const Dwg_Data *src, const Dwg_Object *blkobj,
                      handle);
           error = AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
         }
-      else if (moves && !dynblock_is_movable (obj))
-        {
-          LOG_ERROR ("dwg_dynblock_copy_entities: moving %s " FORMAT_HV
-                     " is not supported",
-                     dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-        }
-      else if (moves && dynblock_leaves_plane (src, obj, delta))
-        {
-          LOG_ERROR ("dwg_dynblock_copy_entities: moving %s " FORMAT_HV
-                     " out of its plane is not supported",
-                     dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-        }
-      else if (moves && !isfinite (dynblock_entity_reach (src, obj) + size))
-        {
-          LOG_ERROR ("dwg_dynblock_copy_entities: the move would take "
-                     "%s " FORMAT_HV " beyond what a double holds",
-                     dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-        }
+      else if (moves)
+        error = check_entity_move (src, obj, delta,
+                                   "dwg_dynblock_copy_entities");
       if (error)
         {
           free (tops);
@@ -1576,11 +1602,8 @@ dwg_dynblock_add_linear (Dwg_Object_BLOCK_HEADER *blk, const char *name,
       {
         graph = graph_of (dwg, ab.graph);
         // a node read with the graph's raw bits must be written from its
-        // fields now, which give AutoCAD's bits (dynblocks_test)
-        obj = handle_object (dwg, ab.graph);
-        free (obj->unknown_bits);
-        obj->unknown_bits = NULL;
-        obj->num_unknown_bits = 0;
+        // fields now
+        drop_raw_bits (handle_object (dwg, ab.graph));
         first = graph->num_nodes;
         for (int k = 0; !error && k < 4; k++)
           {
@@ -1701,13 +1724,9 @@ add_action (Author_Block *ab, Dwg_Object *obj, const int index,
   Dwg_Object_BLOCKMOVEACTION *_a = obj->tio.object->tio.BLOCKMOVEACTION;
   const BITCODE_BL param_id = (BITCODE_BL)graph->nodes[index].nextid;
   const BITCODE_BL node = graph->num_nodes;
-  Dwg_Object *graphobj = handle_object (dwg, ab->graph);
   int error;
-  // a graph read with its raw bits must be written from its fields now,
-  // which give AutoCAD's bits (dynblocks_test)
-  free (graphobj->unknown_bits);
-  graphobj->unknown_bits = NULL;
-  graphobj->num_unknown_bits = 0;
+  // a graph read with its raw bits must be written from its fields now
+  drop_raw_bits (handle_object (dwg, ab->graph));
   error = set_owner (dwg, obj, ab->graph, 0);
   if (error)
     return error;
@@ -2381,31 +2400,6 @@ node_points (Dwg_Object *obj, Author_Node_Points *p)
     }
 }
 
-/* The definition named by the AcDbBlockRepBTag EED of block obj, which
-   makes obj a representation block that placements of the definition
-   draw, or 0. */
-static BITCODE_RLL
-btag_definition (const Dwg_Data *dwg, const Dwg_Object *obj)
-{
-  const Dwg_Object_Object *o = obj->tio.object;
-  const int start = find_group (dwg, o->eed, o->num_eed, "AcDbBlockRepBTag");
-  BITCODE_RLL handle = 0;
-  if (start < 0)
-    return 0;
-  for (BITCODE_BL i = (BITCODE_BL)start; i < o->num_eed; i++)
-    {
-      if (i > (BITCODE_BL)start && o->eed[i].size)
-        break;
-      if (o->eed[i].data && o->eed[i].data->code == 5)
-        {
-          // Dwg_Eed_Data is packed
-          memcpy (&handle, &o->eed[i].data->u.eed_5.entity, sizeof (handle));
-          break;
-        }
-    }
-  return handle;
-}
-
 /* Whether a placement of block blk_handle is in dwg: an INSERT or MINSERT
    of it, or a representation block of it, which its placements at values
    other than the defaults draw. */
@@ -2423,16 +2417,63 @@ has_placements (const Dwg_Data *dwg, const BITCODE_RLL blk_handle)
                && obj->tio.entity->tio.MINSERT)
         drawn = ref_handle (obj->tio.entity->tio.MINSERT->block_header);
       else if (obj->fixedtype == DWG_TYPE_BLOCK_HEADER && obj->tio.object)
-        drawn = btag_definition (dwg, obj);
+        drawn = dynblock_btag_definition (dwg, obj);
       if (drawn == blk_handle)
         return 1;
     }
   return 0;
 }
 
-/* Checks that the contents of ab's block move by delta: each entity once,
-   of a type the evaluator moves whole, staying in its plane, and each node
-   of its graph of a class whose points move, all within what a double
+/* Refuses, for function func, an object that the move would reach twice,
+   as seen, which holds those it has reached, says; else adds it there. */
+static int
+reached_once (dwg_inthash *seen, const BITCODE_RLL handle, const char *func)
+{
+  if (hash_get (seen, handle) != HASH_NOT_FOUND)
+    {
+      LOG_ERROR ("%s: " FORMAT_HV " is listed twice, so the move would move "
+                 "it twice",
+                 func, handle);
+      return AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
+    }
+  hash_set (seen, handle, 1);
+  return 0;
+}
+
+/* Checks the move of graph node obj by delta: of a class whose points
+   move, within what a double holds. */
+static int
+check_node_move (Dwg_Object *obj, const BITCODE_3BD *delta, const char *func)
+{
+  Author_Node_Points p;
+  int finite = 1;
+  if (!node_points (obj, &p))
+    {
+      LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
+                 dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
+    }
+  for (int k = 0; k < p.num_pts; k++)
+    finite = finite && isfinite (p.pts[k]->x + delta->x)
+             && isfinite (p.pts[k]->y + delta->y)
+             && isfinite (p.pts[k]->z + delta->z);
+  for (BITCODE_BL k = 0; k < p.num_frame; k++)
+    finite = finite && isfinite (p.frame[k].x + delta->x)
+             && isfinite (p.frame[k].y + delta->y);
+  if (!finite)
+    {
+      LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond what a "
+                 "double holds",
+                 func, dwg_type_name (obj->fixedtype), obj->handle.value);
+      return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
+    }
+  return 0;
+}
+
+/* Checks that the contents of ab's block move by delta: each entity, each
+   ATTRIB an INSERT owns and each node of its graph reached once, the
+   entities of types the evaluator moves whole, staying in their plane,
+   and the nodes of classes whose points move, all within what a double
    holds. */
 static int
 check_contents (const Author_Block *ab, const BITCODE_3BD *delta,
@@ -2440,7 +2481,8 @@ check_contents (const Author_Block *ab, const BITCODE_3BD *delta,
 {
   const Dwg_Object_BLOCK_HEADER *blk
       = handle_object (ab->dwg, ab->blk)->tio.object->tio.BLOCK_HEADER;
-  const double size = fabs (delta->x) + fabs (delta->y) + fabs (delta->z);
+  const Dwg_Object_EVALUATION_GRAPH *graph
+      = ab->graph ? graph_of (ab->dwg, ab->graph) : NULL;
   dwg_inthash *seen = hash_new (blk->num_owned * 2 + 8);
   int error = 0;
   if (!seen)
@@ -2455,71 +2497,32 @@ check_contents (const Author_Block *ab, const BITCODE_3BD *delta,
                      "entity",
                      func, handle);
           error = AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
+          break;
         }
-      else if (hash_get (seen, handle) != HASH_NOT_FOUND)
+      error = reached_once (seen, handle, func);
+      if (!error)
+        error = check_entity_move (ab->dwg, obj, delta, func);
+      // the evaluator's move takes an INSERT's ATTRIBs with it
+      if (!error && obj->fixedtype == DWG_TYPE_INSERT)
         {
-          LOG_ERROR ("%s: entity " FORMAT_HV " is listed twice in blk", func,
-                     handle);
-          error = AUTHOR_REFUSED | DWG_ERR_INVALIDHANDLE;
+          const Dwg_Entity_INSERT *_obj = obj->tio.entity->tio.INSERT;
+          for (BITCODE_BL k = 0;
+               !error && _obj->attribs && k < _obj->num_owned; k++)
+            if (ref_handle (_obj->attribs[k]))
+              error
+                  = reached_once (seen, ref_handle (_obj->attribs[k]), func);
         }
-      else if (!dynblock_is_movable (obj))
-        {
-          LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
-                     dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-        }
-      else if (dynblock_leaves_plane (ab->dwg, obj, delta))
-        {
-          LOG_ERROR ("%s: moving %s " FORMAT_HV " out of its plane is not "
-                     "supported",
-                     func, dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-        }
-      else if (!isfinite (dynblock_entity_reach (ab->dwg, obj) + size))
-        {
-          LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond what "
-                     "a double holds",
-                     func, dwg_type_name (obj->fixedtype), handle);
-          error = AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-        }
-      else
-        hash_set (seen, handle, 1);
+    }
+  // check_graph () has checked that each node resolves
+  for (BITCODE_BL i = 0; !error && graph && i < graph->num_nodes; i++)
+    {
+      Dwg_Object *obj = node_object (ab->dwg, graph, i);
+      error = reached_once (seen, obj->handle.value, func);
+      if (!error)
+        error = check_node_move (obj, delta, func);
     }
   hash_free (seen);
-  if (error || !ab->graph)
-    return error;
-  {
-    const Dwg_Object_EVALUATION_GRAPH *graph = graph_of (ab->dwg, ab->graph);
-    for (BITCODE_BL i = 0; i < graph->num_nodes; i++)
-      {
-        // check_graph () has checked that each node resolves
-        Dwg_Object *obj = node_object (ab->dwg, graph, i);
-        Author_Node_Points p;
-        int finite = 1;
-        if (!node_points (obj, &p))
-          {
-            LOG_ERROR ("%s: moving %s " FORMAT_HV " is not supported", func,
-                       dwg_type_name (obj->fixedtype), obj->handle.value);
-            return AUTHOR_REFUSED | DWG_ERR_NOTYETSUPPORTED;
-          }
-        for (int k = 0; k < p.num_pts; k++)
-          finite = finite && isfinite (p.pts[k]->x + delta->x)
-                   && isfinite (p.pts[k]->y + delta->y)
-                   && isfinite (p.pts[k]->z + delta->z);
-        for (BITCODE_BL k = 0; k < p.num_frame; k++)
-          finite = finite && isfinite (p.frame[k].x + delta->x)
-                   && isfinite (p.frame[k].y + delta->y);
-        if (!finite)
-          {
-            LOG_ERROR ("%s: the move would take %s " FORMAT_HV " beyond "
-                       "what a double holds",
-                       func, dwg_type_name (obj->fixedtype),
-                       obj->handle.value);
-            return AUTHOR_REFUSED | DWG_ERR_VALUEOUTOFBOUNDS;
-          }
-      }
-  }
-  return 0;
+  return error;
 }
 
 EXPORT int
@@ -2584,11 +2587,8 @@ dwg_dynblock_move_to_origin (Dwg_Object_BLOCK_HEADER *blk)
               if (!p.num_pts && !p.num_frame)
                 continue;
               // a node read with its raw bits, as a stretch action is,
-              // would be written as it was read: it must be written from
-              // its fields now, which give AutoCAD's bits (dynblocks_test)
-              free (obj->unknown_bits);
-              obj->unknown_bits = NULL;
-              obj->num_unknown_bits = 0;
+              // must be written from its fields now
+              drop_raw_bits (obj);
               for (int k = 0; k < p.num_pts; k++)
                 {
                   p.pts[k]->x += delta.x;

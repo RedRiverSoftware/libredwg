@@ -923,15 +923,18 @@ dwg_dynblock_add_move (Dwg_Object_BLOCK_HEADER *blk,
    base and end points, a visibility parameter's point, the location of
    their grips, an action's display location, and a stretch action's
    frame. A linear grip's orientation, a vector, and an action's offsets
-   stay as they are, as do the drawing's views, its limits and its record
-   of its extents. A stretch action read from a file is written from its
-   fields once moved, not from the raw bits it was read with.
+   stay as they are. So does what looks at model space from elsewhere:
+   the drawing's viewports, layout viewports included, its named views and
+   UCSs, its limits and its record of its extents. A stretch action read
+   from a file is written from its fields once moved, not from the raw
+   bits it was read with.
 
    Refused, with nothing changed: a NULL argument (DWG_ERR_INTERNALERROR); blk
    not a BLOCK_HEADER of its document, an entry of its entity list that doesn't
-   resolve to an entity or names one listed before, or a node of its
-   evaluation graph that doesn't resolve or isn't a parameter, action, grip or
-   grip location component (DWG_ERR_INVALIDHANDLE); a drawing other than
+   resolve to an entity, a node of its evaluation graph that doesn't resolve
+   or isn't a parameter, action, grip or grip location component, or an
+   entity, an ATTRIB an INSERT owns or a graph element that the move would
+   reach twice (DWG_ERR_INVALIDHANDLE); a drawing other than
    r2004, a constraint-based (parametric) block as for dwg_dynblock_add_linear
    (), a block with placements (an INSERT or MINSERT of it, or a
    representation block of it, which a placement at values other than the

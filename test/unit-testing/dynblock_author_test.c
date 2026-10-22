@@ -4477,7 +4477,10 @@ enum
   ORIGIN_FAR_GRIP,   /* a grip the move takes beyond a double */
   ORIGIN_FAR_LINE,   /* a LINE the move takes beyond a double */
   ORIGIN_TWICE,      /* an entity listed twice */
-  ORIGIN_RAISED,     /* a base point above the plane of its CIRCLE */
+  ORIGIN_RAISED,     /* a base point above the plane of its TEXT */
+  ORIGIN_MINSERT,    /* a MINSERT of it */
+  ORIGIN_NODE_TWICE, /* a graph element two nodes name */
+  ORIGIN_ATTRIB_TWICE, /* an INSERT listing its ATTRIB twice */
   ORIGIN_CASES
 };
 
@@ -4537,6 +4540,49 @@ origin_case (Dwg_Data *dwg, const BITCODE_RLL blk, const int c)
     case ORIGIN_RAISED:
       b->base_pt.z = 2.0;
       break;
+    case ORIGIN_MINSERT:
+      error = !dwg_add_MINSERT (model_space (dwg), &o, "BOX", 1, 1, 1, 0, 2,
+                                2, 1, 1);
+      break;
+    case ORIGIN_NODE_TWICE:
+      {
+        // the Width's grip, node 1, named by another node too
+        Dwg_Object_EVALUATION_GRAPH *graph = graph_of (dwg, blk);
+        Dwg_EVAL_Node *nodes = (Dwg_EVAL_Node *)realloc (
+            graph->nodes, (graph->num_nodes + 1) * sizeof (Dwg_EVAL_Node));
+        if (!nodes)
+          return 1;
+        graph->nodes = nodes;
+        nodes[graph->num_nodes] = nodes[1];
+        nodes[graph->num_nodes].id = graph->num_nodes;
+        nodes[graph->num_nodes].evalexpr
+            = dwg_add_handleref (dwg, 3, ref (nodes[1].evalexpr), NULL);
+        graph->num_nodes++;
+      }
+      break;
+    case ORIGIN_ATTRIB_TWICE:
+      {
+        // the INSERT of MARK
+        Dwg_Entity_INSERT *ins = NULL;
+        BITCODE_H *attribs;
+        for (BITCODE_BL i = 0; i < b->num_owned; i++)
+          {
+            Dwg_Object *e = object (dwg, ref (b->entities[i]));
+            if (e && e->fixedtype == DWG_TYPE_INSERT)
+              ins = e->tio.entity->tio.INSERT;
+          }
+        if (!ins || !ins->num_owned || !ins->attribs)
+          return 1;
+        attribs = (BITCODE_H *)realloc (
+            ins->attribs, (ins->num_owned + 1) * sizeof (BITCODE_H));
+        if (!attribs)
+          return 1;
+        ins->attribs = attribs;
+        attribs[ins->num_owned]
+            = dwg_add_handleref (dwg, 4, ref (attribs[0]), NULL);
+        ins->num_owned++;
+      }
+      break;
     default:
       break;
     }
@@ -4574,10 +4620,12 @@ first_param_end (const Dwg_Data *dwg, const BITCODE_RLL blk)
 }
 
 /* dwg_dynblock_move_to_origin () refuses, changing nothing: a NULL block; a
-   definition with placements; a POINT, or another entity the evaluator
-   doesn't move; a base point that isn't finite, or a move beyond what a
-   double holds, of a grip or of an entity; an entity listed twice; a
-   CIRCLE the move would take out of its plane; paper space; a drawing other
+   definition with placements (an INSERT, a MINSERT, or a representation
+   block); a POINT, or another entity the evaluator doesn't move; a base
+   point that isn't finite, or a move beyond what a double holds, of a grip
+   or of an entity; an entity, an ATTRIB or a graph element the move would
+   reach twice; a TEXT the move would take out of its plane; paper space; a
+   drawing other
    than r2004; and a definition with a rotate action (the fixture's
    Toilet), or with a scale action and a base point parameter (its Door),
    whose stored points AutoCAD's files have only shown at the origin. A
@@ -4591,7 +4639,8 @@ test_origin_refusals (Dwg_Data *src)
     REFUSED (DWG_ERR_NOTYETSUPPORTED), 0,
     REFUSED (DWG_ERR_VALUEOUTOFBOUNDS), REFUSED (DWG_ERR_VALUEOUTOFBOUNDS),
     REFUSED (DWG_ERR_VALUEOUTOFBOUNDS), REFUSED (DWG_ERR_INVALIDHANDLE),
-    REFUSED (DWG_ERR_NOTYETSUPPORTED)
+    REFUSED (DWG_ERR_NOTYETSUPPORTED), REFUSED (DWG_ERR_NOTYETSUPPORTED),
+    REFUSED (DWG_ERR_INVALIDHANDLE),   REFUSED (DWG_ERR_INVALIDHANDLE)
   };
   static const char *names[ORIGIN_CASES] = {
     "placed at its defaults",
@@ -4602,7 +4651,10 @@ test_origin_refusals (Dwg_Data *src)
     "a grip moved beyond a double",
     "a LINE moved beyond a double",
     "an entity listed twice",
-    "a base point above the plane of its CIRCLE",
+    "a base point above the plane of its TEXT",
+    "a MINSERT of it",
+    "a graph element two nodes name",
+    "an INSERT listing its ATTRIB twice",
   };
   int error, failures = 0;
   error = dwg_dynblock_move_to_origin (NULL);
